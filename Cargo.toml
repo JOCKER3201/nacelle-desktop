@@ -1,0 +1,42 @@
+[package]
+name = "ng-term"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Nowoczesna alternatywa dla eDEX-UI — Rust + Vulkan, wygląd 1:1"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+# Okno + zdarzenia
+winit = "0.29"
+raw-window-handle = "0.6"
+
+# Vulkan
+ash = "0.38"
+ash-window = "0.13"
+
+# Kompilacja WGSL -> SPIR-V w czasie startu (czysty Rust, bez glslc/shaderc)
+naga = { version = "0.19", features = ["wgsl-in", "spv-out"] }
+
+# Rasteryzacja fontów
+fontdue = "0.8"
+
+# Parser sekwencji ANSI/VT
+vte = "0.13"
+unicode-width = "0.1"
+
+# Informacje systemowe (CPU, RAM, procesy, sieć)
+sysinfo = "0.30"
+
+# PTY / fork / exec
+libc = "0.2"
+
+# Zegar / data
+chrono = "0.4"
+
+# Wczytywanie motywów eDEX-UI (*.json)
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+opt-level = 3
