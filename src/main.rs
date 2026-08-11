@@ -492,18 +492,22 @@ fn main() {
 
     let mut dl = draw::DrawList::new();
 
-    // ---- the decoration plate (theme::plate, r1 §8 / DECISION M10) ----
-    // The theme's static backdrop decoration — PCB traces, grid,
-    // vignette — CPU-baked into ONE screen-sized RGBA image and drawn
-    // as a single quad under everything else, inside the glass
-    // snapshot. Registered through the renderer's ordinary image path;
-    // rebaked on a WORKER thread when the theme epoch or the surface
-    // size changes (measured 5.2 ms at 2560x1440 with aurora's traces,
-    // release), never per frame. `None` — the theme turned every layer
-    // off, and the raw run draws no plate at all.
-    let mut plate_tex: Option<(draw::ImageId, u32, u32)> = None;
+    // ---- the decoration plates (theme::plate, r1 §8 / DECISION M10) ----
+    // The theme's static decoration, CPU-baked into TWO screen-sized
+    // RGBA images: the BACKDROP plate (traces, grid, starfield, bottom
+    // vignette) drawn as one quad under everything else, inside the
+    // glass snapshot, and the OVERLAY plate (scanlines, grain, top
+    // vignette) drawn as one quad over everything themed — z 70.
+    // Registered through the renderer's ordinary image path; rebaked on
+    // a WORKER thread when the theme epoch or the surface size changes
+    // (measured 5.2 ms at 2560x1440 with aurora's traces, release),
+    // never per frame. `None` — the theme turned every layer of that
+    // plate off, and the raw run draws no quad for it at all.
+    let mut plate_tex: Option<(draw::ImageId, u32, u32)> = None; // backdrop
+    let mut overlay_tex: Option<(draw::ImageId, u32, u32)> = None; // overlay
     let mut plate_key: Option<(u32, u32, u32)> = None; // (epoch, w, h) last kicked
-    let mut plate_rx: Option<Receiver<Option<nacelle::theme::Plate>>> = None;
+    type PlatePair = (Option<nacelle::theme::Plate>, Option<nacelle::theme::Plate>);
+    let mut plate_rx: Option<Receiver<PlatePair>> = None;
 
     let start = Instant::now();
     let mut mods = ModifiersState::empty();
@@ -1646,44 +1650,58 @@ fn main() {
                             // frame's epoch check. A stale worker's send
                             // fails into a dropped receiver, silently.
                             std::thread::spawn(move || {
-                                let _ = tx.send(theme::plate::bake_backdrop(pw, ph));
+                                let _ = tx.send((
+                                    theme::plate::bake_backdrop(pw, ph),
+                                    theme::plate::bake_overlay(pw, ph),
+                                ));
                             });
                         }
-                        if let Some(baked) =
+                        if let Some((back, over)) =
                             plate_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                         {
                             plate_rx = None;
-                            match baked {
-                                Some(p) => {
-                                    let stale = match plate_tex {
-                                        Some((_, tw, th)) => (tw, th) != (p.w, p.h),
-                                        None => true,
-                                    };
-                                    if stale {
-                                        // destroy_texture waits for the
-                                        // device — theme swap and resize
-                                        // only, never a steady frame.
-                                        if let Some((old, _, _)) = plate_tex.take() {
-                                            gfx.destroy_texture(old);
+                            let mut install =
+                                |tex: &mut Option<(draw::ImageId, u32, u32)>,
+                                 baked: Option<nacelle::theme::Plate>,
+                                 which: &str| {
+                                    match baked {
+                                        Some(p) => {
+                                            let stale = match *tex {
+                                                Some((_, tw, th)) => (tw, th) != (p.w, p.h),
+                                                None => true,
+                                            };
+                                            if stale {
+                                                // destroy_texture waits for
+                                                // the device — theme swap and
+                                                // resize only, never a steady
+                                                // frame.
+                                                if let Some((old, _, _)) = tex.take() {
+                                                    gfx.destroy_texture(old);
+                                                }
+                                                *tex = Some((
+                                                    gfx.create_texture(p.w, p.h),
+                                                    p.w,
+                                                    p.h,
+                                                ));
+                                            }
+                                            if let Some((id, _, _)) = *tex {
+                                                gfx.update_texture(id, &p.rgba);
+                                            }
+                                            eprintln!(
+                                                "nacelle-desktop: {which} plate {}x{} baked in {:.1} ms",
+                                                p.w, p.h, p.bake_ms
+                                            );
                                         }
-                                        plate_tex =
-                                            Some((gfx.create_texture(p.w, p.h), p.w, p.h));
+                                        // Every layer off: no plate, no quad.
+                                        None => {
+                                            if let Some((old, _, _)) = tex.take() {
+                                                gfx.destroy_texture(old);
+                                            }
+                                        }
                                     }
-                                    if let Some((id, _, _)) = plate_tex {
-                                        gfx.update_texture(id, &p.rgba);
-                                    }
-                                    eprintln!(
-                                        "nacelle-desktop: backdrop plate {}x{} baked in {:.1} ms",
-                                        p.w, p.h, p.bake_ms
-                                    );
-                                }
-                                // Every layer off: no plate, no quad.
-                                None => {
-                                    if let Some((old, _, _)) = plate_tex.take() {
-                                        gfx.destroy_texture(old);
-                                    }
-                                }
-                            }
+                                };
+                            install(&mut plate_tex, back, "backdrop");
+                            install(&mut overlay_tex, over, "overlay");
                         }
                         // Perform any deferred glyph-atlas reset at the frame
                         // boundary, never mid-frame (see font.rs).
@@ -2310,6 +2328,22 @@ fn main() {
                             }
                             // Warning popup on the very top.
                             popup.draw(&mut ctx);
+                            // The overlay plate is the LAST themed thing
+                            // in the list — z 70, one quad over panels,
+                            // popovers and content alike: scanlines,
+                            // grain, the top vignette. White tint, same
+                            // as the backdrop: the plate's pixels ARE
+                            // the theme's baked colours.
+                            if let Some((id, _, _)) = overlay_tex {
+                                ctx.dl.image(
+                                    0.0,
+                                    0.0,
+                                    w,
+                                    h,
+                                    id,
+                                    theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                                );
+                            }
 
                             // Fit all session grids to the panel size.
                             if (cols, rows) != grid {
