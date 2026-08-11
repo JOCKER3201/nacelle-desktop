@@ -821,8 +821,17 @@ fn main() {
                         font_scale, ui_font_scale, last_term_key, last_ui_key,
                         window
                     );
+                    // A finished save leaves the editor, on every board
+                    // — the same ending HOME's own save has. Only the
+                    // board differed, and the difference was invisible
+                    // and therefore wrong: the user pressed SAVE and
+                    // stayed in a mode they thought they had left.
+                    editor.stop();
                 }
                 Err(e) => {
+                    // A save that failed keeps the editor open: the
+                    // arrangement is still the user's to retry, and
+                    // dropping them out of the mode would throw it away.
                     nacelle::sound::emit(nacelle::sound::Event::Error);
                     popup.show(format!("Cannot save the board: {e}"));
                 }
