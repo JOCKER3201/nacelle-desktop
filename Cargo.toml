@@ -21,10 +21,10 @@ nacelle-renderer = { git = "https://github.com/JOCKER3201/nacelle-renderer" }
 # with an empty widgets directory and no file can uninstall them. The
 # same crates build the shipped .so; default-features = false drops the
 # dlopen attach symbol, which four static copies would collide on.
-nacelle-widget-control = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
-nacelle-widget-shell = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
-nacelle-widget-keyboard = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
-nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
+nacelle-widget-control = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
+nacelle-widget-shell = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
+nacelle-widget-keyboard = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
+nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 
 # Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
 # requests on the shared XWayland display. The same crate winit
@@ -60,4 +60,3 @@ libc = "0.2"
 [profile.release]
 lto = "thin"
 opt-level = 3
-

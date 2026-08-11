@@ -100,16 +100,17 @@ pub fn load() -> (Config, Option<String>) {
     // The registry must exist before anything parses a layout: panels
     // are resolved by name against it.
     let roots = AssetRoots::xdg("nacelle-desktop");
+    migrate_widgets_to_addons(&roots);
     let scanned = nacelle::widget::registry::scan(&roots).len();
     let regs = widget_factory().registry();
     if scanned == 0 {
         eprintln!(
-            "nacelle-desktop: no widgets installed \u{2014} running on the built-in set; looked in {}",
-            roots.read.iter().map(|d| d.join("widgets").display().to_string()).collect::<Vec<_>>().join(", ")
+            "nacelle-desktop: no addons installed \u{2014} running on the built-in set; looked in {}",
+            roots.read.iter().map(|d| d.join("addons").display().to_string()).collect::<Vec<_>>().join(", ")
         );
         eprintln!(
             "nacelle-desktop: the rest install with `make install` in the \
-             nacelle-widgets repository"
+             nacelle-addons repository"
         );
     }
     eprintln!("nacelle-desktop: {} widgets", regs.len());
@@ -135,6 +136,95 @@ pub fn load() -> (Config, Option<String>) {
 /// Layout by name, through the toolkit's store.
 fn layaut_by_name(name: &str) -> Option<LayoutDef> {
     store().load(name)
+}
+
+/// One-time migration of the pre-addons install layout:
+/// `widgets/{board,appgrid,search_and_ai}/<name>/<name>.{rhai,so}` —
+/// and the pre-split top level — becomes the flat `addons/scripts/`
+/// and `addons/plugins/`. The category a directory used to carry
+/// moves into the script itself as a header pragma; a compiled
+/// plugin cannot declare one through the table yet, and every
+/// shipped one was a board widget anyway. Only the WRITE root is
+/// migrated — a system install is somebody else's file to move — and
+/// nothing is ever overwritten: a name already present under addons/
+/// keeps its file, the old copy stays where it was, and the
+/// collision is said out loud.
+fn migrate_widgets_to_addons(roots: &AssetRoots) {
+    let old = roots.write.join("widgets");
+    if !old.is_dir() {
+        return;
+    }
+    let cats = ["board", "appgrid", "search_and_ai"];
+    // Category subdirectories first, then the top level itself (the
+    // pre-split arrangement) — the order the old scan walked.
+    let mut units: Vec<(std::path::PathBuf, Option<&str>)> = Vec::new();
+    for sub in cats {
+        if let Ok(rd) = std::fs::read_dir(old.join(sub)) {
+            let pragma = if sub == "board" { None } else { Some(sub) };
+            units.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).map(|p| (p, pragma)));
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(&old) {
+        units.extend(
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && !cats
+                            .iter()
+                            .any(|s| p.file_name().map(|n| n == *s).unwrap_or(false))
+                })
+                .map(|p| (p, None)),
+        );
+    }
+    let (mut moved, mut kept) = (0usize, 0usize);
+    for (dir, pragma) in units {
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else {
+            continue;
+        };
+        for (ext, sub) in [("rhai", "scripts"), ("so", "plugins")] {
+            let src = dir.join(format!("{name}.{ext}"));
+            if !src.is_file() {
+                continue;
+            }
+            let Ok(destdir) = roots.ensure(&format!("addons/{sub}")) else { continue };
+            let dest = destdir.join(format!("{name}.{ext}"));
+            if dest.exists() {
+                eprintln!(
+                    "nacelle-desktop: addons/{sub}/{name}.{ext} already exists \u{2014} \
+                     old copy kept at {}",
+                    src.display()
+                );
+                kept += 1;
+                continue;
+            }
+            let ok = match pragma {
+                // The directory carried the category; the script
+                // carries it now.
+                Some(cat) if ext == "rhai" => std::fs::read_to_string(&src)
+                    .and_then(|body| std::fs::write(&dest, format!("// category: {cat}\n{body}")))
+                    .map(|()| std::fs::remove_file(&src).is_ok())
+                    .unwrap_or(false),
+                _ => std::fs::rename(&src, &dest).is_ok(),
+            };
+            if ok {
+                moved += 1;
+            }
+        }
+        // Only an emptied directory disappears: a widget directory
+        // holding anything else (notes, assets) stays for its owner.
+        let _ = std::fs::remove_dir(&dir);
+    }
+    for sub in cats {
+        let _ = std::fs::remove_dir(old.join(sub));
+    }
+    let _ = std::fs::remove_dir(&old);
+    if moved > 0 || kept > 0 {
+        eprintln!(
+            "nacelle-desktop: retired the widgets/ layout \u{2014} {moved} addon(s) \
+             carried over to addons/ ({kept} kept in place)"
+        );
+    }
 }
 
 
@@ -1058,21 +1148,19 @@ mod tests {
     fn widget_registry_reads_the_directory() {
         let base = std::env::temp_dir().join("nacelle-desktop-widget-registry-test");
         let _ = std::fs::remove_dir_all(&base);
-        let root = base.join("widgets");
-        std::fs::create_dir_all(root.join("mywidget")).unwrap();
-        std::fs::write(root.join("mywidget").join("mywidget.rhai"), "fn draw() { [] }")
+        let root = base.join("addons");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(root.join("plugins")).unwrap();
+        std::fs::write(root.join("scripts").join("mywidget.rhai"), "fn draw() { [] }")
             .unwrap();
-        // A directory without the widget's file is not a widget — a
-        // leftover metadata file does not count either.
-        std::fs::create_dir_all(root.join("notawidget")).unwrap();
-        std::fs::write(root.join("notawidget").join("widget"), "Label=NOPE\n").unwrap();
+        // A stray file of the wrong extension is not an addon.
+        std::fs::write(root.join("scripts").join("notes.txt"), "Label=NOPE\n").unwrap();
         // A compiled widget is its library; a shipped name keeps its
         // built-in label and sizes.
-        std::fs::create_dir_all(root.join("shell")).unwrap();
-        std::fs::write(root.join("shell").join("shell.so"), b"not really").unwrap();
+        std::fs::write(root.join("plugins").join("shell.so"), b"not really").unwrap();
 
         let defs = nacelle::widget::registry::scan(&nacelle::assets::AssetRoots::new(vec![base.clone()], base.clone()));
-        assert_eq!(defs.len(), 2, "only directories with the widget's file count");
+        assert_eq!(defs.len(), 2, "only addon files count");
         // Sorted, so panel order never depends on the filesystem.
         // An unknown widget gets its name as the label and the
         // standard sizes; a layout overrides them per panel.
@@ -1085,6 +1173,46 @@ mod tests {
 
         let empty = nacelle::assets::AssetRoots::new(vec![base.join("nope")], base.join("nope"));
         assert!(nacelle::widget::registry::scan(&empty).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The one-time migration: the pre-addons tree moves into
+    /// `addons/scripts` and `addons/plugins`, a non-board category
+    /// becomes the script's own header pragma, nothing is overwritten,
+    /// and a second run finds nothing to do.
+    #[test]
+    fn the_widgets_layout_retires_into_addons() {
+        let base = std::env::temp_dir().join("nacelle-desktop-widget-migration-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let old = base.join("widgets");
+        std::fs::create_dir_all(old.join("board/clock")).unwrap();
+        std::fs::write(old.join("board/clock/clock.rhai"), "fn draw() { [] }").unwrap();
+        std::fs::create_dir_all(old.join("appgrid/launcher")).unwrap();
+        std::fs::write(old.join("appgrid/launcher/launcher.rhai"), "fn draw() { [] }").unwrap();
+        // The pre-split top level, and a compiled widget beside it.
+        std::fs::create_dir_all(old.join("meter")).unwrap();
+        std::fs::write(old.join("meter/meter.so"), b"not really").unwrap();
+        // A name already installed under addons/ must survive intact.
+        let roots = nacelle::assets::AssetRoots::new(vec![base.clone()], base.clone());
+        std::fs::create_dir_all(base.join("addons/scripts")).unwrap();
+        std::fs::write(base.join("addons/scripts/clock.rhai"), "KEEP").unwrap();
+
+        migrate_widgets_to_addons(&roots);
+
+        assert_eq!(
+            std::fs::read_to_string(base.join("addons/scripts/clock.rhai")).unwrap(),
+            "KEEP",
+            "an existing addon is never overwritten"
+        );
+        assert!(old.join("board/clock/clock.rhai").is_file(), "the colliding copy stays put");
+        assert_eq!(
+            std::fs::read_to_string(base.join("addons/scripts/launcher.rhai")).unwrap(),
+            "// category: appgrid\nfn draw() { [] }",
+            "the directory's category becomes the script's pragma"
+        );
+        assert!(base.join("addons/plugins/meter.so").is_file());
+        assert!(!old.join("appgrid").exists(), "emptied category directories disappear");
+        migrate_widgets_to_addons(&roots);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1146,15 +1274,14 @@ mod tests {
     fn a_user_widget_shadows_a_system_one() {
         let root = std::env::temp_dir().join("nacelle-desktop-widget-shadow-test");
         let _ = std::fs::remove_dir_all(&root);
-        let user = root.join("user").join("widgets");
-        let system = root.join("system").join("widgets");
+        let user = root.join("user").join("addons").join("scripts");
+        let system = root.join("system").join("addons").join("scripts");
         // The same name in both, plus one only the system has.
         for (base, script) in [(&user, "fn draw() { [] }"), (&system, "fn draw() { [1] }")] {
-            std::fs::create_dir_all(base.join("clock")).unwrap();
-            std::fs::write(base.join("clock").join("clock.rhai"), script).unwrap();
+            std::fs::create_dir_all(base).unwrap();
+            std::fs::write(base.join("clock.rhai"), script).unwrap();
         }
-        std::fs::create_dir_all(system.join("uptime")).unwrap();
-        std::fs::write(system.join("uptime").join("uptime.rhai"), "fn draw() { [] }").unwrap();
+        std::fs::write(system.join("uptime.rhai"), "fn draw() { [] }").unwrap();
 
         let defs = nacelle::widget::registry::scan(&nacelle::assets::AssetRoots::new(
             vec![root.join("user"), root.join("system")],
@@ -1163,7 +1290,7 @@ mod tests {
         assert_eq!(defs.len(), 2, "the shadowed copy must not appear twice");
         let clock = defs.iter().find(|d| d.name == "clock").unwrap();
         assert_eq!(
-            std::fs::read_to_string(user.join("clock").join("clock.rhai")).unwrap(),
+            std::fs::read_to_string(user.join("clock.rhai")).unwrap(),
             "fn draw() { [] }"
         );
         assert_eq!(clock.label, "CLOCK");
