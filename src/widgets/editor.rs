@@ -67,7 +67,6 @@ impl Role {
 static ROLE_LABEL: Role = Role::new("caption");
 static ROLE_HINT: Role = Role::new("tooltip");
 static ROLE_TITLE: Role = Role::new("title.window");
-static ROLE_FIELD: Role = Role::new("field");
 static ROLE_VALUE: Role = Role::new("value");
 
 /// Edge-grab margin (resize handles), with its device-px floor.
@@ -149,8 +148,20 @@ pub struct Editor {
     /// the panels that differ from this.
     initial: Vec<PanelSpec>,
     drag: Option<(usize, Mode)>,
-    /// SAVE AS name being typed; Some = the prompt is open.
-    pub naming: Option<String>,
+    /// SAVE AS name prompt; Some = the prompt is open. The field is the
+    /// F1 §3 input object — caret, selection, undo and IME land here
+    /// through the model, not through bespoke prompt code.
+    pub naming: Option<nacelle::object::text_input::InputModel>,
+    /// Where the prompt's field sat last frame — the immediate-mode
+    /// anchor for click-to-caret (a click is applied on the next draw,
+    /// when the fonts are at hand to hit-test with), and the box the
+    /// field's context menu anchors to (right-click hit, Shift+F10).
+    pub naming_field: Option<Rect>,
+    /// A pending click inside the prompt, in window px.
+    naming_click: Option<(f32, f32)>,
+    /// The field's caret box last frame, in window px — what the
+    /// application anchors the IME candidate window to.
+    pub naming_caret: Option<Rect>,
     /// Panels that live on ANOTHER board. A widget exists once, so a
     /// panel placed elsewhere is not offered by ADD WIDGET here —
     /// moving it means removing it there first.
@@ -190,6 +201,9 @@ impl Editor {
             initial: vec![OFF_SPEC; panel_count()],
             drag: None,
             naming: None,
+            naming_field: None,
+            naming_click: None,
+            naming_caret: None,
             blocked: Vec::new(),
             add_open: false,
             adding: None,
@@ -217,7 +231,7 @@ impl Editor {
         self.cols = cols.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
         self.rows = rows.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
         self.padding = padding.max(0.0);
-        self.naming = None;
+        self.close_naming();
         self.drag = None;
         self.add_open = false;
         self.adding = None;
@@ -233,11 +247,51 @@ impl Editor {
 
     pub fn stop(&mut self) {
         self.active = false;
-        self.naming = None;
+        self.close_naming();
         self.drag = None;
         self.add_open = false;
         self.adding = None;
         self.grow = None;
+    }
+
+    /// The characters a layout name may hold — what `.layaut` filenames
+    /// are made of. Uppercase input is lowercased BEFORE the model sees
+    /// it (main.rs), so the validator only meets the canonical form.
+    pub fn layaut_name_char(c: char) -> bool {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+    }
+
+    /// The SAVE AS field's stable focus path — one string, two users:
+    /// [`Editor::begin_naming`] focuses it, the draw pass registers it.
+    fn naming_focus_id() -> nacelle::focus::FocusId {
+        nacelle::focus::FocusId::of("editor.field.save_as")
+    }
+
+    /// Opens the SAVE AS prompt with an empty, validated field. The
+    /// prompt is a modal grab, so opening it IS the focus change: the
+    /// field takes focus here, and the chain drops it by itself once
+    /// the closed prompt stops registering (the vanish rule). Pointer
+    /// flavour — the buttons that open it are pointer-only in F1, and
+    /// a fresh text field shows a caret, not a ring.
+    pub fn begin_naming(&mut self, focus: &mut nacelle::focus::FocusCtl) {
+        use nacelle::object::text_input::{InputModel, Validator};
+        self.naming = Some(
+            InputModel::new()
+                .with_validator(Validator::Charset(Self::layaut_name_char))
+                .with_max_len(40),
+        );
+        self.naming_field = None;
+        self.naming_click = None;
+        self.naming_caret = None;
+        focus.focus(Some(Self::naming_focus_id()));
+    }
+
+    /// Closes it, dropping the frame-to-frame view bookkeeping with it.
+    pub fn close_naming(&mut self) {
+        self.naming = None;
+        self.naming_field = None;
+        self.naming_click = None;
+        self.naming_caret = None;
     }
 
     /// Fits every visible panel to the grid: each edge lands on the
@@ -508,7 +562,12 @@ impl Editor {
     /// Mouse press. Only meaningful while active.
     pub fn mouse_down(&mut self, x: f32, y: f32, w: f32, h: f32) -> EditorHit {
         if self.naming.is_some() {
-            // The name prompt is keyboard-driven; clicks fall through.
+            // The prompt is a grab. A click inside the field is queued
+            // and applied on the next draw — the immediate-mode idiom:
+            // only the draw pass has the fonts to hit-test text with.
+            if self.naming_field.map_or(false, |r| r.contains(x, y)) {
+                self.naming_click = Some((x, y));
+            }
             return EditorHit::Handled;
         }
         if self.add_open {
@@ -645,24 +704,6 @@ impl Editor {
         self.adding = None;
         // Releasing mid-animation finishes the growth instantly.
         self.grow = None;
-    }
-
-    /// Feeds a typed character into the SAVE AS prompt.
-    pub fn type_char(&mut self, text: &str) {
-        if let Some(name) = self.naming.as_mut() {
-            for ch in text.chars() {
-                let ch = ch.to_ascii_lowercase();
-                if (ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') && name.len() < 40 {
-                    name.push(ch);
-                }
-            }
-        }
-    }
-
-    pub fn backspace(&mut self) {
-        if let Some(name) = self.naming.as_mut() {
-            name.pop();
-        }
     }
 
     /// Opaque parallelogram button (nacelle::object).
@@ -1087,8 +1128,8 @@ impl Editor {
             }
         }
 
-        // SAVE AS name prompt.
-        if let Some(name) = self.naming.clone() {
+        // SAVE AS name prompt — the F1 §3 input object is the field.
+        if self.naming.is_some() {
             static SCRIM: OnceLock<TokenId> = OnceLock::new();
             static W_FRAC: OnceLock<TokenId> = OnceLock::new();
             static W_MIN: OnceLock<TokenId> = OnceLock::new();
@@ -1098,9 +1139,8 @@ impl Editor {
             static BAND_H: OnceLock<TokenId> = OnceLock::new();
             static TITLE_C: OnceLock<TokenId> = OnceLock::new();
             static BODY_TOP: OnceLock<TokenId> = OnceLock::new();
-            static FIELD_C: OnceLock<TokenId> = OnceLock::new();
-            static DUTY: OnceLock<TokenId> = OnceLock::new();
-            static PERIOD: OnceLock<TokenId> = OnceLock::new();
+            static PAD: OnceLock<TokenId> = OnceLock::new();
+            static FIELD_H: OnceLock<TokenId> = OnceLock::new();
             static HINT_INSET: OnceLock<TokenId> = OnceLock::new();
             static HINT_C: OnceLock<TokenId> = OnceLock::new();
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
@@ -1125,32 +1165,50 @@ impl Editor {
                 col(t.color(tok(&TITLE_C, "text.title"))),
                 ROLE_TITLE.tracking(tpx),
             );
-            // Name field with a blinking cursor. The caret is still a typed
-            // underscore — a drawn caret needs a primitive that does not
-            // exist yet; only its rhythm comes from the theme.
-            let npx = ROLE_FIELD.px(ctx);
-            let period = (t.px(tok(&PERIOD, "motion.caret_blink.period_ms")) as f64).max(1.0);
-            let duty = t.px(tok(&DUTY, "motion.caret_blink.duty")) as f64;
-            let on = (ctx.t * 1000.0) % period < period * duty;
-            let shown = format!("{name}{}", if on { "_" } else { " " });
+            // The field: modal padding aside, [field] geometry, the
+            // model already holds caret/selection/preedit. The desktop
+            // always passes a focus chain, and `begin_naming` focused
+            // this field on open — so the chain answers "focused" and
+            // the caret/selection/preedit actually draw. The fallback
+            // below only speaks in a chainless world (none in the
+            // desktop today): a modal grab's field IS focused by
+            // construction.
+            let pad = t.px(tok(&PAD, "modal.pad")).max(0.0);
+            let fh = t.px(tok(&FIELD_H, "field.h")).max(1.0);
             let field_y = by + t.px(tok(&BODY_TOP, "modal.body_top"));
-            ctx.dl.text_center(
-                ctx.fonts,
-                FONT_UI,
-                npx,
-                bx + bw / 2.0,
-                field_y,
-                &shown,
-                col(t.color(tok(&FIELD_C, "component.field.text"))),
-                ROLE_FIELD.tracking(npx),
-            );
+            let field = Rect::new(bx + pad, field_y, (bw - 2.0 * pad).max(2.0), fh);
+            self.naming_field = Some(field);
+            let click = self.naming_click.take();
+            if let Some(model) = self.naming.as_mut() {
+                use nacelle::object::text_input::{self, InputMsg, InputStyle};
+                // The queued click lands now, when the fonts are here
+                // to hit-test with (drag/double-click selection stays
+                // keyboard-shaped in F1: Shift+arrows, Ctrl+A).
+                if let Some((cx, _)) = click {
+                    let at = text_input::hit(ctx, field, model, cx);
+                    model.apply(InputMsg::Point { at, extend: false });
+                }
+                let out = text_input::draw(
+                    ctx,
+                    field,
+                    model,
+                    Self::naming_focus_id(),
+                    &InputStyle {
+                        placeholder: "layout name",
+                        hover: field.contains(mx, my),
+                        disabled: false,
+                        focused_fallback: true,
+                    },
+                );
+                self.naming_caret = out.caret;
+            }
             let hpx = ROLE_LABEL.px(ctx);
             ctx.dl.text_center(
                 ctx.fonts,
                 FONT_UI,
                 hpx,
                 bx + bw / 2.0,
-                field_y + npx + t.px(tok(&HINT_INSET, "settings.hint_inset")),
+                field.bottom() + t.px(tok(&HINT_INSET, "settings.hint_inset")),
                 "ENTER SAVES \u{2014} ESC CANCELS",
                 col(t.color(tok(&HINT_C, "text.muted"))),
                 ROLE_LABEL.tracking(hpx),

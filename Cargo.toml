@@ -43,6 +43,14 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 winit = "0.29"
 raw-window-handle = "0.6"
 
+# Clipboard backends behind the libnacelle seam (src/clipboard.rs).
+# Wayland rides winit's OWN connection — smithay-clipboard attaches its
+# queue to the same wl_display, which is the only way a store gets the
+# input serials the compositor demands. X11/XWayland goes over x11rb,
+# the crate the tree already builds (fullscreen.rs), same 0.13 line.
+smithay-clipboard = "0.7"
+x11-clipboard = "0.9"
+
 
 
 # The VT parser the terminal emulation is driven by

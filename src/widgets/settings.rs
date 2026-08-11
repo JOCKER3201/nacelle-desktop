@@ -8,6 +8,7 @@
 use super::{Ctx, PanelSpec, Rect};
 use crate::config::{self, GRID_MAX, GRID_MIN};
 use crate::font::FONT_UI;
+use nacelle::focus::{Caps, FocusCtl, FocusId, Key as FKey, KeyEv, Nav};
 use nacelle::theme::bake::StateStyle;
 use nacelle::theme::parse::State;
 use nacelle::theme::{self, TokenId};
@@ -85,6 +86,132 @@ enum Sect {
 enum Dropdown {
     Family(Sect),
     Weight(Sect),
+}
+
+/// What a key did to the window — the settings layer's answer to the
+/// application router (F1 §1.5).
+pub enum KeyOut {
+    /// Not this window's key: the application decides (its Escape
+    /// stays the layer's close, exactly as before focus existed).
+    Ignored,
+    /// Consumed: navigation moved, a control acted, a dropdown closed.
+    Consumed,
+    /// Consumed AND the configuration changed — the caller re-resolves
+    /// and applies it, exactly like a click that returned true.
+    Changed,
+}
+
+/// The focus-chain identity of every control this window registers —
+/// STABLE paths (F1 §1.1), never positions in a frame's layout, so
+/// focus survives a redraw. List rows derive `.item(i)` from their
+/// list's id: a row's order is its content's order, which is the one
+/// place an index is legal.
+fn focus_id(act: Act) -> FocusId {
+    use Act::*;
+    fn sect_path(s: Sect, term: &'static str, ui: &'static str) -> FocusId {
+        FocusId::of(match s {
+            Sect::Term => term,
+            Sect::Ui => ui,
+        })
+    }
+    // A board key's two signed coordinates, chained as derived ids —
+    // deterministic and collision-free without encoding geometry.
+    fn board_id(path: &str, k: (i32, i32)) -> FocusId {
+        FocusId::of(path).item(k.0 as usize).item(k.1 as usize)
+    }
+    match act {
+        Close => FocusId::of("settings.close"),
+        Back => FocusId::of("settings.back"),
+        OpenThemes => FocusId::of("settings.menu.themes"),
+        OpenFont => FocusId::of("settings.menu.font"),
+        OpenSound => FocusId::of("settings.menu.sound"),
+        OpenGrid => FocusId::of("settings.menu.grid"),
+        OpenBoards => FocusId::of("settings.menu.boards"),
+        OpenColor => FocusId::of("settings.menu.color"),
+        OpenBlur => FocusId::of("settings.menu.blur"),
+        OpenLook => FocusId::of("settings.themes.look"),
+        OpenLayauts => FocusId::of("settings.themes.layauts"),
+        OpenSounds => FocusId::of("settings.themes.sounds"),
+        Look(i) => FocusId::of("settings.look.item").item(i),
+        Layaut(i) => FocusId::of("settings.layauts.item").item(i),
+        Sounds(i) => FocusId::of("settings.sounds.item").item(i),
+        ResetScreen => FocusId::of("settings.layauts.reset_screen"),
+        BlurRadiusTrack => FocusId::of("settings.blur.radius"),
+        BlurOpacityTrack => FocusId::of("settings.blur.opacity"),
+        ColorDepth(bits) => FocusId::of("settings.color.depth").item(bits as usize),
+        ColorSpaceNext => FocusId::of("settings.color.space"),
+        ColorLutNext => FocusId::of("settings.color.lut"),
+        ColorIccNext => FocusId::of("settings.color.icc"),
+        BoardGo(k) => board_id("settings.boards.go", k),
+        BoardAdd(side) => FocusId::of(if side < 0 {
+            "settings.boards.add_left"
+        } else {
+            "settings.boards.add_right"
+        }),
+        BoardDel(k) => board_id("settings.boards.del", k),
+        VolumeTrack => FocusId::of("settings.sound.volume"),
+        ToggleTyping => FocusId::of("settings.sound.typing"),
+        ToggleAmbient => FocusId::of("settings.sound.ambient"),
+        ToggleSnap => FocusId::of("settings.grid.snap"),
+        ColsTrack => FocusId::of("settings.grid.cols"),
+        RowsTrack => FocusId::of("settings.grid.rows"),
+        PadTrack => FocusId::of("settings.grid.pad"),
+        EditGrid => FocusId::of("settings.grid.edit"),
+        SizeTrack(s) => sect_path(s, "settings.font.term.size", "settings.font.ui.size"),
+        FamilyBtn(s) => {
+            sect_path(s, "settings.font.term.family", "settings.font.ui.family")
+        }
+        WeightBtn(s) => {
+            sect_path(s, "settings.font.term.weight", "settings.font.ui.weight")
+        }
+        // Dropdown rows carry the ids the accordion object derives
+        // itself (`base.item(i)`, dropdown.rs) — one derivation on both
+        // sides, so Enter and click can never disagree about a row.
+        FamilyPick(s, i) => dropdown_base(Dropdown::Family(s)).item(i),
+        WeightPick(s, i) => dropdown_base(Dropdown::Weight(s)).item(i),
+    }
+}
+
+/// The id an OPEN dropdown's rows derive from — distinct from the
+/// anchor button's own id (the button stays in the chain while its
+/// list is open).
+fn dropdown_base(d: Dropdown) -> FocusId {
+    FocusId::of(match d {
+        Dropdown::Family(Sect::Term) => "settings.font.term.family.list",
+        Dropdown::Family(Sect::Ui) => "settings.font.ui.family.list",
+        Dropdown::Weight(Sect::Term) => "settings.font.term.weight.list",
+        Dropdown::Weight(Sect::Ui) => "settings.font.ui.weight.list",
+    })
+}
+
+/// [`Settings::hit`]'s working part, over the hit map alone so a loop
+/// that borrows another field of the window (the boards walk) can
+/// still register its rects.
+fn hit_into(hits: &mut Vec<(Rect, Act)>, ctx: &mut Ctx, r: Rect, act: Act) {
+    let ring = ctx
+        .focus
+        .as_deref_mut()
+        .map_or(false, |fc| fc.register(focus_id(act), r, Caps::NONE).ring);
+    if ring {
+        nacelle::object::focus_ring::draw(ctx, r);
+    }
+    hits.push((r, act));
+}
+
+/// The slider tracks — the acts whose keyboard is Left/Right, never
+/// Enter: a synthetic press at a track's centre would SET the value
+/// to the centre, which no keyboard user asked for.
+fn is_track(act: Act) -> bool {
+    matches!(
+        act,
+        Act::BlurRadiusTrack
+            | Act::BlurOpacityTrack
+            | Act::VolumeTrack
+            | Act::ColsTrack
+            | Act::RowsTrack
+            | Act::PadTrack
+            | Act::SizeTrack(_)
+    )
 }
 
 /// One board, as the settings window sees it: enough to draw a
@@ -543,8 +670,17 @@ impl Settings {
     }
 
     /// Click handling. Returns true when the configuration changed
-    /// (the caller should re-resolve and apply it).
-    pub fn click(&mut self, x: f32, y: f32, w: f32, h: f32) -> bool {
+    /// (the caller should re-resolve and apply it). The chain follows
+    /// the pointer — typing-by-Tab continues from what was clicked —
+    /// but a click never summons the ring ([`FocusCtl::focus`]).
+    pub fn click(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        fc: Option<&mut FocusCtl>,
+    ) -> bool {
         if !self.open {
             return false;
         }
@@ -565,6 +701,17 @@ impl Settings {
             }
             return false;
         };
+        if let Some(fc) = fc {
+            fc.focus(Some(focus_id(act)));
+        }
+        self.perform(act, x)
+    }
+
+    /// The body every activation runs — mouse ([`Settings::click`])
+    /// and keyboard ([`Settings::key`]) share it, so the two ways of
+    /// pressing a control cannot drift apart (F1 §1.5). `x` is where
+    /// along a slider track the press landed; buttons ignore it.
+    fn perform(&mut self, act: Act, x: f32) -> bool {
         self.flash = Some((act, Instant::now()));
         // Every button clicks; the actions below that mean more than a
         // plain press replace it with their own sound.
@@ -828,6 +975,145 @@ impl Settings {
         false
     }
 
+    /// Keyboard entry point (F1 §1.5): Tab walks the chain in draw
+    /// order, bare arrows move spatially (the boards and item grids
+    /// are 2-D), Enter/Space activates through the SAME body a click
+    /// runs, and Escape peels one layer — an open dropdown first; the
+    /// window's own close stays the application's Escape, answered
+    /// [`KeyOut::Ignored`] here. Sliders answer Left/Right themselves:
+    /// they registered `GREEDY_ARROWS`, and a keyboard step walks
+    /// values where a mouse sets positions.
+    pub fn key(&mut self, ev: &KeyEv, fc: &mut FocusCtl) -> KeyOut {
+        if !self.open {
+            return KeyOut::Ignored;
+        }
+        match ev.key {
+            FKey::Escape => {
+                if self.dropdown.is_some() {
+                    self.dropdown = None;
+                    KeyOut::Consumed
+                } else {
+                    KeyOut::Ignored
+                }
+            }
+            FKey::Enter | FKey::Space => {
+                let Some(act) = self.focused_act(fc) else {
+                    return KeyOut::Ignored;
+                };
+                if is_track(act) {
+                    // A slider has no press; its keys are the arrows.
+                    return KeyOut::Consumed;
+                }
+                let x = fc.rect_of(focus_id(act)).map_or(0.0, |r| r.cx());
+                if self.perform(act, x) {
+                    KeyOut::Changed
+                } else {
+                    KeyOut::Consumed
+                }
+            }
+            _ => {
+                let Some(n) = Nav::of(ev) else {
+                    return KeyOut::Ignored;
+                };
+                if matches!(n, Nav::Left | Nav::Right) {
+                    if let Some(act) = self.focused_act(fc) {
+                        if is_track(act) {
+                            let dir = if n == Nav::Right { 1 } else { -1 };
+                            return if self.nudge(act, dir) {
+                                KeyOut::Changed
+                            } else {
+                                KeyOut::Consumed
+                            };
+                        }
+                    }
+                }
+                fc.nav(n);
+                KeyOut::Consumed
+            }
+        }
+    }
+
+    /// The Act of the chain's focused control, when it is one of this
+    /// window's. Walked topmost-first like the click path's hit walk.
+    fn focused_act(&self, fc: &FocusCtl) -> Option<Act> {
+        let id = fc.focused()?;
+        self.hits
+            .iter()
+            .rev()
+            .find(|(_, a)| focus_id(*a) == id)
+            .map(|&(_, a)| a)
+    }
+
+    /// One keyboard step of a slider (Left/Right while it owns focus).
+    /// A drag writes the configuration on release; the keyboard has no
+    /// release moment, so every step writes immediately. Returns true
+    /// when the caller must re-apply the configuration — the font size
+    /// sliders, exactly [`Settings::release`]'s contract. Percent
+    /// tracks step 5 per press; cell counts and pixels step 1.
+    fn nudge(&mut self, act: Act, dir: i32) -> bool {
+        fn stepped(v: u32, dir: i32, step: u32, lo: u32, hi: u32) -> u32 {
+            (v as i64 + dir as i64 * step as i64).clamp(lo as i64, hi as i64) as u32
+        }
+        match act {
+            Act::SizeTrack(sect) => {
+                let i = Self::sect_idx(sect);
+                let (lo, hi) = Self::size_range(sect);
+                self.cur_size[i] =
+                    stepped(self.cur_size[i], dir, 5, lo as u32, hi as u32);
+                match sect {
+                    Sect::Term => config::set_term_font_size(self.cur_size[i]),
+                    Sect::Ui => config::set_ui_font_size(self.cur_size[i]),
+                }
+                true
+            }
+            Act::VolumeTrack => {
+                self.sound_volume = stepped(self.sound_volume, dir, 5, 0, 100);
+                config::set_sound_volume(self.sound_volume);
+                self.sound_dirty = true;
+                false
+            }
+            Act::BlurRadiusTrack => {
+                self.blur_radius = stepped(self.blur_radius, dir, 5, 0, 100);
+                config::set_blur_radius(self.blur_radius);
+                self.blur_dirty = true;
+                false
+            }
+            Act::BlurOpacityTrack => {
+                self.blur_opacity = stepped(self.blur_opacity, dir, 5, 0, 100);
+                config::set_blur_opacity(self.blur_opacity);
+                self.blur_dirty = true;
+                false
+            }
+            Act::ColsTrack => {
+                self.grid_cols = stepped(self.grid_cols, dir, 1, GRID_MIN, GRID_MAX);
+                config::set_grid_cols(self.grid_cols);
+                false
+            }
+            Act::RowsTrack => {
+                self.grid_rows = stepped(self.grid_rows, dir, 1, GRID_MIN, GRID_MAX);
+                config::set_grid_rows(self.grid_rows);
+                false
+            }
+            Act::PadTrack => {
+                // 0-40 px — the range set_pad_from_x spans.
+                self.grid_pad = stepped(self.grid_pad, dir, 1, 0, 40);
+                config::set_grid_padding(self.grid_pad);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// One interactive rect that no object helper draws (board tiles,
+    /// colour chips, cyclers): the click map, the focus chain and the
+    /// ring overlay in one motion, so a control cannot be clickable
+    /// yet unreachable by keyboard. [`hit_into`] with this window's
+    /// own map — loops that already hold a field of `self` call the
+    /// free form directly.
+    fn hit(&mut self, ctx: &mut Ctx, r: Rect, act: Act) {
+        hit_into(&mut self.hits, ctx, r, act);
+    }
+
     /// Refreshes the selection highlights from nacelle-desktop.conf:
     /// the engine's theme (Theme=), the layout (Layaut=) and the sound
     /// set (Sounds=), each falling back to "default" when unset.
@@ -1040,7 +1326,14 @@ impl Settings {
         let check_h = th.px(tok(&CHECK_ROW_H, "checkbox.row_h"));
         let row = Rect::new(content.x, y, content.w, check_h);
         let hover = row.contains(ctx.mouse.0, ctx.mouse.1);
-        nacelle::object::checkbox::draw(ctx, row, "SNAP TO GRID", self.grid_snap, hover);
+        nacelle::object::checkbox::draw_focusable(
+            ctx,
+            row,
+            "SNAP TO GRID",
+            self.grid_snap,
+            hover,
+            focus_id(Act::ToggleSnap),
+        );
         self.hits.push((row, Act::ToggleSnap));
         y += check_h + gap;
 
@@ -1078,7 +1371,7 @@ impl Settings {
             let t = (value.saturating_sub(GRID_MIN) as f32
                 / (GRID_MAX - GRID_MIN) as f32)
                 .clamp(0.0, 1.0);
-            nacelle::object::slider::track(ctx, track, t);
+            nacelle::object::slider::track_focusable(ctx, track, t, focus_id(act));
             ctx.dl.text_right(
                 ctx.fonts,
                 FONT_UI,
@@ -1107,7 +1400,7 @@ impl Settings {
         let track = Rect::new(content.x + label_w, y, content.w - label_w - value_w, row_h);
         self.pad_rect = track;
         let t = (self.grid_pad as f32 / 40.0).clamp(0.0, 1.0);
-        nacelle::object::slider::track(ctx, track, t);
+        nacelle::object::slider::track_focusable(ctx, track, t, focus_id(Act::PadTrack));
         ctx.dl.text_right(
             ctx.fonts,
             FONT_UI,
@@ -1297,7 +1590,7 @@ impl Settings {
                 f.track,
             );
             if !b.current {
-                self.hits.push((tile, Act::BoardGo(b.id)));
+                hit_into(&mut self.hits, ctx, tile, Act::BoardGo(b.id));
             }
             if b.id != (0, 0) && by == 0 {
                 let xs = th.px(tok(&CLOSE_SIZE, "boards.tile.close_size")).min(tile.w * 0.2);
@@ -1313,7 +1606,7 @@ impl Settings {
                 let s = th.px(tok(&CLOSE_STROKE, "boards.tile.close_stroke"));
                 ctx.dl.line(xr.x + m, xr.y + m, xr.right() - m, xr.bottom() - m, s, c);
                 ctx.dl.line(xr.right() - m, xr.y + m, xr.x + m, xr.bottom() - m, s, c);
-                self.hits.push((xr, Act::BoardDel(b.id)));
+                hit_into(&mut self.hits, ctx, xr, Act::BoardDel(b.id));
             }
         }
 
@@ -1340,7 +1633,7 @@ impl Settings {
             let cxx = pr.x + pr.w / 2.0;
             ctx.dl.line(pr.x + m, cyy, pr.right() - m, cyy, s, c);
             ctx.dl.line(cxx, pr.y + m, cxx, pr.bottom() - m, s, c);
-            self.hits.push((pr, Act::BoardAdd(dir)));
+            self.hit(ctx, pr, Act::BoardAdd(dir));
         }
 
         // One line that explains the other way in (settings.hint.role).
@@ -1450,7 +1743,7 @@ impl Settings {
                 col(st.text),
                 f.track,
             );
-            self.hits.push((r, Act::ColorDepth(bits)));
+            self.hit(ctx, r, Act::ColorDepth(bits));
         }
         y += seg_h + gap;
 
@@ -1482,7 +1775,7 @@ impl Settings {
                 value_fg,
                 f.track,
             );
-            slf.hits.push((r, act));
+            slf.hit(ctx, r, act);
         };
         let space = self.color_space.clone();
         cycler(self, ctx, "SPACE", &space, Act::ColorSpaceNext, y);
@@ -1557,7 +1850,12 @@ impl Settings {
             let track =
                 Rect::new(content.x + label_w, y, content.w - label_w - value_w, row_h);
             self.blur_rect[i] = track;
-            nacelle::object::slider::track(ctx, track, (value as f32 / 100.0).clamp(0.0, 1.0));
+            nacelle::object::slider::track_focusable(
+                ctx,
+                track,
+                (value as f32 / 100.0).clamp(0.0, 1.0),
+                focus_id(act),
+            );
             ctx.dl.text_right(
                 ctx.fonts,
                 FONT_UI,
@@ -1613,7 +1911,12 @@ impl Settings {
             + th.px(tok(&VALUE_GUTTER, "rhythm.value_gutter"));
         let track = Rect::new(content.x + label_w, y, content.w - label_w - value_w, row_h);
         self.volume_rect = track;
-        nacelle::object::slider::track(ctx, track, (self.sound_volume as f32 / 100.0).clamp(0.0, 1.0));
+        nacelle::object::slider::track_focusable(
+            ctx,
+            track,
+            (self.sound_volume as f32 / 100.0).clamp(0.0, 1.0),
+            focus_id(Act::VolumeTrack),
+        );
         ctx.dl.text_right(
             ctx.fonts,
             FONT_UI,
@@ -1634,7 +1937,14 @@ impl Settings {
         ] {
             let row = Rect::new(content.x, y, content.w, check_h);
             let hover = row.contains(ctx.mouse.0, ctx.mouse.1);
-            nacelle::object::checkbox::draw(ctx, row, label, on, hover);
+            nacelle::object::checkbox::draw_focusable(
+                ctx,
+                row,
+                label,
+                on,
+                hover,
+                focus_id(act),
+            );
             self.hits.push((row, act));
             y += check_h + gap;
         }
@@ -1699,16 +2009,26 @@ impl Settings {
                     let si = Self::sect_idx(sect);
                     let mut names = vec!["DEFAULT".to_string()];
                     names.extend(self.families[si].iter().map(|f| f.to_uppercase()));
-                    self.draw_dropdown(ctx, fam_rect, item_h, &names, |i| {
-                        Act::FamilyPick(sect, i)
-                    });
+                    self.draw_dropdown(
+                        ctx,
+                        fam_rect,
+                        item_h,
+                        &names,
+                        dropdown_base(Dropdown::Family(sect)),
+                        |i| Act::FamilyPick(sect, i),
+                    );
                 }
                 Some(Dropdown::Weight(d)) if d == sect => {
                     let names: Vec<String> =
                         WEIGHTS.iter().map(|w| w.to_uppercase()).collect();
-                    self.draw_dropdown(ctx, wgt_rect, item_h, &names, |i| {
-                        Act::WeightPick(sect, i)
-                    });
+                    self.draw_dropdown(
+                        ctx,
+                        wgt_rect,
+                        item_h,
+                        &names,
+                        dropdown_base(Dropdown::Weight(sect)),
+                        |i| Act::WeightPick(sect, i),
+                    );
                 }
                 _ => {}
             }
@@ -1774,7 +2094,12 @@ impl Settings {
         self.slider_rect[si] = track;
         let (rmin, rmax) = Self::size_range(sect);
         let t = ((self.cur_size[si] as f32 - rmin) / (rmax - rmin)).clamp(0.0, 1.0);
-        nacelle::object::slider::track(ctx, track, t);
+        nacelle::object::slider::track_focusable(
+            ctx,
+            track,
+            t,
+            focus_id(Act::SizeTrack(sect)),
+        );
         ctx.dl.text_right(
             ctx.fonts,
             FONT_UI,
@@ -1807,13 +2132,17 @@ impl Settings {
         (fam_rect, wgt_rect, wgt_y + btn_h + gap)
     }
 
-    /// Dropdown list under an anchor button.
+    /// Dropdown list under an anchor button. `base` is the list's
+    /// focus id — the accordion object registers every fully unfolded
+    /// row as `base.item(i)` itself, the same derivation
+    /// [`focus_id`] uses for the pick acts.
     fn draw_dropdown<F: Fn(usize) -> Act>(
         &mut self,
         ctx: &mut Ctx,
         anchor: Rect,
         item_h: f32,
         names: &[String],
+        base: FocusId,
         make_act: F,
     ) {
         // Accordion animation: the list unfolds from the anchor's edge.
@@ -1831,9 +2160,10 @@ impl Settings {
             .unwrap_or(1.0);
         // motion.menu_unfold.easing = ease_out, awaiting a motion resolver.
         let p = 1.0 - (1.0 - t) * (1.0 - t);
-        for (i, (r, _full)) in nacelle::object::dropdown::accordion(ctx, anchor, item_h, names, p)
-            .into_iter()
-            .enumerate()
+        for (i, (r, _full)) in
+            nacelle::object::dropdown::accordion_focusable(ctx, anchor, item_h, names, p, base)
+                .into_iter()
+                .enumerate()
         {
             self.hits.push((r, make_act(i)));
         }
@@ -1936,11 +2266,15 @@ impl Settings {
             _ => false,
         };
         let st = nacelle::object::button::ButtonState { hover, flash, selected: is_current };
+        // The focusable form: the button joins the world's chain under
+        // its stable id and wears the ring itself (F1 §1.3); the arrow
+        // and label of BACK draw after it, which is fine — the ring
+        // sits outside the quad and overlaps neither.
         if act == Act::Back {
             // The base button (nacelle::object) plus a left arrow and a label
             // shifted to make room for it. Arrow and label share the ladder's
             // text colour — the arrow is a quad, so no glyph token applies.
-            nacelle::object::button::draw(ctx, r, "", st);
+            nacelle::object::button::draw_focusable(ctx, r, "", st, focus_id(act));
             let f = role_button(th);
             let state = if flash {
                 State::Press
@@ -1977,9 +2311,115 @@ impl Settings {
                 f.track,
             );
         } else {
-            nacelle::object::button::draw(ctx, r, label, st);
+            nacelle::object::button::draw_focusable(ctx, r, label, st, focus_id(act));
         }
         self.hits.push((r, act));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One id per control: a collision would make Enter act on the
+    /// wrong control, silently. A representative act of every view.
+    #[test]
+    fn focus_ids_are_pairwise_distinct() {
+        let acts = [
+            Act::Close,
+            Act::Back,
+            Act::OpenThemes,
+            Act::OpenFont,
+            Act::OpenSound,
+            Act::OpenGrid,
+            Act::OpenBoards,
+            Act::OpenColor,
+            Act::OpenBlur,
+            Act::OpenLook,
+            Act::OpenLayauts,
+            Act::OpenSounds,
+            Act::Look(0),
+            Act::Look(1),
+            Act::Layaut(0),
+            Act::Sounds(0),
+            Act::ResetScreen,
+            Act::BlurRadiusTrack,
+            Act::BlurOpacityTrack,
+            Act::ColorDepth(8),
+            Act::ColorDepth(10),
+            Act::ColorSpaceNext,
+            Act::ColorLutNext,
+            Act::ColorIccNext,
+            Act::BoardGo((1, 0)),
+            Act::BoardGo((-1, 0)),
+            Act::BoardGo((0, 1)),
+            Act::BoardDel((1, 0)),
+            Act::BoardAdd(-1),
+            Act::BoardAdd(1),
+            Act::VolumeTrack,
+            Act::ToggleTyping,
+            Act::ToggleAmbient,
+            Act::ToggleSnap,
+            Act::ColsTrack,
+            Act::RowsTrack,
+            Act::PadTrack,
+            Act::EditGrid,
+            Act::SizeTrack(Sect::Term),
+            Act::SizeTrack(Sect::Ui),
+            Act::FamilyBtn(Sect::Term),
+            Act::FamilyBtn(Sect::Ui),
+            Act::WeightBtn(Sect::Term),
+            Act::WeightBtn(Sect::Ui),
+            Act::FamilyPick(Sect::Term, 0),
+            Act::FamilyPick(Sect::Ui, 0),
+            Act::WeightPick(Sect::Term, 0),
+            Act::WeightPick(Sect::Term, 1),
+        ];
+        for (i, a) in acts.iter().enumerate() {
+            for b in acts.iter().skip(i + 1) {
+                assert_ne!(
+                    focus_id(*a),
+                    focus_id(*b),
+                    "two controls share a focus id"
+                );
+            }
+        }
+    }
+
+    /// Dropdown rows must carry the id the accordion object derives
+    /// itself (`base.item(i)`), and never the anchor button's own.
+    #[test]
+    fn dropdown_rows_share_the_accordion_derivation() {
+        assert_eq!(
+            focus_id(Act::FamilyPick(Sect::Term, 3)),
+            dropdown_base(Dropdown::Family(Sect::Term)).item(3)
+        );
+        assert_eq!(
+            focus_id(Act::WeightPick(Sect::Ui, 0)),
+            dropdown_base(Dropdown::Weight(Sect::Ui)).item(0)
+        );
+        assert_ne!(
+            focus_id(Act::FamilyPick(Sect::Term, 0)),
+            focus_id(Act::FamilyBtn(Sect::Term))
+        );
+    }
+
+    /// The keyboard split: sliders answer arrows, everything else
+    /// answers Enter — an act in the wrong set either becomes
+    /// unreachable or gets its value SET by a synthetic press.
+    #[test]
+    fn tracks_are_exactly_the_slider_acts() {
+        assert!(is_track(Act::VolumeTrack));
+        assert!(is_track(Act::BlurRadiusTrack));
+        assert!(is_track(Act::BlurOpacityTrack));
+        assert!(is_track(Act::ColsTrack));
+        assert!(is_track(Act::RowsTrack));
+        assert!(is_track(Act::PadTrack));
+        assert!(is_track(Act::SizeTrack(Sect::Term)));
+        assert!(!is_track(Act::EditGrid));
+        assert!(!is_track(Act::ToggleSnap));
+        assert!(!is_track(Act::FamilyBtn(Sect::Ui)));
+        assert!(!is_track(Act::BoardGo((1, 0))));
     }
 }
 

@@ -15,7 +15,7 @@ pub mod settings;
 pub use nacelle::geometry::{control, shell};
 
 // The widget contract the application drives every widget through.
-pub use nacelle::{Action, Host, Sizing, Widget};
+pub use nacelle::{Action, DragPhase, Host, SelectOp, Sizing, Widget};
 
 // Geometry, the panel/layout model and text fitting come from the base.
 pub use nacelle::base::*;

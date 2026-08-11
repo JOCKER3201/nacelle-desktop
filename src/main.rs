@@ -3,6 +3,7 @@
 //! and files, on-screen keyboard and control panel at the bottom.
 
 mod audio;
+mod clipboard;
 mod config;
 mod plugins;
 mod pty;
@@ -25,7 +26,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Event, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
@@ -68,7 +69,16 @@ struct Session {
     cwd: Option<PathBuf>,
     cwd_asked: Option<Instant>,
     spoke: bool,
+    /// A paste still on its way to the PTY. Fed in [`PASTE_CHUNK`]
+    /// slices from `pump`, one per tick like the PTY reads themselves:
+    /// a 5 MB paste must not spin the event loop, and the kernel's PTY
+    /// buffer is small.
+    paste_buf: Vec<u8>,
+    paste_off: usize,
 }
+
+/// How much of a pending paste one tick hands the PTY.
+const PASTE_CHUNK: usize = 4096;
 
 impl Session {
     fn spawn(cols: usize, rows: usize, cwd: &Path) -> std::io::Result<Session> {
@@ -81,7 +91,20 @@ impl Session {
             cwd: None,
             cwd_asked: None,
             spoke: true,
+            paste_buf: Vec::new(),
+            paste_off: 0,
         })
+    }
+
+    /// Pastes text into this session: sanitised and bracketed by the
+    /// EMULATION (it owns mode 2004), then queued for `pump` to feed.
+    fn paste(&mut self, text: &str) {
+        let bytes = self.term.paste_bytes(text);
+        if bytes.is_empty() {
+            return;
+        }
+        self.paste_buf.extend_from_slice(&bytes);
+        self.term.view_offset = 0;
     }
 
     /// Processes PTY data; returns true if the shell has exited.
@@ -102,6 +125,16 @@ impl Session {
         if !self.term.responses.is_empty() {
             let resp = std::mem::take(&mut self.term.responses);
             self.pty.write(&resp);
+        }
+        // One slice of any pending paste per tick.
+        if self.paste_off < self.paste_buf.len() {
+            let end = (self.paste_off + PASTE_CHUNK).min(self.paste_buf.len());
+            self.pty.write(&self.paste_buf[self.paste_off..end]);
+            self.paste_off = end;
+            if self.paste_off == self.paste_buf.len() {
+                self.paste_buf.clear();
+                self.paste_off = 0;
+            }
         }
         exited
     }
@@ -308,6 +341,9 @@ fn main() {
         use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
         let dh = window.display_handle().ok().map(|h| h.as_raw());
         let wh = window.window_handle().ok().map(|h| h.as_raw());
+        // The clipboard backend follows whatever winit actually
+        // connected to — the same handle, read once, never an env var.
+        clipboard::install(dh);
         match (dh, wh) {
             (
                 Some(RawDisplayHandle::Wayland(d)),
@@ -551,6 +587,80 @@ fn main() {
     let start = Instant::now();
     let mut mods = ModifiersState::empty();
     let mut mouse = (0.0f32, 0.0f32);
+    // IME state (F1 §3.2): allowed strictly on TEXT-focus edges, and
+    // the only text control wired in this slice is the SAVE AS field.
+    // It starts OFF and the terminal KEEPS it off — the §3.2 red-team
+    // gate: engaging text-input-v3 (KWin) or XIM (XWayland, gamescope's
+    // usual socket) while the shell owns the keyboard at boot can
+    // reroute dead-key/compose delivery and break the byte-identical
+    // PTY stream the boot session promises. Terminal IME (commit-only,
+    // ImePurpose::Terminal) is a later slice, gated on verifying key
+    // delivery unchanged under KWin-Wayland, plain X11 AND gamescope's
+    // XWayland; until then a terminal composition simply never starts
+    // and typing degrades to plain KeyboardInput — which is what
+    // gamescope offers anyway (it usually runs no IME at all).
+    let mut ime_allowed = false;
+    // The last IME cursor area sent, so the anchor is re-sent on
+    // change, not sixty times a second.
+    let mut ime_area: Option<(i32, i32, i32, i32)> = None;
+    // The single pointer-capture path (F1 §5.1): a left press the shell
+    // widget's drag(Begin) ACCEPTED routes every CursorMoved to
+    // drag(Move) and the release to drag(End). Declined presses fall
+    // through to the click/board machinery untouched.
+    let mut drag_capture: Option<widgets::Panel> = None;
+    // Double/triple click, tracked HERE because a widget cannot see
+    // click counts: the count picks the selection kind on Begin.
+    let mut click_streak: u32 = 0;
+    let mut click_last: Option<(Instant, f32, f32)> = None;
+
+    // The F1 §1 command registry. OVER_GREEDY: the terminal is a greedy
+    // control and eats plain chords as bytes — Ctrl+Shift+C/V and the
+    // menu key are exactly the escape hatches that must work over it
+    // (the §1.4 red-team names Shift+F10/Menu explicitly).
+    const CMD_COPY: u32 = 1;
+    const CMD_PASTE: u32 = 2;
+    const CMD_PASTE_PRIMARY: u32 = 3;
+    const CMD_CLEAR_SCROLLBACK: u32 = 4;
+    const CMD_NEW_TAB: u32 = 5;
+    const CMD_EDIT_LAYOUT: u32 = 6;
+    const CMD_OPEN_SETTINGS: u32 = 7;
+    const CMD_BOARD_LEFT: u32 = 8;
+    const CMD_BOARD_RIGHT: u32 = 9;
+    const CMD_INPUT_CUT: u32 = 10;
+    const CMD_INPUT_COPY: u32 = 11;
+    const CMD_INPUT_PASTE: u32 = 12;
+    const CMD_INPUT_SELECT_ALL: u32 = 13;
+    const CMD_OPEN_MENU: u32 = 14;
+    let shortcuts = {
+        use nacelle::focus::{Scope, ShortcutFlags, ShortcutMap};
+        let mut m = ShortcutMap::new();
+        m.bind(Scope::Global, "ctrl+shift+c", CMD_COPY, ShortcutFlags::OVER_GREEDY);
+        m.bind(Scope::Global, "ctrl+shift+v", CMD_PASTE, ShortcutFlags::OVER_GREEDY);
+        m.bind(Scope::Global, "shift+f10", CMD_OPEN_MENU, ShortcutFlags::OVER_GREEDY);
+        m.bind(Scope::Global, "menu", CMD_OPEN_MENU, ShortcutFlags::OVER_GREEDY);
+        // The field chords live in `text_input::key_msg`; they are
+        // REGISTERED here as Scope::Focused so the input menu's hints
+        // come from the one registry (§4.6: hints from ShortcutMap,
+        // never hand-written) — the Global lookups never see them, so
+        // the terminal still gets its literal Ctrl+C.
+        m.bind(Scope::Focused, "ctrl+x", CMD_INPUT_CUT, ShortcutFlags::NONE);
+        m.bind(Scope::Focused, "ctrl+c", CMD_INPUT_COPY, ShortcutFlags::NONE);
+        m.bind(Scope::Focused, "ctrl+v", CMD_INPUT_PASTE, ShortcutFlags::NONE);
+        m.bind(Scope::Focused, "ctrl+a", CMD_INPUT_SELECT_ALL, ShortcutFlags::NONE);
+        m
+    };
+    // The open context menu — the router's TOP layer (F1 §4.3,
+    // LayerId::Menu above everything): while one is up it sees keys
+    // and clicks first, and its draw runs last. None = no layer.
+    let mut menu: Option<nacelle::object::menu::MenuState> = None;
+    // The desktop's one focus chain (F1 §1.2), rebuilt every frame
+    // from whatever registers while drawing. This slice wires the
+    // settings window's controls — the modal layer, so Tab cannot be
+    // stolen from the shell: while settings is closed nothing
+    // registers, the chain is empty, and every key keeps today's
+    // route to the terminal. The focus-visible bit inside keeps the
+    // boot frame pixel-identical (no ring until keyboard navigation).
+    let mut focus_ctl = nacelle::focus::FocusCtl::new();
 
     // Re-reads the configuration and applies everything it can change:
     // the theme, the layout with its panel sizes, the sound clips and
@@ -730,6 +840,541 @@ fn main() {
         }};
     }
 
+    // Routes one drag phase to a panel's widget, in the content box its
+    // last draw used — the same rect discipline as click and wheel.
+    macro_rules! widget_drag {
+        ($panel:expr, $phase:expr, $x:expr, $y:expr) => {{
+            let panel = $panel;
+            let size = window.inner_size();
+            let layout = outer_layout(
+                cur_def!(),
+                cur_def!().pick(screen),
+                size.width as f32,
+                size.height as f32,
+                ui_padding,
+            )
+            .padded(ui_padding);
+            let r = panel_content
+                .get(panel.idx())
+                .copied()
+                .flatten()
+                .unwrap_or(layout.p(panel));
+            let occupied: Vec<bool> =
+                (0..TAB_COUNT).map(|i| sessions[i].is_some()).collect();
+            let snap = sys.lock().unwrap().clone();
+            let host = widgets::Host {
+                snap: &snap,
+                term: sessions[active].as_ref().map(|s| &s.term),
+                tabs: &occupied,
+                tab_active: active,
+                shell_cwd: None,
+                t: start.elapsed().as_secs_f64(),
+                window: (size.width as f32, size.height as f32),
+            };
+            widget_inst
+                .get_mut(panel.idx())
+                .and_then(|w| w.as_mut())
+                .map(|w| w.drag($phase, $x, $y, r, &host))
+                .unwrap_or(widgets::Action::None)
+        }};
+    }
+    // Applies a widget's TermSelect to the active session. The host
+    // resolves `base + row` — the view the widget DREW, echoed through
+    // term_view, never the live view_offset — and owns the click-count
+    // kinds, because a widget cannot see double clicks. Copy-on-select
+    // stores PRIMARY on End only, never per motion: a per-move store
+    // would spam the compositor with ownership changes every frame.
+    macro_rules! apply_term_select {
+        ($op:expr, $col:expr, $row:expr, $base:expr) => {{
+            if let Some(s) = sessions[active].as_mut() {
+                let line: u64 = $base + $row as u64;
+                match $op {
+                    widgets::SelectOp::Begin(kind) => {
+                        let kind = if kind == term::SelKind::Cells {
+                            match click_streak {
+                                2 => term::SelKind::Words,
+                                n if n >= 3 => term::SelKind::Lines,
+                                _ => term::SelKind::Cells,
+                            }
+                        } else {
+                            kind
+                        };
+                        s.term.selection_begin(line, $col, kind);
+                    }
+                    widgets::SelectOp::Extend => s.term.selection_extend(line, $col),
+                    widgets::SelectOp::End => {
+                        s.term.selection_extend(line, $col);
+                        // A click that never moved is a click, not a
+                        // one-cell copy: it clears the old selection.
+                        let trivial = s.term.selection.map_or(true, |sel| {
+                            sel.kind == term::SelKind::Cells && sel.anchor == sel.head
+                        });
+                        if trivial {
+                            s.term.selection_clear();
+                        } else if let Some(text) = s.term.selection_text() {
+                            if !text.is_empty() {
+                                nacelle::clipboard::store(
+                                    nacelle::clipboard::Board::Primary,
+                                    &text,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }};
+    }
+    // Pastes into the active session — the one paste path for every
+    // gesture (Ctrl+Shift+V, middle click, a widget's PastePrimary).
+    macro_rules! paste_into_active {
+        ($board:expr) => {{
+            if let Some(text) = nacelle::clipboard::load($board) {
+                if let Some(s) = sessions[active].as_mut() {
+                    s.paste(&text);
+                }
+            }
+        }};
+    }
+    // Opens a context menu at a point — the one gate every opener runs
+    // through: mid-ride the boards are nowhere in particular, so a menu
+    // over moving rects must be impossible (F1 §4.6's cube rule).
+    macro_rules! open_menu_at {
+        ($entries:expr, $x:expr, $y:expr) => {{
+            if cube.is_none() {
+                menu = Some(nacelle::object::menu::MenuState::open_at(
+                    $entries,
+                    $x,
+                    $y,
+                    start.elapsed().as_secs_f64(),
+                ));
+            }
+        }};
+    }
+    // The three F1 §4.2 menus. Entries are built fresh at open, so a
+    // disabled row reflects that moment (a menu is a snapshot); hints
+    // come from the shortcut registry and nowhere else.
+    macro_rules! terminal_menu_entries {
+        () => {{
+            use nacelle::object::menu::{MenuEntry, MenuItem};
+            let has_sel = sessions[active]
+                .as_ref()
+                .and_then(|s| s.term.selection_text())
+                .map_or(false, |t| !t.is_empty());
+            let free_tab = sessions.iter().any(|s| s.is_none());
+            vec![
+                MenuEntry::Item(
+                    MenuItem::new("COPY", CMD_COPY)
+                        .with_hint(shortcuts.hint(CMD_COPY))
+                        .with_disabled(!has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("PASTE", CMD_PASTE).with_hint(shortcuts.hint(CMD_PASTE)),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("PASTE SELECTION", CMD_PASTE_PRIMARY)
+                        .with_hint(shortcuts.hint(CMD_PASTE_PRIMARY)),
+                ),
+                MenuEntry::Rule,
+                MenuEntry::Item(
+                    MenuItem::new("CLEAR SCROLLBACK", CMD_CLEAR_SCROLLBACK)
+                        .with_hint(shortcuts.hint(CMD_CLEAR_SCROLLBACK)),
+                ),
+                MenuEntry::Rule,
+                MenuEntry::Item(
+                    MenuItem::new("NEW TAB", CMD_NEW_TAB)
+                        .with_hint(shortcuts.hint(CMD_NEW_TAB))
+                        .with_disabled(!free_tab),
+                ),
+            ]
+        }};
+    }
+    macro_rules! panel_menu_entries {
+        () => {{
+            use nacelle::object::menu::{MenuEntry, MenuItem};
+            // Sideways only along the row — exactly the pan gesture's
+            // reach; the vertical fixtures are not "left or right".
+            let on_arm = cur_board.1 == 0;
+            let left_ok = on_arm && has_board!((cur_board.0 - 1, cur_board.1));
+            let right_ok = on_arm && has_board!((cur_board.0 + 1, cur_board.1));
+            vec![
+                MenuEntry::Item(
+                    MenuItem::new("EDIT LAYOUT", CMD_EDIT_LAYOUT)
+                        .with_hint(shortcuts.hint(CMD_EDIT_LAYOUT)),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("SETTINGS", CMD_OPEN_SETTINGS)
+                        .with_hint(shortcuts.hint(CMD_OPEN_SETTINGS)),
+                ),
+                MenuEntry::Rule,
+                MenuEntry::Item(
+                    MenuItem::new("BOARD LEFT", CMD_BOARD_LEFT)
+                        .with_hint(shortcuts.hint(CMD_BOARD_LEFT))
+                        .with_disabled(!left_ok),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("BOARD RIGHT", CMD_BOARD_RIGHT)
+                        .with_hint(shortcuts.hint(CMD_BOARD_RIGHT))
+                        .with_disabled(!right_ok),
+                ),
+            ]
+        }};
+    }
+    macro_rules! input_menu_entries {
+        () => {{
+            use nacelle::object::menu::{MenuEntry, MenuItem};
+            let (has_sel, has_text) = editor
+                .naming
+                .as_ref()
+                .map_or((false, false), |m| {
+                    (m.selection().is_some(), !m.value().is_empty())
+                });
+            vec![
+                MenuEntry::Item(
+                    MenuItem::new("CUT", CMD_INPUT_CUT)
+                        .with_hint(shortcuts.hint(CMD_INPUT_CUT))
+                        .with_disabled(!has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("COPY", CMD_INPUT_COPY)
+                        .with_hint(shortcuts.hint(CMD_INPUT_COPY))
+                        .with_disabled(!has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new("PASTE", CMD_INPUT_PASTE)
+                        .with_hint(shortcuts.hint(CMD_INPUT_PASTE)),
+                ),
+                MenuEntry::Rule,
+                MenuEntry::Item(
+                    MenuItem::new("SELECT ALL", CMD_INPUT_SELECT_ALL)
+                        .with_hint(shortcuts.hint(CMD_INPUT_SELECT_ALL))
+                        .with_disabled(!has_text),
+                ),
+            ]
+        }};
+    }
+    // Enters the layout editor with the current panel rectangles — the
+    // EDIT GRID button's body, shared with the panel context menu so
+    // the two ways in cannot drift apart.
+    macro_rules! enter_editor {
+        () => {{
+            let size = window.inner_size();
+            let (snap, cols, rows, pad) = config::grid_prefs();
+            // The editor edits the OUTER panel rects.
+            let outer = outer_layout(
+                cur_def!(),
+                cur_def!().pick(screen),
+                size.width as f32,
+                size.height as f32,
+                ui_padding,
+            );
+            // Widgets living on other boards are not offered here: a
+            // widget exists once, somewhere. Neither are widgets of
+            // another category — the board being edited decides which
+            // kind it takes (ordinary boards, APPGRID, or SEARCH AND
+            // AI).
+            let mut blocked = vec![false; widgets::panel_count()];
+            let here = match config::board_key(cur_board) {
+                (0, y) if y < 0 => nacelle::base::WidgetCategory::SearchAi,
+                (0, y) if y > 0 => nacelle::base::WidgetCategory::Appgrid,
+                _ => nacelle::base::WidgetCategory::Board,
+            };
+            for pnl in widgets::Panel::all() {
+                if pnl.category() != here {
+                    blocked[pnl.idx()] = true;
+                }
+            }
+            for k in all_boards!() {
+                if k == config::board_key(cur_board) {
+                    continue;
+                }
+                let def = def_of!(k);
+                let lay = outer_layout(
+                    def,
+                    def.pick(screen),
+                    size.width as f32,
+                    size.height as f32,
+                    ui_padding,
+                );
+                for pnl in widgets::Panel::all() {
+                    if lay.p(pnl).x < size.width as f32 {
+                        blocked[pnl.idx()] = true;
+                    }
+                }
+            }
+            editor.start(
+                &outer,
+                size.width as f32,
+                size.height as f32,
+                snap,
+                cols,
+                rows,
+                pad as f32,
+                blocked,
+            );
+        }};
+    }
+    // What a picked row runs — the same commands the shortcut registry
+    // names, so a chord and a menu row cannot drift apart.
+    macro_rules! run_menu_cmd {
+        ($cmd:expr) => {{
+            match $cmd {
+                CMD_COPY => {
+                    let text = sessions[active]
+                        .as_ref()
+                        .and_then(|s| s.term.selection_text())
+                        .unwrap_or_default();
+                    if !text.is_empty() {
+                        nacelle::clipboard::store(nacelle::clipboard::Board::Clipboard, &text);
+                    }
+                }
+                CMD_PASTE => paste_into_active!(nacelle::clipboard::Board::Clipboard),
+                CMD_PASTE_PRIMARY => {
+                    paste_into_active!(nacelle::clipboard::Board::Primary)
+                }
+                CMD_CLEAR_SCROLLBACK => {
+                    if let Some(s) = sessions[active].as_mut() {
+                        // The emulator's own ESC[3J semantics: the
+                        // scrollback goes, the view snaps to live, and
+                        // the selection drops (its line ids may name
+                        // exactly the lines being forgotten).
+                        s.term.scrollback.clear();
+                        s.term.view_offset = 0;
+                        s.term.selection_clear();
+                    }
+                }
+                CMD_NEW_TAB => {
+                    // The first free slot, started where the active
+                    // shell is — the tab widget's own click behaviour.
+                    if let Some(i) = (0..sessions.len()).find(|i| sessions[*i].is_none()) {
+                        let start_dir = sessions[active]
+                            .as_mut()
+                            .and_then(|s| s.cwd())
+                            .unwrap_or_else(|| home.clone());
+                        match Session::spawn(grid.0, grid.1, &start_dir) {
+                            Ok(s) => {
+                                sessions[i] = Some(s);
+                                active = i;
+                            }
+                            Err(e) => {
+                                eprintln!("nacelle-desktop: cannot open PTY: {e}")
+                            }
+                        }
+                    }
+                }
+                CMD_EDIT_LAYOUT => {
+                    if !editor.active {
+                        enter_editor!();
+                    }
+                }
+                CMD_OPEN_SETTINGS => settings.show(),
+                CMD_BOARD_LEFT | CMD_BOARD_RIGHT => {
+                    let target = if $cmd == CMD_BOARD_LEFT {
+                        (cur_board.0 - 1, cur_board.1)
+                    } else {
+                        (cur_board.0 + 1, cur_board.1)
+                    };
+                    if cur_board.1 == 0 && cube.is_none() && has_board!(target) {
+                        step_to!(target);
+                    }
+                }
+                CMD_INPUT_CUT | CMD_INPUT_COPY | CMD_INPUT_PASTE | CMD_INPUT_SELECT_ALL => {
+                    use nacelle::object::text_input::{InputEdited, InputMsg};
+                    let msg = match $cmd {
+                        CMD_INPUT_CUT => InputMsg::Cut,
+                        CMD_INPUT_COPY => InputMsg::Copy,
+                        CMD_INPUT_PASTE => InputMsg::Paste,
+                        _ => InputMsg::SelectAll,
+                    };
+                    let out = editor
+                        .naming
+                        .as_mut()
+                        .map(|m| m.apply(msg))
+                        .unwrap_or(InputEdited::None);
+                    match out {
+                        // The model answers with INTENTS; resolving
+                        // them here mirrors the keyboard path exactly.
+                        InputEdited::CopyRequest { text, .. } => {
+                            nacelle::clipboard::store(
+                                nacelle::clipboard::Board::Clipboard,
+                                &text,
+                            );
+                        }
+                        InputEdited::PasteRequest => {
+                            if let Some(text) = nacelle::clipboard::load(
+                                nacelle::clipboard::Board::Clipboard,
+                            ) {
+                                let text: String = text
+                                    .to_lowercase()
+                                    .chars()
+                                    .filter(|&c| {
+                                        widgets::editor::Editor::layaut_name_char(c)
+                                    })
+                                    .collect();
+                                if let Some(m) = editor.naming.as_mut() {
+                                    m.apply(InputMsg::Insert(text));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }};
+    }
+    // Everything a settings interaction may have ASKED the application
+    // for — one body behind both ways of pressing a control (mouse
+    // click and the F1 §1.5 Enter/Space), so the keyboard cannot reach
+    // a control whose consequences only the mouse path knows.
+    macro_rules! settings_after {
+        () => {{
+            // RESET THIS SCREEN (the LAYAUTS view): the window cannot
+            // clear the section itself — only the application knows
+            // which screen this is — so it asks, like the boards do.
+            if settings.reset_screen {
+                settings.reset_screen = false;
+                let name = config::current_layaut_name()
+                    .unwrap_or_else(|| "default".to_string());
+                match config::clear_screen_section(&name, screen) {
+                    Ok(()) => {
+                        nacelle::sound::emit(nacelle::sound::Event::Save);
+                        popup.show(format!(
+                            "Cleared the {}x{}@{} section of layaut '{}'",
+                            screen.0, screen.1, screen.2, name
+                        ));
+                    }
+                    Err(e) => {
+                        nacelle::sound::emit(nacelle::sound::Event::Error);
+                        popup.show(format!("Cannot reset this screen: {e}"));
+                    }
+                }
+                apply_config!(
+                    layout_spec, active_ov, popup, audio, fonts,
+                    font_scale, ui_font_scale, last_term_key, last_ui_key,
+                    window
+                );
+            }
+            // The BOARDS view asks; the boards are the
+            // application's, so the answers live here.
+            if let Some(act) = settings.board_action.take() {
+                use widgets::settings::BoardAction;
+                match act {
+                    BoardAction::Go(k) => {
+                        // The whole point of going from
+                        // here: the window stays open, so
+                        // no board needs its own control
+                        // panel to come back.
+                        if !editor.active
+                            && cube.is_none()
+                            && k != config::board_key(cur_board)
+                            && has_board!(k)
+                        {
+                            // A distant board is walked one
+                            // neighbour at a time, so the
+                            // move animates through every
+                            // board between — the cube
+                            // sideways, the slide up and
+                            // down.
+                            let mut steps: Vec<config::BoardId> = Vec::new();
+                            let mut at = cur_board;
+                            if k.1 != 0 {
+                                // Top or bottom: y is the
+                                // whole journey, through
+                                // the row if coming from
+                                // the other one.
+                                if at.1 == -k.1 {
+                                    at = (at.0, 0);
+                                    steps.push(at);
+                                }
+                                steps.push((at.0, k.1));
+                            } else {
+                                if at.1 != 0 {
+                                    at = (at.0, 0);
+                                    steps.push(at);
+                                }
+                                while at.0 != k.0 {
+                                    at.0 += if k.0 > at.0 { 1 } else { -1 };
+                                    steps.push(at);
+                                }
+                            }
+                            steps.reverse();
+                            if let Some(first) = steps.pop() {
+                                step_to!(first);
+                                go_queue = steps;
+                            }
+                        }
+                    }
+                    BoardAction::Add(side) => {
+                        let name = config::current_layaut_name()
+                            .unwrap_or_else(|| "default".to_string());
+                        if let Err(e) = config::add_board_in_layaut(&name, side) {
+                            popup.show(format!("Cannot add a board: {e}"));
+                        }
+                        apply_config!(
+                            layout_spec, active_ov, popup,
+                            audio, fonts, font_scale, ui_font_scale,
+                            last_term_key, last_ui_key, window
+                        );
+                    }
+                    BoardAction::Del(k) => {
+                        // Only the row shrinks; home and
+                        // the top and bottom boards are
+                        // fixtures.
+                        if k != (0, 0) && k.1 == 0 && cube.is_none() {
+                            let name = config::current_layaut_name()
+                                .unwrap_or_else(|| "default".to_string());
+                            if let Err(e) = config::remove_board_in_layaut(&name, k) {
+                                popup.show(format!("Cannot remove the board: {e}"));
+                            }
+                            // Whoever stood on a moved board
+                            // follows it; whoever stood on
+                            // the removed one — or came up
+                            // or down from it — lands over
+                            // home.
+                            if cur_board.0 == k.0 {
+                                cur_board.0 = 0;
+                            } else if k.0 > 0 && cur_board.0 > k.0 {
+                                cur_board.0 -= 1;
+                            } else if k.0 < 0 && cur_board.0 < k.0 {
+                                cur_board.0 += 1;
+                            }
+                            apply_config!(
+                                layout_spec, active_ov,
+                                popup, audio, fonts, font_scale,
+                                ui_font_scale, last_term_key,
+                                last_ui_key, window
+                            );
+                        }
+                    }
+                }
+            }
+            // EDIT GRID: hide settings, enter the editor
+            // with the current panel rectangles — the
+            // body is shared with the panel context
+            // menu's EDIT LAYOUT row.
+            if settings.edit_requested {
+                settings.edit_requested = false;
+                if !editor.active {
+                    enter_editor!();
+                }
+                // With the editor already running the window
+                // simply hides — back to the grid.
+            }
+            if editor.active {
+                let size = window.inner_size();
+                let (snap, cols, rows, pad) = config::grid_prefs();
+                editor.sync_prefs(
+                    snap,
+                    cols,
+                    rows,
+                    pad as f32,
+                    size.width as f32,
+                    size.height as f32,
+                );
+            }
+        }};
+    }
+
     refresh_boards!();
     eprintln!(
         "nacelle-desktop: {} of {} registered widgets placed on boards",
@@ -800,6 +1445,18 @@ fn main() {
                     WindowEvent::ModifiersChanged(m) => mods = m.state(),
                     WindowEvent::CursorMoved { position, .. } => {
                         mouse = (position.x as f32, position.y as f32);
+                        // An accepted drag capture owns the pointer:
+                        // every motion goes to the widget as drag(Move)
+                        // and nothing below (board pan, editor hover)
+                        // sees it — the single capture path.
+                        if let Some(panel) = drag_capture {
+                            if let widgets::Action::TermSelect { op, col, row, base } =
+                                widget_drag!(panel, widgets::DragPhase::Move, mouse.0, mouse.1)
+                            {
+                                apply_term_select!(op, col, row, base);
+                            }
+                            return;
+                        }
                         // A held button that travels sideways becomes a
                         // board drag; the click it started as is then
                         // never delivered.
@@ -939,6 +1596,11 @@ fn main() {
                         });
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
+                        // An open menu is a grab: the wheel must not
+                        // scroll whatever sits under it.
+                        if menu.is_some() {
+                            return;
+                        }
                         if editor.active {
                             return;
                         }
@@ -999,6 +1661,20 @@ fn main() {
                         button: MouseButton::Left,
                         ..
                     } => {
+                        // A captured drag ends here, and the release is
+                        // the widget's drag(End) — copy-on-select fires
+                        // in the TermSelect handler, on End only. The
+                        // capture never coexists with the editor or the
+                        // settings window: it only ever starts when
+                        // neither had the press.
+                        if let Some(panel) = drag_capture.take() {
+                            if let widgets::Action::TermSelect { op, col, row, base } =
+                                widget_drag!(panel, widgets::DragPhase::End, mouse.0, mouse.1)
+                            {
+                                apply_term_select!(op, col, row, base);
+                            }
+                            return;
+                        }
                         if editor.active && !settings.open {
                             editor.mouse_up();
                             return;
@@ -1112,10 +1788,13 @@ fn main() {
                                 .unwrap_or(widgets::Action::None)
                         };
                         // The on-screen keyboard sounds its own keys, so a
-                        // click on it must not also click.
+                        // click on it must not also click. A selection
+                        // step is quiet by nature.
                         if !matches!(
                             action,
-                            widgets::Action::None | widgets::Action::Bytes(_)
+                            widgets::Action::None
+                                | widgets::Action::Bytes(_)
+                                | widgets::Action::TermSelect { .. }
                         ) {
                             nacelle::sound::emit(nacelle::sound::Event::Click);
                         }
@@ -1188,6 +1867,14 @@ fn main() {
                                     s.term.scroll_view(n);
                                 }
                             }
+                            // A widget may also answer these from a
+                            // click; the handlers are the drag path's.
+                            widgets::Action::TermSelect { op, col, row, base } => {
+                                apply_term_select!(op, col, row, base)
+                            }
+                            widgets::Action::PastePrimary => {
+                                paste_into_active!(nacelle::clipboard::Board::Primary)
+                            }
                             widgets::Action::None => {}
                         }
                     }
@@ -1196,9 +1883,32 @@ fn main() {
                         button: MouseButton::Left,
                         ..
                     } => {
+                        // Any pointer press hides the focus ring (the
+                        // focus-visible rule, F1 §1.2) — focus itself
+                        // stays wherever it was.
+                        let f = focus_ctl.focused();
+                        focus_ctl.focus(f);
                         // Mid-turn the boards are nowhere in particular;
                         // the press waits for the world to settle.
                         if cube.is_some() {
+                            return;
+                        }
+                        // The open context menu is the top layer: the
+                        // press is its first, BEFORE panel dispatch —
+                        // and a press outside every level closes the
+                        // menu AND is consumed (no click-through, the
+                        // §4.6 rule the popup already follows).
+                        if let Some(m) = menu.as_mut() {
+                            use nacelle::object::menu::MenuOut;
+                            match m.click(mouse.0, mouse.1) {
+                                MenuOut::Close => menu = None,
+                                MenuOut::Pick(cmd) => {
+                                    menu = None;
+                                    nacelle::sound::emit(nacelle::sound::Event::Click);
+                                    run_menu_cmd!(cmd);
+                                }
+                                MenuOut::None => {}
+                            }
                             return;
                         }
                         let size = window.inner_size();
@@ -1248,7 +1958,7 @@ fn main() {
                                         save_board_cur!();
                                         return;
                                     }
-                                    editor.naming = Some(String::new());
+                                    editor.begin_naming(&mut focus_ctl);
                                 }
                                 widgets::editor::EditorHit::Exit => {
                                     // Back to the settings window, GRID view.
@@ -1300,7 +2010,7 @@ fn main() {
                                                 return;
                                             }
                                             settings.close();
-                                            editor.naming = Some(String::new());
+                                            editor.begin_naming(&mut focus_ctl);
                                         }
                                         widgets::editor::EditorHit::Exit => {
                                             editor.stop();
@@ -1316,6 +2026,7 @@ fn main() {
                                 mouse.1,
                                 size.width as f32,
                                 size.height as f32,
+                                Some(&mut focus_ctl),
                             ) {
                                 apply_config!(
                                     layout_spec, active_ov, popup, audio, fonts,
@@ -1323,220 +2034,49 @@ fn main() {
                                     window
                                 );
                             }
-                            // RESET THIS SCREEN (the LAYAUTS view): the
-                            // window cannot clear the section itself —
-                            // only the application knows which screen
-                            // this is — so it asks, like the boards do.
-                            if settings.reset_screen {
-                                settings.reset_screen = false;
-                                let name = config::current_layaut_name()
-                                    .unwrap_or_else(|| "default".to_string());
-                                match config::clear_screen_section(&name, screen) {
-                                    Ok(()) => {
-                                        nacelle::sound::emit(nacelle::sound::Event::Save);
-                                        popup.show(format!(
-                                            "Cleared the {}x{}@{} section of layaut '{}'",
-                                            screen.0, screen.1, screen.2, name
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        nacelle::sound::emit(nacelle::sound::Event::Error);
-                                        popup.show(format!(
-                                            "Cannot reset this screen: {e}"
-                                        ));
-                                    }
-                                }
-                                apply_config!(
-                                    layout_spec, active_ov, popup, audio, fonts,
-                                    font_scale, ui_font_scale, last_term_key, last_ui_key,
-                                    window
-                                );
-                            }
-                            // The BOARDS view asks; the boards are the
-                            // application's, so the answers live here.
-                            if let Some(act) = settings.board_action.take() {
-                                use widgets::settings::BoardAction;
-                                match act {
-                                    BoardAction::Go(k) => {
-                                        // The whole point of going from
-                                        // here: the window stays open, so
-                                        // no board needs its own control
-                                        // panel to come back.
-                                        if !editor.active
-                                            && cube.is_none()
-                                            && k != config::board_key(cur_board)
-                                            && has_board!(k)
-                                        {
-                                            // A distant board is walked one
-                                            // neighbour at a time, so the
-                                            // move animates through every
-                                            // board between — the cube
-                                            // sideways, the slide up and
-                                            // down.
-                                            let mut steps: Vec<config::BoardId> =
-                                                Vec::new();
-                                            let mut at = cur_board;
-                                            if k.1 != 0 {
-                                                // Top or bottom: y is the
-                                                // whole journey, through
-                                                // the row if coming from
-                                                // the other one.
-                                                if at.1 == -k.1 {
-                                                    at = (at.0, 0);
-                                                    steps.push(at);
-                                                }
-                                                steps.push((at.0, k.1));
-                                            } else {
-                                                if at.1 != 0 {
-                                                    at = (at.0, 0);
-                                                    steps.push(at);
-                                                }
-                                                while at.0 != k.0 {
-                                                    at.0 +=
-                                                        if k.0 > at.0 { 1 } else { -1 };
-                                                    steps.push(at);
-                                                }
-                                            }
-                                            steps.reverse();
-                                            if let Some(first) = steps.pop() {
-                                                step_to!(first);
-                                                go_queue = steps;
-                                            }
-                                        }
-                                    }
-                                    BoardAction::Add(side) => {
-                                        let name = config::current_layaut_name()
-                                            .unwrap_or_else(|| "default".to_string());
-                                        if let Err(e) =
-                                            config::add_board_in_layaut(&name, side)
-                                        {
-                                            popup.show(format!(
-                                                "Cannot add a board: {e}"
-                                            ));
-                                        }
-                                        apply_config!(
-                                            layout_spec, active_ov, popup,
-                                            audio, fonts, font_scale, ui_font_scale,
-                                            last_term_key, last_ui_key, window
-                                        );
-                                    }
-                                    BoardAction::Del(k) => {
-                                        // Only the row shrinks; home and
-                                        // the top and bottom boards are
-                                        // fixtures.
-                                        if k != (0, 0) && k.1 == 0 && cube.is_none() {
-                                            let name = config::current_layaut_name()
-                                                .unwrap_or_else(|| {
-                                                    "default".to_string()
-                                                });
-                                            if let Err(e) =
-                                                config::remove_board_in_layaut(
-                                                    &name, k,
-                                                )
-                                            {
-                                                popup.show(format!(
-                                                    "Cannot remove the board: {e}"
-                                                ));
-                                            }
-                                            // Whoever stood on a moved board
-                                            // follows it; whoever stood on
-                                            // the removed one — or came up
-                                            // or down from it — lands over
-                                            // home.
-                                            if cur_board.0 == k.0 {
-                                                cur_board.0 = 0;
-                                            } else if k.0 > 0 && cur_board.0 > k.0 {
-                                                cur_board.0 -= 1;
-                                            } else if k.0 < 0 && cur_board.0 < k.0 {
-                                                cur_board.0 += 1;
-                                            }
-                                            apply_config!(
-                                                layout_spec, active_ov,
-                                                popup, audio, fonts, font_scale,
-                                                ui_font_scale, last_term_key,
-                                                last_ui_key, window
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            // EDIT GRID: hide settings, enter the editor
-                            // with the current panel rectangles.
-                            if settings.edit_requested {
-                                settings.edit_requested = false;
-                                if !editor.active {
-                                    let (snap, cols, rows, pad) = config::grid_prefs();
-                                    // The editor edits the OUTER panel rects.
-                                    let outer = outer_layout(
-                                        cur_def!(),
-                                        cur_def!().pick(screen),
-                                        size.width as f32,
-                                        size.height as f32,
-                                        ui_padding,
-                                    );
-                                    // Widgets living on other boards are
-                                    // not offered here: a widget exists
-                                    // once, somewhere. Neither are
-                                    // widgets of another category — the
-                                    // board being edited decides which
-                                    // kind it takes (ordinary boards,
-                                    // APPGRID, or SEARCH AND AI).
-                                    let mut blocked =
-                                        vec![false; widgets::panel_count()];
-                                    let here = match config::board_key(cur_board) {
-                                        (0, y) if y < 0 => nacelle::base::WidgetCategory::SearchAi,
-                                        (0, y) if y > 0 => nacelle::base::WidgetCategory::Appgrid,
-                                        _ => nacelle::base::WidgetCategory::Board,
-                                    };
-                                    for pnl in widgets::Panel::all() {
-                                        if pnl.category() != here {
-                                            blocked[pnl.idx()] = true;
-                                        }
-                                    }
-                                    for k in all_boards!() {
-                                        if k == config::board_key(cur_board) {
-                                            continue;
-                                        }
-                                        let def = def_of!(k);
-                                        let lay = outer_layout(
-                                            def,
-                                            def.pick(screen),
-                                            size.width as f32,
-                                            size.height as f32,
-                                            ui_padding,
-                                        );
-                                        for pnl in widgets::Panel::all() {
-                                            if lay.p(pnl).x < size.width as f32 {
-                                                blocked[pnl.idx()] = true;
-                                            }
-                                        }
-                                    }
-                                    editor.start(
-                                        &outer,
-                                        size.width as f32,
-                                        size.height as f32,
-                                        snap,
-                                        cols,
-                                        rows,
-                                        pad as f32,
-                                        blocked,
-                                    );
-                                }
-                                // With the editor already running the window
-                                // simply hides — back to the grid.
-                            }
-                            if editor.active {
-                                let (snap, cols, rows, pad) = config::grid_prefs();
-                                editor.sync_prefs(
-                                    snap,
-                                    cols,
-                                    rows,
-                                    pad as f32,
-                                    size.width as f32,
-                                    size.height as f32,
-                                );
-                            }
+                            // Whatever the press asked the application
+                            // for — the body shared with the keyboard
+                            // path (F1 §1.5).
+                            settings_after!();
                             return;
+                        }
+                        // The press is offered to the widget under it as
+                        // drag(Begin) first — the single capture path.
+                        // Today only the shell view accepts (a press on
+                        // its cell grid starts a selection); a declined
+                        // Begin answers None and the press falls through
+                        // to the machinery below, so tab clicks and
+                        // board drags are exactly what they were.
+                        click_streak = match click_last {
+                            Some((t, x, y))
+                                if t.elapsed() < std::time::Duration::from_millis(400)
+                                    && (mouse.0 - x).abs() < 6.0
+                                    && (mouse.1 - y).abs() < 6.0 =>
+                            {
+                                click_streak + 1
+                            }
+                            _ => 1,
+                        };
+                        click_last = Some((Instant::now(), mouse.0, mouse.1));
+                        let layout = outer_layout(
+                            cur_def!(),
+                            cur_def!().pick(screen),
+                            size.width as f32,
+                            size.height as f32,
+                            ui_padding,
+                        )
+                        .padded(ui_padding);
+                        let hit = widgets::Panel::all()
+                            .into_iter()
+                            .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
+                        if let Some(panel) = hit {
+                            if let widgets::Action::TermSelect { op, col, row, base } =
+                                widget_drag!(panel, widgets::DragPhase::Begin, mouse.0, mouse.1)
+                            {
+                                apply_term_select!(op, col, row, base);
+                                drag_capture = Some(panel);
+                                return;
+                            }
                         }
                         // The click is not delivered yet. Held and
                         // moved, it becomes a board drag; released where
@@ -1544,8 +2084,173 @@ fn main() {
                         press_at = Some((mouse.0, mouse.1));
                         let _ = size;
                     }
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Middle,
+                        ..
+                    } => {
+                        // Middle click over the shell view pastes the
+                        // PRIMARY selection — the terminal convention,
+                        // the same action a widget would ask for with
+                        // Action::PastePrimary. Primary may simply not
+                        // exist (gamescope): then this is a quiet no-op.
+                        // A pointer press hides the focus ring (F1 §1.2).
+                        let f = focus_ctl.focused();
+                        focus_ctl.focus(f);
+                        // An open menu is a grab: the press only closes
+                        // it, exactly like a left press outside.
+                        if menu.is_some() {
+                            menu = None;
+                            return;
+                        }
+                        if cube.is_some() || editor.active || settings.open {
+                            return;
+                        }
+                        let size = window.inner_size();
+                        let layout = outer_layout(
+                            cur_def!(),
+                            cur_def!().pick(screen),
+                            size.width as f32,
+                            size.height as f32,
+                            ui_padding,
+                        )
+                        .padded(ui_padding);
+                        if layout.p(p_shell).contains(mouse.0, mouse.1) {
+                            paste_into_active!(nacelle::clipboard::Board::Primary);
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Right,
+                        ..
+                    } => {
+                        // The F1 §4.2 right-click menus. A press with
+                        // one already open dismisses it first, then
+                        // opens whatever the new point earns — the
+                        // toolkit behaviour for a moved right-click.
+                        // Like every pointer press it hides the focus
+                        // ring first (F1 §1.2).
+                        let f = focus_ctl.focused();
+                        focus_ctl.focus(f);
+                        menu = None;
+                        if cube.is_some() {
+                            return;
+                        }
+                        // The SAVE AS field: the input object's menu.
+                        // The editor is otherwise pointer-first and
+                        // claims no other right-click in F1.
+                        if editor.active && !settings.open {
+                            if editor.naming.is_some()
+                                && editor
+                                    .naming_field
+                                    .map_or(false, |r| r.contains(mouse.0, mouse.1))
+                            {
+                                open_menu_at!(input_menu_entries!(), mouse.0, mouse.1);
+                            }
+                            return;
+                        }
+                        // The settings window claims its plane whole;
+                        // no F1 menu opens over it (§4.2 names none).
+                        if settings.open {
+                            return;
+                        }
+                        let size = window.inner_size();
+                        let layout = outer_layout(
+                            cur_def!(),
+                            cur_def!().pick(screen),
+                            size.width as f32,
+                            size.height as f32,
+                            ui_padding,
+                        )
+                        .padded(ui_padding);
+                        let hit = widgets::Panel::all()
+                            .into_iter()
+                            .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
+                        let Some(panel) = hit else { return };
+                        // The content box the widget drew in (u2 §4.1);
+                        // everything above it is the host's chrome —
+                        // the title band and its padding.
+                        let content = panel_content
+                            .get(panel.idx())
+                            .copied()
+                            .flatten()
+                            .unwrap_or(layout.p(panel));
+                        if panel == p_shell && content.contains(mouse.0, mouse.1) {
+                            // Terminal panel: copy/paste/scrollback/tabs.
+                            open_menu_at!(terminal_menu_entries!(), mouse.0, mouse.1);
+                        } else if mouse.1 < content.y {
+                            // The title band: the existing Actions,
+                            // menu-shaped (edit layout, settings, the
+                            // neighbour boards).
+                            open_menu_at!(panel_menu_entries!(), mouse.0, mouse.1);
+                        }
+                        // A right-click no desktop rule claims does
+                        // what it does today: nothing (widgets and
+                        // plugins join in F2 — F1 lays no wrong rails).
+                    }
+                    // IME (F1 §3.2). These arrive only while
+                    // set_ime_allowed is on — today, only for the SAVE
+                    // AS field. Backend reality, and the degradation
+                    // ladder this code accepts: KWin-Wayland speaks
+                    // text-input-v3 and delivers real Preedit/Commit;
+                    // X11/XWayland is XIM — fragile preedit, commit
+                    // mostly; gamescope typically runs no IME at all,
+                    // so everything falls back to plain KeyboardInput,
+                    // which the field already handles as Insert. No
+                    // path below is load-bearing: with no IME the
+                    // prompt still types.
+                    WindowEvent::Ime(ime) => {
+                        use nacelle::object::text_input::InputMsg;
+                        if let Some(model) = editor.naming.as_mut() {
+                            match ime {
+                                Ime::Preedit(text, range) => {
+                                    model.apply(InputMsg::Preedit(text, range));
+                                }
+                                Ime::Commit(text) => {
+                                    // The composition's own end: most
+                                    // backends send Preedit("") first,
+                                    // XIM sometimes does not — ending
+                                    // it here is the belt to that
+                                    // suspender (§3.7). Commit is the
+                                    // ONE text source while composing;
+                                    // canonicalised like typed text.
+                                    model.apply(InputMsg::PreeditEnd);
+                                    model.apply(InputMsg::Insert(text.to_lowercase()));
+                                }
+                                Ime::Enabled => {}
+                                Ime::Disabled => {
+                                    // A dying IME must not leave a
+                                    // phantom composition on screen.
+                                    model.apply(InputMsg::PreeditEnd);
+                                }
+                            }
+                        }
+                    }
                     WindowEvent::KeyboardInput { event: key_event, .. } => {
                         if key_event.state != ElementState::Pressed {
+                            return;
+                        }
+                        // The open context menu is the TOP layer (F1
+                        // §4.3): it sees every key first, and an open
+                        // menu is a grab — a key it does not understand
+                        // is consumed, not passed under it.
+                        if let Some(m) = menu.as_mut() {
+                            use nacelle::object::menu::MenuOut;
+                            if let Some(kev) =
+                                focus_key_ev(&key_event.logical_key, mods)
+                            {
+                                match m.key(&kev) {
+                                    MenuOut::Close => menu = None,
+                                    MenuOut::Pick(cmd) => {
+                                        menu = None;
+                                        nacelle::sound::emit(
+                                            nacelle::sound::Event::Click,
+                                        );
+                                        run_menu_cmd!(cmd);
+                                    }
+                                    MenuOut::None => {}
+                                }
+                            }
                             return;
                         }
                         // Layout editor: the SAVE AS prompt takes typing;
@@ -1553,25 +2258,118 @@ fn main() {
                         // reaches the terminal.
                         if editor.active && !settings.open {
                             if editor.naming.is_some() {
-                                match &key_event.logical_key {
-                                    Key::Named(NamedKey::Enter) => {
-                                        if let Some(name) = editor.naming.clone() {
-                                            if !name.is_empty() {
-                                                editor_save(
-                                                    &mut editor,
-                                                    &name,
-                                                    true,
-                                                    &mut layout_spec,
-                                                    &mut active_ov,
-                                                    &mut popup,
-                                                    screen,
-                                                );
+                                use nacelle::object::text_input::{
+                                    self, InputEdited, InputMsg,
+                                };
+                                // The neutral key event, WITH the text
+                                // this press produced (dead keys and
+                                // compose already applied by winit) —
+                                // that text is what a field inserts.
+                                let Some(mut kev) =
+                                    focus_key_ev(&key_event.logical_key, mods)
+                                else {
+                                    return;
+                                };
+                                // Shift+F10 / Menu over the focused
+                                // field opens ITS menu, anchored under
+                                // the field's box (F1 §4.2: the focus
+                                // chain's rect; the prompt is the one
+                                // focused control of this world).
+                                {
+                                    use nacelle::focus::Scope;
+                                    if shortcuts
+                                        .lookup_over_greedy(&[Scope::Global], &kev)
+                                        == Some(CMD_OPEN_MENU)
+                                    {
+                                        if let Some(r) = editor.naming_field {
+                                            open_menu_at!(
+                                                input_menu_entries!(),
+                                                r.x,
+                                                r.bottom()
+                                            );
+                                        }
+                                        return;
+                                    }
+                                }
+                                kev.text =
+                                    key_event.text.as_ref().map(|s| s.to_string());
+                                let Some(msg) = text_input::key_msg(&kev) else {
+                                    return;
+                                };
+                                // One text source at a time (F1 §3.2
+                                // red-team): while the IME composes,
+                                // committed text arrives as Ime::Commit
+                                // — a KeyboardInput insert alongside it
+                                // would double characters, so it drops.
+                                let composing = editor
+                                    .naming
+                                    .as_ref()
+                                    .map_or(false, |m| m.has_preedit());
+                                if composing && matches!(msg, InputMsg::Insert(_)) {
+                                    return;
+                                }
+                                // Layout names are lowercase by rule;
+                                // canonicalise BEFORE the validator
+                                // judges (the old type_char behaviour).
+                                let msg = match msg {
+                                    InputMsg::Insert(s) => {
+                                        InputMsg::Insert(s.to_lowercase())
+                                    }
+                                    m => m,
+                                };
+                                let out = editor
+                                    .naming
+                                    .as_mut()
+                                    .map(|m| m.apply(msg))
+                                    .unwrap_or(InputEdited::None);
+                                match out {
+                                    InputEdited::Submit => {
+                                        let name = editor
+                                            .naming
+                                            .as_ref()
+                                            .map(|m| m.value().to_string())
+                                            .unwrap_or_default();
+                                        if !name.is_empty() {
+                                            editor_save(
+                                                &mut editor,
+                                                &name,
+                                                true,
+                                                &mut layout_spec,
+                                                &mut active_ov,
+                                                &mut popup,
+                                                screen,
+                                            );
+                                        }
+                                    }
+                                    InputEdited::Cancel => editor.close_naming(),
+                                    // The model answers with INTENTS;
+                                    // the clipboard seam is the app's.
+                                    InputEdited::CopyRequest { text, .. } => {
+                                        nacelle::clipboard::store(
+                                            nacelle::clipboard::Board::Clipboard,
+                                            &text,
+                                        );
+                                    }
+                                    InputEdited::PasteRequest => {
+                                        // A paste is filtered to the
+                                        // name alphabet rather than
+                                        // rejected whole — the old
+                                        // type_char behaviour, kept.
+                                        if let Some(text) = nacelle::clipboard::load(
+                                            nacelle::clipboard::Board::Clipboard,
+                                        ) {
+                                            let text: String = text
+                                                .to_lowercase()
+                                                .chars()
+                                                .filter(|&c| {
+                                                    widgets::editor::Editor::layaut_name_char(c)
+                                                })
+                                                .collect();
+                                            if let Some(m) = editor.naming.as_mut() {
+                                                m.apply(InputMsg::Insert(text));
                                             }
                                         }
                                     }
-                                    Key::Named(NamedKey::Escape) => editor.naming = None,
-                                    Key::Named(NamedKey::Backspace) => editor.backspace(),
-                                    Key::Character(s) => editor.type_char(s),
                                     _ => {}
                                 }
                             } else if let Key::Named(NamedKey::Escape) =
@@ -1581,11 +2379,35 @@ fn main() {
                             }
                             return;
                         }
-                        // Open settings window: ESC closes, other keys
-                        // do not reach the terminal.
+                        // Open settings window: a modal layer, so no
+                        // key reaches the terminal. The window walks
+                        // its own chain (F1 §1.5: Tab in draw order,
+                        // bare arrows spatially, Enter/Space through
+                        // the click body, sliders eating Left/Right);
+                        // whatever it does not claim falls back to the
+                        // layer's own Escape = close, exactly as
+                        // before focus existed.
                         if settings.open {
-                            if let Key::Named(NamedKey::Escape) = key_event.logical_key {
-                                settings.close();
+                            if let Some(kev) =
+                                focus_key_ev(&key_event.logical_key, mods)
+                            {
+                                use widgets::settings::KeyOut;
+                                match settings.key(&kev, &mut focus_ctl) {
+                                    KeyOut::Changed => {
+                                        apply_config!(
+                                            layout_spec, active_ov, popup, audio,
+                                            fonts, font_scale, ui_font_scale,
+                                            last_term_key, last_ui_key, window
+                                        );
+                                        settings_after!();
+                                    }
+                                    KeyOut::Consumed => settings_after!(),
+                                    KeyOut::Ignored => {
+                                        if kev.key == nacelle::focus::Key::Escape {
+                                            settings.close();
+                                        }
+                                    }
+                                }
                             }
                             return;
                         }
@@ -1605,6 +2427,56 @@ fn main() {
                                     elwt.exit();
                                     return;
                                 }
+                            }
+                        }
+                        // The F1 §1 registry, restricted to OVER_GREEDY:
+                        // the terminal is a greedy control and every
+                        // plain chord stays PTY bytes — copy and paste
+                        // are exactly the escape hatches that must work
+                        // over it, which is why the emulator convention
+                        // adds Shift. A matched chord is CONSUMED even
+                        // when it then does nothing (no selection, an
+                        // empty clipboard): Ctrl+Shift+C must never
+                        // fall through and become a ^C.
+                        if let Some(kev) = focus_key_ev(&key_event.logical_key, mods) {
+                            use nacelle::clipboard::Board;
+                            use nacelle::focus::Scope;
+                            match shortcuts.lookup_over_greedy(&[Scope::Global], &kev) {
+                                Some(CMD_COPY) => {
+                                    let text = sessions[active]
+                                        .as_ref()
+                                        .and_then(|s| s.term.selection_text())
+                                        .unwrap_or_default();
+                                    if !text.is_empty() {
+                                        nacelle::clipboard::store(Board::Clipboard, &text);
+                                    }
+                                    return;
+                                }
+                                Some(CMD_PASTE) => {
+                                    paste_into_active!(Board::Clipboard);
+                                    return;
+                                }
+                                Some(CMD_OPEN_MENU) => {
+                                    // The focused control's menu at its
+                                    // rect corner (F1 §4.2). No focus
+                                    // chain is wired in the desktop yet
+                                    // and the shell owns the keyboard
+                                    // at boot, so the focused control
+                                    // IS the terminal; its content box
+                                    // stands in for `rect_of` until the
+                                    // §1 desktop router lands. Fallback
+                                    // to the pointer when the shell is
+                                    // off this board.
+                                    let r = panel_content
+                                        .get(p_shell.idx())
+                                        .copied()
+                                        .flatten();
+                                    let (ax, ay) =
+                                        r.map(|r| (r.x, r.y)).unwrap_or(mouse);
+                                    open_menu_at!(terminal_menu_entries!(), ax, ay);
+                                    return;
+                                }
+                                _ => {}
                             }
                         }
                         let app_cursor = sessions[active]
@@ -1792,6 +2664,10 @@ fn main() {
                         // below locks it again — that would deadlock.
                         let snap_held = sys.lock().unwrap();
                         let snap: &nacelle::telemetry::Snapshot = &snap_held;
+                        // Rings are withheld while board rects are
+                        // mid-flight (the cube ride) — set before any
+                        // registration is answered this frame.
+                        focus_ctl.set_ring_suppressed(cube.is_some());
                         let mut ctx = widgets::Ctx {
                             dl: &mut dl,
                             fonts: &mut fonts,
@@ -1802,6 +2678,12 @@ fn main() {
                             term_font_scale: font_scale,
                             ui_font_scale,
                             panel_scale: 1.0,
+                            // The desktop's chain (F1 §1.2). Only the
+                            // settings window registers in this slice;
+                            // with it closed the chain stays empty and
+                            // the boot frame keeps its pixels (the ring
+                            // needs keyboard navigation to exist).
+                            focus: Some(&mut focus_ctl),
                         };
 
                         let booting = widgets::boot::draw(&mut ctx);
@@ -2389,6 +3271,17 @@ fn main() {
                             }
                             // Warning popup on the very top.
                             popup.draw(&mut ctx);
+                            // The open context menu draws after
+                            // EVERYTHING interactive (F1 §4.3): the
+                            // draw list is immediate, draw order is
+                            // z-order, and the menu is the top layer —
+                            // anything drawn later would sit on it.
+                            // Only the theme's overlay plate follows:
+                            // it covers panels, popovers and content
+                            // alike by design.
+                            if let Some(m) = menu.as_mut() {
+                                m.draw(&mut ctx);
+                            }
                             // The overlay plate is the LAST themed thing
                             // in the list — z 70, one quad over panels,
                             // popovers and content alike: scanlines,
@@ -2416,6 +3309,13 @@ fn main() {
                             }
                         }
 
+                        // The focus frame boundary (F1 §1.2): the chain
+                        // this frame's draws registered becomes the one
+                        // navigation walks — after the world has drawn,
+                        // before the next frame's events, so Tab never
+                        // sees a half-built chain.
+                        focus_ctl.begin_frame();
+
                         // 4. Sound preferences changed in the SOUND view
                         // apply immediately, so dragging the volume
                         // slider is audible while dragging.
@@ -2436,6 +3336,52 @@ fn main() {
                                 a.set_volume(vol);
                                 a.set_typing_enabled(typing);
                                 a.set_ambient_enabled(ambient);
+                            }
+                        }
+
+                        // 4b. IME follows the frame (F1 §3.2): allowed
+                        // strictly while a TEXT control owns the
+                        // keyboard — the SAVE AS field is the only one
+                        // wired in this slice (the terminal's stays
+                        // off; see the ime_allowed declaration). The
+                        // caret box the field just drew anchors the
+                        // candidate window; winit's call wants LOGICAL
+                        // coordinates and converts a Physical value
+                        // itself by the window's scale factor (§3.7's
+                        // logical-px trap, handled by the type).
+                        {
+                            let want_ime = editor.naming.is_some();
+                            if want_ime != ime_allowed {
+                                ime_allowed = want_ime;
+                                window.set_ime_allowed(want_ime);
+                                if want_ime {
+                                    window.set_ime_purpose(
+                                        winit::window::ImePurpose::Normal,
+                                    );
+                                } else {
+                                    ime_area = None;
+                                }
+                            }
+                            if want_ime {
+                                if let Some(cr) = editor.naming_caret {
+                                    let area = (
+                                        cr.x as i32,
+                                        cr.y as i32,
+                                        cr.w.max(1.0) as i32,
+                                        cr.h.max(1.0) as i32,
+                                    );
+                                    if ime_area != Some(area) {
+                                        ime_area = Some(area);
+                                        window.set_ime_cursor_area(
+                                            winit::dpi::PhysicalPosition::new(
+                                                area.0, area.1,
+                                            ),
+                                            winit::dpi::PhysicalSize::new(
+                                                area.2, area.3,
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -2706,6 +3652,9 @@ fn run_resolution_dialog(
                             term_font_scale: 1.0,
                             ui_font_scale: 1.0,
                             panel_scale: 1.0,
+                            // The resolution dialog never gains focus
+                            // code (F1 §1.5): two keys, one button.
+                            focus: None,
                         };
                         widgets::popup::draw_resolution_dialog(&mut ctx, mw, mh);
                         // Only the touched rows travel — a glyph-churn frame
@@ -2738,6 +3687,63 @@ fn run_resolution_dialog(
 }
 
 /// Mapping of physical keys to terminal sequences.
+/// The winit event, translated to the neutral key set the F1 shortcut
+/// registry matches on ([`nacelle::focus::KeyEv`]). Only chords route
+/// through it, so the map covers what a chord can spell; a key with no
+/// neutral name simply matches no binding.
+fn focus_key_ev(key: &Key, mods: ModifiersState) -> Option<nacelle::focus::KeyEv> {
+    use nacelle::focus::{Key as FKey, KeyEv, Mods};
+    let mut m = Mods::NONE;
+    if mods.control_key() {
+        m = m | Mods::CTRL;
+    }
+    if mods.shift_key() {
+        m = m | Mods::SHIFT;
+    }
+    if mods.alt_key() {
+        m = m | Mods::ALT;
+    }
+    if mods.super_key() {
+        m = m | Mods::SUPER;
+    }
+    let k = match key {
+        Key::Character(s) => FKey::Char(s.chars().next()?),
+        Key::Named(n) => match n {
+            NamedKey::Enter => FKey::Enter,
+            NamedKey::Escape => FKey::Escape,
+            NamedKey::Tab => FKey::Tab,
+            NamedKey::Backspace => FKey::Backspace,
+            NamedKey::Delete => FKey::Delete,
+            NamedKey::Space => FKey::Space,
+            NamedKey::ArrowLeft => FKey::Left,
+            NamedKey::ArrowRight => FKey::Right,
+            NamedKey::ArrowUp => FKey::Up,
+            NamedKey::ArrowDown => FKey::Down,
+            NamedKey::Home => FKey::Home,
+            NamedKey::End => FKey::End,
+            NamedKey::PageUp => FKey::PageUp,
+            NamedKey::PageDown => FKey::PageDown,
+            NamedKey::Insert => FKey::Insert,
+            NamedKey::ContextMenu => FKey::Menu,
+            NamedKey::F1 => FKey::F(1),
+            NamedKey::F2 => FKey::F(2),
+            NamedKey::F3 => FKey::F(3),
+            NamedKey::F4 => FKey::F(4),
+            NamedKey::F5 => FKey::F(5),
+            NamedKey::F6 => FKey::F(6),
+            NamedKey::F7 => FKey::F(7),
+            NamedKey::F8 => FKey::F(8),
+            NamedKey::F9 => FKey::F(9),
+            NamedKey::F10 => FKey::F(10),
+            NamedKey::F11 => FKey::F(11),
+            NamedKey::F12 => FKey::F(12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(KeyEv { key: k, mods: m, repeat: false, text: None })
+}
+
 fn key_to_bytes(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
     let esc: u8 = 0x1b;
     match key {
