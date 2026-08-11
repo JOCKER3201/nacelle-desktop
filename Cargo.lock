@@ -765,7 +765,7 @@ dependencies = [
 [[package]]
 name = "libnacelle"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/libnacelle#3159db0600ee04478bb3f7f286ac71d30f271c43"
+source = "git+https://github.com/JOCKER3201/libnacelle#e15741c2d9d84f7a51c970e4b5a2809d5cad1b80"
 dependencies = [
  "chrono",
  "fontdue",
@@ -858,7 +858,7 @@ dependencies = [
 [[package]]
 name = "nacelle-renderer"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-renderer#6f7477fce115007da5edad80bd618a2d7cf13a28"
+source = "git+https://github.com/JOCKER3201/nacelle-renderer#873c3280259774cccf7177a614e72fae0188abe0"
 dependencies = [
  "ash",
  "ash-window",
@@ -870,7 +870,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-control"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#c3934e6c0480d639cb862213b67658cd8aa20ab5"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#b8cf0e5ab7c9c04a0eef6e83c650259d29e70c0f"
 dependencies = [
  "libnacelle",
 ]
@@ -878,7 +878,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-filesystem"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#c3934e6c0480d639cb862213b67658cd8aa20ab5"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#b8cf0e5ab7c9c04a0eef6e83c650259d29e70c0f"
 dependencies = [
  "libnacelle",
 ]
@@ -886,7 +886,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-keyboard"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#c3934e6c0480d639cb862213b67658cd8aa20ab5"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#b8cf0e5ab7c9c04a0eef6e83c650259d29e70c0f"
 dependencies = [
  "libnacelle",
 ]
@@ -894,7 +894,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-shell"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#c3934e6c0480d639cb862213b67658cd8aa20ab5"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#b8cf0e5ab7c9c04a0eef6e83c650259d29e70c0f"
 dependencies = [
  "libnacelle",
 ]

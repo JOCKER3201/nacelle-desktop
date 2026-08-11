@@ -1,12 +1,17 @@
-//! On-screen warning popup (e.g. an element cannot be loaded for the
-//! current screen size). Auto-hides after a few seconds; any click on it
-//! dismisses it immediately.
+//! The on-screen warning (e.g. an element cannot be loaded for the
+//! current screen size) and the standalone resolution dialog.
+//!
+//! The warning itself lives in the toolkit now: [`nacelle::object::toaster`]
+//! owns the box, its geometry, its dwell and the queue behind it (F2
+//! §8.2). What is left here is the desktop's vocabulary — the word
+//! WARNING over the message — and the dialog below, which is a different
+//! object with a different job.
 
 use super::{Ctx, Rect};
 use crate::font::FONT_UI;
+use nacelle::object::toaster::{Toast, Toaster};
 use nacelle::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use std::sync::OnceLock;
-use std::time::Instant;
 
 fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
@@ -51,99 +56,44 @@ impl Role {
     }
 }
 
-// The toast speaks in the section label's voice, its message in the
-// body's (`toast.title.role` / `toast.body.role` in the master).
-static ROLE_TOAST_TITLE: Role = Role::new("label.section");
-static ROLE_TOAST_BODY: Role = Role::new("body");
 // The dialog binds its text through `dialog.title.role` / `dialog.body.role`.
 static ROLE_DIALOG_TITLE: Role = Role::new("title.window");
 static ROLE_DIALOG_BODY: Role = Role::new("body");
 static ROLE_BUTTON: Role = Role::new("button");
 
+/// The desktop's warning notices: the toolkit's toaster, spoken to in
+/// the desktop's own words.
+///
+/// Every `show` in `main.rs` is a warning, which is why this front door
+/// exists at all. A caller with something else to say — a severity, a
+/// different title — builds the [`Toast`] it wants and pushes it to the
+/// toaster itself.
 pub struct Popup {
-    msg: Option<(String, Instant)>,
+    toaster: Toaster,
 }
 
 impl Popup {
     pub fn new() -> Self {
-        Popup { msg: None }
+        Popup { toaster: Toaster::new() }
     }
 
+    /// Queues a warning. Identical warnings collapse into one whose
+    /// dwell simply restarts, so a fault repeating every frame does not
+    /// build a wall of boxes.
     pub fn show(&mut self, message: String) {
-        self.msg = Some((message, Instant::now()));
+        self.toaster.push(Toast::warning(message));
     }
 
-    /// Dismisses the popup if the click landed on it; returns true then.
-    pub fn click(&mut self, x: f32, y: f32, w: f32, _h: f32) -> bool {
-        if self.msg.is_some() {
-            // Recompute the box like draw() does (without fonts: the
-            // minimum width is a generous enough hit box).
-            static MIN_W: OnceLock<TokenId> = OnceLock::new();
-            static TH: OnceLock<TokenId> = OnceLock::new();
-            static TOP: OnceLock<TokenId> = OnceLock::new();
-            let t = theme::resolved();
-            let bw = w * t.px(tok(&MIN_W, "toast.min_w_frac"));
-            let bh = t.px(tok(&TH, "toast.h"));
-            let bx = (w - bw) / 2.0;
-            let by = t.px(tok(&TOP, "toast.top"));
-            if x >= bx && x <= bx + bw && y >= by && y <= by + bh {
-                self.msg = None;
-                return true;
-            }
-        }
-        false
+    /// Dismisses the notice the click landed on; true when one was hit.
+    /// The hit box is the box that was drawn — not, as it used to be,
+    /// the minimum-width one, which missed the ends of every wider
+    /// warning.
+    pub fn click(&mut self, x: f32, y: f32) -> bool {
+        self.toaster.click(x, y)
     }
 
     pub fn draw(&mut self, ctx: &mut Ctx) {
-        static DWELL: OnceLock<TokenId> = OnceLock::new();
-        static MIN_W: OnceLock<TokenId> = OnceLock::new();
-        static MAX_W: OnceLock<TokenId> = OnceLock::new();
-        static TH: OnceLock<TokenId> = OnceLock::new();
-        static TOP: OnceLock<TokenId> = OnceLock::new();
-        static PAD_X: OnceLock<TokenId> = OnceLock::new();
-        static TITLE_GAP: OnceLock<TokenId> = OnceLock::new();
-        static MSG_GAP: OnceLock<TokenId> = OnceLock::new();
-        static TITLE_C: OnceLock<TokenId> = OnceLock::new();
-        static TEXT_C: OnceLock<TokenId> = OnceLock::new();
-        let t = theme::resolved();
-        let Some((msg, t0)) = &self.msg else { return };
-        if t0.elapsed().as_secs_f32() * 1000.0 > t.px(tok(&DWELL, "toast.dwell_ms")) {
-            self.msg = None;
-            return;
-        }
-        let msg = msg.clone();
-
-        let px = ROLE_TOAST_BODY.px(ctx);
-        let title_px = ROLE_TOAST_TITLE.px(ctx);
-        let text_w = ctx.fonts.measure(FONT_UI, px, &msg, ROLE_TOAST_BODY.tracking(px));
-        let bw = (text_w + 2.0 * t.px(tok(&PAD_X, "toast.pad_x")))
-            .max(ctx.w * t.px(tok(&MIN_W, "toast.min_w_frac")))
-            .min(ctx.w * t.px(tok(&MAX_W, "toast.max_w_frac")));
-        let bh = t.px(tok(&TH, "toast.h"));
-        let bx = (ctx.w - bw) / 2.0;
-        let by = t.px(tok(&TOP, "toast.top"));
-
-        nacelle::object::window::frame(ctx, super::Rect::new(bx, by, bw, bh));
-        ctx.dl.text_center(
-            ctx.fonts,
-            FONT_UI,
-            title_px,
-            bx + bw / 2.0,
-            by + t.px(tok(&TITLE_GAP, "toast.title_gap")),
-            "WARNING",
-            col(t.color(tok(&TITLE_C, "component.toast.title"))),
-            ROLE_TOAST_TITLE.tracking(title_px),
-        );
-        ctx.dl.text_center(
-            ctx.fonts,
-            FONT_UI,
-            px,
-            bx + bw / 2.0,
-            by + t.px(tok(&MSG_GAP, "toast.msg_gap")),
-            &msg,
-            col(t.color(tok(&TEXT_C, "component.toast.text"))),
-            ROLE_TOAST_BODY.tracking(px),
-        );
+        self.toaster.draw(ctx);
     }
 }
 

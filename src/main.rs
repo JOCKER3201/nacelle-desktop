@@ -11,6 +11,7 @@ mod sala;
 mod screens;
 mod system;
 mod fullscreen;
+mod hashframe;
 mod widgets;
 mod wl_color;
 
@@ -658,6 +659,11 @@ fn main() {
     // LayerId::Menu above everything): while one is up it sees keys
     // and clicks first, and its draw runs last. None = no layer.
     let mut menu: Option<nacelle::object::menu::MenuState> = None;
+    // The desktop's one tooltip manager (F2 §8.1). Controls file their
+    // requests while drawing — a trimmed table heading, a tab whose
+    // label did not fit — and this shows the one the pointer has
+    // actually settled on, after it has settled long enough.
+    let mut tips = nacelle::object::tooltip::Tooltips::new();
     // The desktop's one focus chain (F1 §1.2), rebuilt every frame
     // from whatever registers while drawing. This slice wires the
     // settings window's controls — the modal layer, so Tab cannot be
@@ -1545,6 +1551,13 @@ fn main() {
                                                 ui_font_scale: ufs,
                                                 panel_scale: 1.0,
                                                 focus: Some(focus_ref),
+                                                // A hall draws its own
+                                                // list, and one manager
+                                                // cannot answer to two
+                                                // windows at once: the
+                                                // hosted settings window
+                                                // files no requests.
+                                                tips: None,
                                             };
                                             settings_ref.draw(&mut ctx);
                                         },
@@ -1936,6 +1949,7 @@ fn main() {
                             widgets::Action::None
                                 | widgets::Action::Bytes(_)
                                 | widgets::Action::TermSelect { .. }
+                                | widgets::Action::Capture
                         ) {
                             nacelle::sound::emit(nacelle::sound::Event::Click);
                         }
@@ -2016,6 +2030,10 @@ fn main() {
                             widgets::Action::PastePrimary => {
                                 paste_into_active!(nacelle::clipboard::Board::Primary)
                             }
+                            // Nothing to do by construction: it is the
+                            // press path's "the gesture is mine", and a
+                            // click is not a gesture to capture.
+                            widgets::Action::Capture => {}
                             widgets::Action::None => {}
                         }
                     }
@@ -2053,13 +2071,10 @@ fn main() {
                             return;
                         }
                         let size = window.inner_size();
-                        // A click on the warning popup dismisses it.
-                        if popup.click(
-                            mouse.0,
-                            mouse.1,
-                            size.width as f32,
-                            size.height as f32,
-                        ) {
+                        // A click on the warning popup dismisses it. The
+                        // toaster answers against the box it drew, so it
+                        // needs the point and nothing else.
+                        if popup.click(mouse.0, mouse.1) {
                             return;
                         }
                         // The layout editor captures all clicks while active
@@ -2211,12 +2226,29 @@ fn main() {
                             .into_iter()
                             .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
                         if let Some(panel) = hit {
-                            if let widgets::Action::TermSelect { op, col, row, base } =
-                                widget_drag!(panel, widgets::DragPhase::Begin, mouse.0, mouse.1)
-                            {
-                                apply_term_select!(op, col, row, base);
-                                drag_capture = Some(panel);
-                                return;
+                            // The widget's own answer decides who owns
+                            // the hand: anything but None takes the
+                            // capture (the contract `Widget::drag`
+                            // states), and the board never sees the
+                            // gesture. A selection asks for something
+                            // while it captures; a scroll thumb asks
+                            // for nothing and says so with Capture.
+                            match widget_drag!(
+                                panel,
+                                widgets::DragPhase::Begin,
+                                mouse.0,
+                                mouse.1
+                            ) {
+                                widgets::Action::None => {}
+                                widgets::Action::TermSelect { op, col, row, base } => {
+                                    apply_term_select!(op, col, row, base);
+                                    drag_capture = Some(panel);
+                                    return;
+                                }
+                                _ => {
+                                    drag_capture = Some(panel);
+                                    return;
+                                }
                             }
                         }
                         // The click is not delivered yet. Held and
@@ -2814,7 +2846,7 @@ fn main() {
                             fonts: &mut fonts,
                             w,
                             h,
-                            t: start.elapsed().as_secs_f64(),
+                            t: hashframe::clock(start.elapsed().as_secs_f64()),
                             mouse,
                             term_font_scale: font_scale,
                             ui_font_scale,
@@ -2825,6 +2857,12 @@ fn main() {
                             // the boot frame keeps its pixels (the ring
                             // needs keyboard navigation to exist).
                             focus: Some(&mut focus_ctl),
+                            // Requests are collected all through the
+                            // frame and answered at the end of it, below
+                            // — a tooltip is drawn over what it explains,
+                            // so it cannot be drawn while that is still
+                            // being drawn.
+                            tips: Some(&mut tips),
                         };
 
                         let booting = widgets::boot::draw(&mut ctx);
@@ -2872,7 +2910,13 @@ fn main() {
                                 tabs: &occupied,
                                 tab_active: active,
                                 shell_cwd: shell_cwd.clone(),
-                                t: start.elapsed().as_secs_f64(),
+                                // The SAME clock the draw context above
+                                // was given: a widget animating off
+                                // `host.t` while the context ran on a
+                                // virtual clock would put the machine's
+                                // speed back into a frame the pixel
+                                // guard is trying to compare.
+                                t: hashframe::clock(start.elapsed().as_secs_f64()),
                                 window: (w, h),
                             };
                             // Two passes, because a widget's height comes
@@ -3403,6 +3447,23 @@ fn main() {
                             if let Some(m) = menu.as_mut() {
                                 m.draw(&mut ctx);
                             }
+                            // Then the tooltip, over the menu as over
+                            // everything else — taken OUT of the context
+                            // first, because the manager cannot be lent
+                            // to the frame and drawn into the same frame
+                            // at once, and because nothing drawn after
+                            // this point may file a request it would be
+                            // too late to answer.
+                            if let Some(t) = ctx.tips.take() {
+                                // A menu covers what is under it, and
+                                // explaining something the user cannot
+                                // see is noise: requests filed under an
+                                // open menu go down with it (F2 §8.1).
+                                if menu.is_some() {
+                                    t.clear();
+                                }
+                                t.draw(&mut ctx);
+                            }
                             // The overlay plate is the LAST themed thing
                             // in the list — z 70, one quad over panels,
                             // popovers and content alike: scanlines,
@@ -3536,6 +3597,9 @@ fn main() {
                         static CLEAR: OnceLock<TokenId> = OnceLock::new();
                         let clear = nacelle::theme::resolved()
                             .bed(tok(&CLEAR, "surface.void"));
+                        // The pixel guard, before a triangle leaves for the
+                        // GPU: unarmed it is one atomic load.
+                        hashframe::observe(&dl);
                         gfx.render(
                             fsize.width,
                             fsize.height,
@@ -3785,6 +3849,8 @@ fn run_resolution_dialog(
                             // The resolution dialog never gains focus
                             // code (F1 §1.5): two keys, one button.
                             focus: None,
+                            // Nor a tooltip: nothing on it is trimmed.
+                            tips: None,
                         };
                         widgets::popup::draw_resolution_dialog(&mut ctx, mw, mh);
                         // Only the touched rows travel — a glyph-churn frame
