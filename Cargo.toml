@@ -1,0 +1,63 @@
+[package]
+name = "nacelle-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Independent sci-fi terminal inspired by eDEX-UI — Rust + Vulkan"
+license = "MIT"
+
+[dependencies]
+# The toolkit: drawing, fonts, themes, the responsive layout engine,
+# interface objects, the widget contract and its scripting, terminal
+# emulation, telemetry and sound.
+libnacelle = { git = "https://github.com/JOCKER3201/libnacelle" }
+
+# The Vulkan renderer, a repository of its own — the same crate the
+# project's compositor will draw with.
+nacelle-renderer = { git = "https://github.com/JOCKER3201/nacelle-renderer" }
+
+# The four core widgets — the control panel, the terminal, the file
+# browser and the keyboard — linked in statically, so the program works
+# with an empty widgets directory and no file can uninstall them. The
+# same crates build the shipped .so; default-features = false drops the
+# dlopen attach symbol, which four static copies would collide on.
+nacelle-widget-control = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
+nacelle-widget-shell = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
+nacelle-widget-keyboard = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
+nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-widgets", default-features = false }
+
+# Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
+# requests on the shared XWayland display. The same crate winit
+# already builds on, so this adds no new code to the tree.
+x11rb = "0.13"
+
+# The Wayland side of the colour pipeline (src/wl_color.rs): a second
+# connection to the display winit already holds, speaking the Color
+# Management protocol. The system backend is the same dlopen one winit
+# uses — no headers, no pkg-config.
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+# Window + events (Linux: Wayland/X11 backends)
+winit = "0.29"
+raw-window-handle = "0.6"
+
+
+
+# The VT parser the terminal emulation is driven by
+vte = "0.13"
+
+# System information collectors (CPU, RAM, processes, network)
+sysinfo = "0.30"
+
+# PTY / fork / exec (Linux)
+# Raw system calls: the PTY (openpty/fork/execvp) and dlopen for the
+# ALSA output in audio.rs — audio needs no build-time dependency.
+libc = "0.2"
+
+
+[profile.release]
+lto = "thin"
+opt-level = 3
+

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=nacelle-desktop
+GenericName=Terminal Emulator
+Comment=Sci-fi terminal in the style of eDEX-UI (Rust + Vulkan)
+Comment[pl]=Terminal sci-fi w stylu eDEX-UI (Rust + Vulkan)
+Exec=@BINDIR@/nacelle-desktop
+Icon=nacelle-desktop
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;edex;sci-fi;
+StartupWMClass=nacelle-desktop
