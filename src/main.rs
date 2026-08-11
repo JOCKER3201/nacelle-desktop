@@ -1441,8 +1441,23 @@ fn main() {
                 // A hall's window first: its whole event surface is a
                 // resize, a redraw and a close it politely declines —
                 // the main window's machinery below never sees it.
+                // The KEYS are the exception, and deliberately so: a
+                // click in a hall gives that window the compositor's
+                // keyboard focus, so every keystroke would arrive here
+                // and be swallowed — the settings window could be
+                // clicked but not typed at or walked with Tab. Keyboard
+                // events fall through to the main window's arm below
+                // and are handled exactly as they always were, because
+                // the state they act on is one and the same wherever it
+                // is drawn.
                 Event::WindowEvent { window_id, event }
-                    if window_id != window.id() =>
+                    if window_id != window.id()
+                        && !matches!(
+                            event,
+                            WindowEvent::KeyboardInput { .. }
+                                | WindowEvent::ModifiersChanged(_)
+                                | WindowEvent::Ime(_)
+                        ) =>
                 {
                     if let Some(i) =
                         salas.iter().position(|s| s.window.id() == window_id)
