@@ -6,6 +6,8 @@ mod audio;
 mod config;
 mod plugins;
 mod pty;
+mod sala;
+mod screens;
 mod system;
 mod fullscreen;
 mod widgets;
@@ -125,6 +127,11 @@ fn main() {
     // they are for the user whose layout is broken enough that the
     // settings window may not be reachable (u1 §5.3).
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Desktop mode: this process IS the desktop (nacelle-session
+    // starts it so), which claims the primary screen for HOME and
+    // raises a hall on every other one. Without the flag the program
+    // is a guest on somebody's desktop and takes one window.
+    let desktop_mode = args.iter().any(|a| a == "--desktop");
     if args.iter().any(|a| a == "--print-layaut") {
         // The effective layout — built-in or file — in .layaut syntax,
         // so what the user starts from is inspectable, not folklore.
@@ -243,12 +250,32 @@ fn main() {
         }
     }
 
+    // Which screen the main window opens on. Desktop mode claims the
+    // primary and raises a hall on every other screen below; without
+    // the flag the one special case is a CHASSIS screen — a panel of
+    // ten inches or less built into a computer case, which this
+    // program makes a fine face for. None keeps winit's own choice,
+    // the current monitor — exactly the old behaviour.
+    let screens = screens::survey(&event_loop);
+    let main_monitor = if desktop_mode {
+        screens.first().filter(|s| s.primary).map(|s| s.monitor.clone())
+    } else {
+        screens::chassis(&screens).map(|s| {
+            eprintln!(
+                "nacelle-desktop: chassis screen '{}' ({:.1}\") \u{2014} opening there",
+                s.monitor.name().unwrap_or_else(|| "?".into()),
+                s.diagonal_in.unwrap_or(0.0)
+            );
+            s.monitor.clone()
+        })
+    };
+
     let window = WindowBuilder::new()
         .with_title("nacelle-desktop")
         .with_decorations(false)
         .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0))
         // Start fullscreen right away, like eDEX-UI.
-        .with_fullscreen(Some(Fullscreen::Borderless(None)))
+        .with_fullscreen(Some(Fullscreen::Borderless(main_monitor)))
         .build(&event_loop)
         .expect("cannot create window");
     // Minimum window size in landscape orientation.
@@ -324,6 +351,18 @@ fn main() {
     if fullscreen.is_some() {
         eprintln!("nacelle-desktop: gamescope clients go fullscreen");
     }
+
+    // Desktop mode: every screen beyond the primary gets a hall — the
+    // board environment with, for now, nothing but empty boards on it.
+    let mut salas: Vec<sala::Sala> = if desktop_mode && screens.len() > 1 {
+        screens
+            .iter()
+            .filter(|s| !s.primary)
+            .filter_map(|s| sala::Sala::new(&event_loop, s.monitor.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Sound. Optional by design: without a device the program simply
     // runs silent. The theme's meta file is what maps events to files.
@@ -718,6 +757,28 @@ fn main() {
     event_loop
         .run(move |event, elwt| {
             match event {
+                // A hall's window first: its whole event surface is a
+                // resize, a redraw and a close it politely declines —
+                // the main window's machinery below never sees it.
+                Event::WindowEvent { window_id, event }
+                    if window_id != window.id() =>
+                {
+                    if let Some(s) =
+                        salas.iter_mut().find(|s| s.window.id() == window_id)
+                    {
+                        match event {
+                            WindowEvent::Resized(_)
+                            | WindowEvent::ScaleFactorChanged { .. } => s.resize(),
+                            WindowEvent::RedrawRequested => s.draw(),
+                            // A hall is part of the desktop: closing it
+                            // closes nothing.
+                            WindowEvent::CloseRequested => eprintln!(
+                                "nacelle-desktop: sala close request ignored"
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => {
                         eprintln!("nacelle-desktop: compositor requested window close");
@@ -2421,6 +2482,11 @@ fn main() {
                         // cadence simply restarts from now.
                         next_frame = now + FRAME;
                         window.request_redraw();
+                        // The halls ride the same cadence; their frame
+                        // is two textured quads, so this costs nothing.
+                        for s in &salas {
+                            s.window.request_redraw();
+                        }
                     }
                     elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
                 }

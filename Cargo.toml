@@ -29,7 +29,7 @@ nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-addon
 # Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
 # requests on the shared XWayland display. The same crate winit
 # already builds on, so this adds no new code to the tree.
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["randr"] }
 
 # The Wayland side of the colour pipeline (src/wl_color.rs): a second
 # connection to the display winit already holds, speaking the Color
