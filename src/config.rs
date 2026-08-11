@@ -72,6 +72,8 @@ pub fn widget_factory() -> &'static nacelle::widget::factory::WidgetFactory {
         std::sync::OnceLock::new();
     F.get_or_init(|| {
         nacelle::widget::factory::WidgetFactory::new(AssetRoots::xdg("nacelle-desktop"))
+            .with_builtin("appcats", nacelle_widget_appcats::builtin_attach)
+            .with_builtin("appgrid", nacelle_widget_appgrid::builtin_attach)
             .with_builtin("control", nacelle_widget_control::builtin_attach)
             .with_builtin("filesystem", nacelle_widget_filesystem::builtin_attach)
             .with_builtin("keyboard", nacelle_widget_keyboard::builtin_attach)
@@ -1383,10 +1385,18 @@ mod tests {
                     assert!(seen.insert(*p), "{} appears twice in {name}", p.name());
                 }
             }
+            // Every BOARD widget: a shipped board layaut cannot place a
+            // widget whose home is a fixture, and the fixtures ship
+            // empty on purpose — the launcher pair is offered when the
+            // APPGRID board is edited, not laid out here.
+            let board_widgets = nacelle::base::registry()
+                .iter()
+                .filter(|d| d.category == nacelle::base::WidgetCategory::Board)
+                .count();
             assert_eq!(
                 seen.len(),
-                nacelle::base::panel_count(),
-                "{name}.layaut must place every registered widget"
+                board_widgets,
+                "{name}.layaut must place every registered board widget"
             );
         }
     }
