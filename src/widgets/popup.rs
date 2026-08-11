@@ -188,7 +188,6 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
 
     // OK button — a parallelogram like the control panel buttons; its
     // colours come from the button class's baked state ladder.
-    static SKEW: OnceLock<TokenId> = OnceLock::new();
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static LEAD: OnceLock<TokenId> = OnceLock::new();
     static MODE: OnceLock<TokenId> = OnceLock::new();
@@ -202,27 +201,17 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
         Some(c) => t.class_state(c, if hover { State::Hover } else { State::Idle }),
         None => StateStyle::RAW,
     };
-    let skew = t.px(tok(&SKEW, "button.skew"));
-    ctx.dl.quad(
-        [
-            [br.x + skew, br.y],
-            [br.right(), br.y],
-            [br.right() - skew, br.bottom()],
-            [br.x, br.bottom()],
-        ],
-        col(st.fill),
-    );
-    ctx.dl.polyline(
-        &[
-            [br.x + skew, br.y],
-            [br.right(), br.y],
-            [br.right() - skew, br.bottom()],
-            [br.x, br.bottom()],
-        ],
-        t.px(tok(&BORDER, "button.border")),
-        col(st.edge),
-        true,
-    );
+    // The same shape as every other button: the frames' corners, drawn
+    // by the toolkit's own helper rather than a second copy of the
+    // outline arithmetic. This dialog is the one place the program
+    // draws before a theme could reasonably be missing, so it takes the
+    // same degradation as everything else — no corners, a plain rect.
+    let (corners, seg) = nacelle::object::button::corners(t);
+    ctx.dl.ring_fill(br, &corners, seg, col(st.fill));
+    let edge_w = t.px(tok(&BORDER, "button.border"));
+    if edge_w > 0.0 {
+        ctx.dl.ring(br, &corners, seg, edge_w, col(st.edge));
+    }
     let bpx = ROLE_BUTTON.px(ctx);
     // Centre one leading-height line in the box, nudged by the theme's
     // cap-height bias when the rhythm block centres optically.
