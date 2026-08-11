@@ -41,7 +41,7 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
 }
 
-/// The engine's colour, as the draw list's legacy `Color`.
+/// The engine's colour, as the draw list's `Color`.
 fn tcol(c: ThemeColor) -> theme::Color {
     theme::Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
@@ -161,8 +161,7 @@ fn main() {
             );
             return;
         };
-        let name = config::effective_components()
-            .1
+        let name = config::current_layaut_name()
             .unwrap_or_else(|| "default".to_string());
         match config::clear_screen_section(&name, key) {
             Ok(()) => eprintln!(
@@ -176,7 +175,6 @@ fn main() {
 
     // Configuration: ~/.config/nacelle-desktop (created on first start).
     let (cfg, startup_warning) = config::load();
-    let mut theme = cfg.theme;
     let mut layout_spec = cfg.layout;
     let mut fonts = font::FontSystem::new();
     // Font preferences (size scales + family/weight, terminal and UI).
@@ -240,7 +238,7 @@ fn main() {
                 "nacelle-desktop: monitor resolution {}x{} is below the 1280x720 minimum",
                 s.width, s.height
             );
-            run_resolution_dialog(event_loop, theme, fonts, s.width, s.height);
+            run_resolution_dialog(event_loop, fonts, s.width, s.height);
             return;
         }
     }
@@ -469,8 +467,7 @@ fn main() {
     // with the way out named. The same line goes to stderr so it
     // survives a headless start.
     if let Some((pinned, placed)) = config::stale_screen_section(&layout_spec, screen) {
-        let lname = config::effective_components()
-            .1
+        let lname = config::current_layaut_name()
             .unwrap_or_else(|| "default".to_string());
         let msg = format!(
             "Layaut '{lname}' pins {pinned} of {placed} panels for {}x{}@{}. \
@@ -615,8 +612,7 @@ fn main() {
     // selected layout's file, and the world is re-read from it.
     macro_rules! save_board_cur {
         () => {{
-            let name = config::effective_components()
-                .1
+            let name = config::current_layaut_name()
                 .unwrap_or_else(|| "default".to_string());
             match config::set_board_in_layaut(
                 &name,
@@ -626,7 +622,7 @@ fn main() {
                 Ok(()) => {
                     nacelle::sound::emit(nacelle::sound::Event::Save);
                     apply_config!(
-                        theme, layout_spec, active_ov, popup, audio, fonts,
+                        layout_spec, active_ov, popup, audio, fonts,
                         font_scale, ui_font_scale, last_term_key, last_ui_key,
                         window
                     );
@@ -639,13 +635,12 @@ fn main() {
         }};
     }
     macro_rules! apply_config {
-        ($theme:ident, $layout_spec:ident, $active_ov:ident, $popup:ident,
+        ($layout_spec:ident, $active_ov:ident, $popup:ident,
          $audio:ident, $fonts:ident, $font_scale:ident, $ui_font_scale:ident,
          $last_term_key:ident, $last_ui_key:ident, $window:ident) => {{
             let (new_cfg, warn) = config::resolve();
             // Sizes travel with the layout, so a new layout brings its own.
             nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
-            $theme = new_cfg.theme;
             $layout_spec = new_cfg.layout;
             $active_ov = $layout_spec.pick(screen).cloned();
             // A new look or sound set means new clips.
@@ -960,7 +955,7 @@ fn main() {
                         }
                         if settings.open && settings.release() {
                                 apply_config!(
-                                    theme, layout_spec, active_ov, popup, audio, fonts,
+                                    layout_spec, active_ov, popup, audio, fonts,
                                     font_scale, ui_font_scale, last_term_key, last_ui_key,
                                     window
                                 );
@@ -1167,14 +1162,12 @@ fn main() {
                                     }
                                     // Overwrite the currently selected layout —
                                     // only the changes, for this screen.
-                                    let name = config::effective_components()
-                                        .1
+                                    let name = config::current_layaut_name()
                                         .unwrap_or_else(|| "default".to_string());
                                     editor_save(
                                         &mut editor,
                                         &name,
                                         false,
-                                        &mut theme,
                                         &mut layout_spec,
                                         &mut active_ov,
                                         &mut popup,
@@ -1224,14 +1217,12 @@ fn main() {
                                                 save_board_cur!();
                                                 return;
                                             }
-                                            let name = config::effective_components()
-                                                .1
+                                            let name = config::current_layaut_name()
                                                 .unwrap_or_else(|| "default".to_string());
                                             editor_save(
                                                 &mut editor,
                                                 &name,
                                                 false,
-                                                &mut theme,
                                                 &mut layout_spec,
                                                 &mut active_ov,
                                                 &mut popup,
@@ -1262,7 +1253,7 @@ fn main() {
                                 size.height as f32,
                             ) {
                                 apply_config!(
-                                    theme, layout_spec, active_ov, popup, audio, fonts,
+                                    layout_spec, active_ov, popup, audio, fonts,
                                     font_scale, ui_font_scale, last_term_key, last_ui_key,
                                     window
                                 );
@@ -1273,8 +1264,7 @@ fn main() {
                             // this is — so it asks, like the boards do.
                             if settings.reset_screen {
                                 settings.reset_screen = false;
-                                let name = config::effective_components()
-                                    .1
+                                let name = config::current_layaut_name()
                                     .unwrap_or_else(|| "default".to_string());
                                 match config::clear_screen_section(&name, screen) {
                                     Ok(()) => {
@@ -1292,7 +1282,7 @@ fn main() {
                                     }
                                 }
                                 apply_config!(
-                                    theme, layout_spec, active_ov, popup, audio, fonts,
+                                    layout_spec, active_ov, popup, audio, fonts,
                                     font_scale, ui_font_scale, last_term_key, last_ui_key,
                                     window
                                 );
@@ -1350,8 +1340,7 @@ fn main() {
                                         }
                                     }
                                     BoardAction::Add(side) => {
-                                        let name = config::effective_components()
-                                            .1
+                                        let name = config::current_layaut_name()
                                             .unwrap_or_else(|| "default".to_string());
                                         if let Err(e) =
                                             config::add_board_in_layaut(&name, side)
@@ -1361,7 +1350,7 @@ fn main() {
                                             ));
                                         }
                                         apply_config!(
-                                            theme, layout_spec, active_ov, popup,
+                                            layout_spec, active_ov, popup,
                                             audio, fonts, font_scale, ui_font_scale,
                                             last_term_key, last_ui_key, window
                                         );
@@ -1371,8 +1360,7 @@ fn main() {
                                         // the top and bottom boards are
                                         // fixtures.
                                         if k != (0, 0) && k.1 == 0 && cube.is_none() {
-                                            let name = config::effective_components()
-                                                .1
+                                            let name = config::current_layaut_name()
                                                 .unwrap_or_else(|| {
                                                     "default".to_string()
                                                 });
@@ -1398,7 +1386,7 @@ fn main() {
                                                 cur_board.0 += 1;
                                             }
                                             apply_config!(
-                                                theme, layout_spec, active_ov,
+                                                layout_spec, active_ov,
                                                 popup, audio, fonts, font_scale,
                                                 ui_font_scale, last_term_key,
                                                 last_ui_key, window
@@ -1508,7 +1496,6 @@ fn main() {
                                                     &mut editor,
                                                     &name,
                                                     true,
-                                                    &mut theme,
                                                     &mut layout_spec,
                                                     &mut active_ov,
                                                     &mut popup,
@@ -1729,7 +1716,6 @@ fn main() {
                         let mut ctx = widgets::Ctx {
                             dl: &mut dl,
                             fonts: &mut fonts,
-                            theme: &theme,
                             w,
                             h,
                             t: start.elapsed().as_secs_f64(),
@@ -2506,7 +2492,6 @@ fn editor_save(
     editor: &mut widgets::editor::Editor,
     name: &str,
     select: bool,
-    theme: &mut theme::Theme,
     layout_spec: &mut config::LayoutDef,
     active_ov: &mut Option<config::ResOverride>,
     popup: &mut widgets::popup::Popup,
@@ -2533,17 +2518,12 @@ fn editor_save(
         popup.show(format!("Cannot save layout '{name}': {e}"));
         return;
     }
-    if select
-        || (config::current_theme_name().is_none()
-            && config::current_layaut_name().is_none())
-    {
+    if select || config::current_layaut_name().is_none() {
         config::select_layaut(name);
     }
     let (new_cfg, warn) = config::resolve();
-                                // Sizes travel with the layout, so a new
-                                // layout brings its own.
-                                nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
-    *theme = new_cfg.theme;
+    // Sizes travel with the layout, so a new layout brings its own.
+    nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
     *layout_spec = new_cfg.layout;
     *active_ov = layout_spec.pick(key).cloned();
     if let Some(wmsg) = warn {
@@ -2560,7 +2540,6 @@ fn editor_save(
 /// the window quits.
 fn run_resolution_dialog(
     event_loop: winit::event_loop::EventLoop<()>,
-    theme: theme::Theme,
     mut fonts: font::FontSystem,
     mw: u32,
     mh: u32,
@@ -2620,7 +2599,6 @@ fn run_resolution_dialog(
                         let mut ctx = widgets::Ctx {
                             dl: &mut dl,
                             fonts: &mut fonts,
-                            theme: &theme,
                             w,
                             h,
                             t: 0.0,

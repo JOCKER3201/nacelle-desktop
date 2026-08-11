@@ -6,21 +6,11 @@
 //!
 //! Everything a theme is made of is DATA, not configuration, so it lives
 //! under XDG_DATA_HOME:
-//!   ~/.local/share/nacelle-desktop/style/         — shared style files (*.css)
 //!   ~/.local/share/nacelle-desktop/layauts/       — custom layout files (*.layaut)
 //!   ~/.local/share/nacelle-desktop/sounds/<set>/  — sound themes, one directory
 //!       each; the DIRECTORY NAME is the theme name. Inside, a "meta"
 //!       file maps every interface event to the sound file that plays
 //!       for it, next to the audio files themselves.
-//!   ~/.local/share/nacelle-desktop/look/<theme>/  — complete themes:
-//!       meta        — metafile with a Name= field (name used in nacelle-desktop.conf)
-//!       *.css       — symlink into ../../style/
-//!       *.layaut    — optional; without it the adaptive default is used
-//!       *.sounds    — optional directory symlink into ../../sounds/;
-//!                     without it the "default" set is used
-//!
-//! Configurations written before this split keep a themes/ directory in
-//! the config directory; it is moved into the data directory on startup.
 //!
 //! EVERY layout is computed from the ACTUAL window size every frame (see
 //! src/flex.rs), so resizing or moving the window reflows the interface
@@ -49,13 +39,11 @@
 //! re-adapted to the window continuously (edge-anchored transform on
 //! landscape, a vertical restack on portrait).
 //!
-//! In nacelle-desktop.conf the Look=<name> option picks a complete theme by the
-//! metafile's Name= field. The Style=, Layaut= and Sounds= options name
-//! components: files from style/ and layauts/ (without extensions) and a
-//! directory from sounds/. Empty values or missing options = defaults
-//! built into the code.
+//! In nacelle-desktop.conf the Theme= option picks one of the engine's
+//! themes; the Layaut= and Sounds= options name a file from layauts/
+//! (without an extension) and a directory from sounds/. Empty values or
+//! missing options = defaults built into the code.
 
-use crate::theme::Theme;
 use crate::widgets::{LayoutSpec, Panel, PanelSpec};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -98,46 +86,17 @@ fn store() -> LayautStore {
 }
 
 pub struct Config {
-    pub theme: Theme,
     pub layout: LayoutDef,
-}
-
-/// Theme found in the data directory (name from the metafile).
-#[derive(Clone)]
-pub struct ThemeInfo {
-    pub name: String,
-    #[allow(dead_code)]
-    pub dir: PathBuf,
-}
-
-
-/// Every look installed anywhere, by the `Name=` of its metafile. A
-/// name found in an earlier directory hides the same name later, so a
-/// look the user installed shadows a system one without either being
-/// touched.
-pub fn list_themes() -> Vec<ThemeInfo> {
-    let mut out: Vec<ThemeInfo> = Vec::new();
-    for dir in asset_dirs("look") {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let Some(meta) = read_meta(&p) else { continue };
-            let Some(name) = parse_kv(&meta).get("Name").cloned() else { continue };
-            if name.is_empty() || out.iter().any(|t| t.name == name) {
-                continue;
-            }
-            out.push(ThemeInfo { name, dir: p });
-        }
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
 }
 
 pub fn load() -> (Config, Option<String>) {
     init_tree(&config_dir());
+    // The dead Look=/Style= keys retire on sight — before anything
+    // reads the layout or the theme (u3 §6.3).
+    migrate_look_style_in(
+        &config_dir().join(CONF_FILE),
+        &AssetRoots::xdg("nacelle-desktop"),
+    );
     // The registry must exist before anything parses a layout: panels
     // are resolved by name against it.
     let roots = AssetRoots::xdg("nacelle-desktop");
@@ -215,16 +174,9 @@ pub fn set_engine_theme(name: &str) {
     set_conf_kv("Theme", name);
 }
 
-/// The layout half of the configuration, which the theme rewrite does not
-/// touch: `Layaut=` names one, a `Look=` left over from the CSS era still
-/// contributes the layout it bundled, and anything missing falls back to the
-/// responsive built-in default.
+/// The layout half of the configuration: `Layaut=` names one, and
+/// anything missing falls back to the responsive built-in default.
 fn resolve_layout(warning: &mut Option<String>) -> LayoutDef {
-    if let Some(name) = current_theme_name() {
-        if let Some(l) = look_layaut(&name) {
-            return l;
-        }
-    }
     let lname = current_layaut_name().unwrap_or_else(|| "default".into());
     match layaut_by_name(&lname) {
         Some(l) => l,
@@ -238,12 +190,20 @@ fn resolve_layout(warning: &mut Option<String>) -> LayoutDef {
     }
 }
 
-/// The layout a pre-rewrite `Look=` directory bundled, by the same symlink and
-/// inline-file rules it always used. The look's `.css` is ignored: colour now
-/// comes from the theme engine.
-fn look_layaut(name: &str) -> Option<LayoutDef> {
-    for dir in asset_dirs("look") {
-        let rd = std::fs::read_dir(&dir).ok()?;
+/// What a retired look's directory bundled as its layout: a symlink
+/// into the shared layauts/ (named by its target's stem) or an inline
+/// `.layaut` file (its text).
+enum LookLayaut {
+    Linked(String),
+    Inline(String),
+}
+
+/// The bundled layout of the look directory whose metafile says
+/// `Name=<name>`, searching every root. Read by the migration only —
+/// nothing resolves through a look any more.
+fn look_bundled_layaut(roots: &AssetRoots, name: &str) -> Option<LookLayaut> {
+    for dir in roots.dirs("look") {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             let d = entry.path();
             if !d.is_dir() {
@@ -255,26 +215,121 @@ fn look_layaut(name: &str) -> Option<LayoutDef> {
             }
             let p = find_file(&d, "layaut")?;
             return match std::fs::read_link(&p) {
-                Ok(target) => {
-                    let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("default");
-                    layaut_by_name(stem)
-                }
-                Err(_) => std::fs::read_to_string(&p).ok().map(|l| nacelle::layout::layaut::parse(&l, name)),
+                Ok(target) => target
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| LookLayaut::Linked(s.to_string())),
+                Err(_) => std::fs::read_to_string(&p).ok().map(LookLayaut::Inline),
             };
         }
     }
     None
 }
 
+/// One-time retirement of the `Look=` and `Style=` keys (u3 §6.3).
+///
+/// A look bundled a stylesheet and, sometimes, a layout. Stylesheets
+/// are not a thing any more, so the layout is the one thing carried
+/// over — rescued BEFORE the keys are dropped: a `.layaut` symlink
+/// becomes `Layaut=<its target's stem>`, an inline `.layaut` file is
+/// copied into the layaut store under the look's name and selected. An
+/// explicit `Layaut=` outranks the bundled one and is left alone. The
+/// theme is its own axis and nothing is guessed from the look's name;
+/// `Theme=default` is written only when `Theme=` is unset. A file
+/// without the old keys is left untouched, which is what makes this
+/// run-once.
+fn migrate_look_style_in(conf: &Path, roots: &AssetRoots) {
+    let Ok(text) = std::fs::read_to_string(conf) else { return };
+    let kv = parse_kv(&text);
+    if !kv.contains_key("Look") && !kv.contains_key("Style") {
+        return;
+    }
+    let look = kv.get("Look").and_then(|s| safe_component(s));
+    let style = kv.get("Style").and_then(|s| safe_component(s));
+    let layaut_set = kv
+        .get("Layaut")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    // The layout the look contributes, if any.
+    let mut carried: Option<String> = None;
+    if let Some(name) = &look {
+        match look_bundled_layaut(roots, name) {
+            Some(LookLayaut::Linked(stem)) => carried = Some(stem),
+            Some(LookLayaut::Inline(body)) => match roots.ensure("layauts") {
+                Ok(dir) => {
+                    let dest = dir.join(format!("{name}.layaut"));
+                    // Never clobber: a file the user already has under
+                    // that name wins, exactly as it would at load time.
+                    if dest.exists() || std::fs::write(&dest, body).is_ok() {
+                        carried = Some(name.clone());
+                    } else {
+                        eprintln!(
+                            "nacelle-desktop: cannot write {} \u{2014} the look's layaut stays where it is",
+                            dest.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("nacelle-desktop: cannot create the layauts directory: {e}")
+                }
+            },
+            None => {}
+        }
+    }
+
+    /// Sets Key=Value on the lines of the file being rewritten,
+    /// preserving everything else — set_conf_kv, minus the filesystem.
+    fn set_line(lines: &mut Vec<String>, key: &str, value: &str) {
+        let prefix = format!("{key}=");
+        for line in lines.iter_mut() {
+            if line.trim_start().starts_with(&prefix) {
+                *line = format!("{key}={value}");
+                return;
+            }
+        }
+        lines.push(format!("{key}={value}"));
+    }
+
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    lines.retain(|l| {
+        let t = l.trim_start();
+        !(t.starts_with("Look=") || t.starts_with("Style="))
+    });
+    if let Some(name) = carried.as_ref().filter(|_| !layaut_set) {
+        set_line(&mut lines, "Layaut", name);
+    }
+    let theme_unset = kv.get("Theme").map(|v| v.trim().is_empty()).unwrap_or(true);
+    if theme_unset {
+        set_line(&mut lines, "Theme", "default");
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    if let Err(e) = std::fs::write(conf, out) {
+        eprintln!("nacelle-desktop: cannot write {}: {e}", conf.display());
+        return;
+    }
+
+    // One line naming what was carried over and what was dropped.
+    let fate = match (&carried, layaut_set) {
+        (Some(l), false) => format!("layaut '{l}' carried over to Layaut="),
+        (Some(l), true) => format!("layaut '{l}' rescued; the explicit Layaut= stays"),
+        (None, _) => "no layaut to carry over".to_string(),
+    };
+    eprintln!(
+        "nacelle-desktop: retired Look={} Style={} \u{2014} {}",
+        look.as_deref().unwrap_or(""),
+        style.as_deref().unwrap_or(""),
+        fate
+    );
+}
+
 /// Resolves the effective configuration.
 ///
-/// Two independent axes now. **Colour** comes from the theme engine in the
+/// Two independent axes. **Colour** comes from the theme engine in the
 /// toolkit — `Theme=` selects one of the shipped themes or one installed on the
 /// search path, and everything else derives from `default.theme`. **Layout**
-/// comes from `Layaut=` exactly as it always did. The old bundling, where a
-/// `Look=` carried a stylesheet and a layout together and the two had to be
-/// canonicalised against each other, is gone: a stylesheet is not a thing any
-/// more.
+/// comes from `Layaut=`.
 ///
 /// The second value is an English warning for the on-screen popup when an
 /// element is unavailable for the current screen size.
@@ -289,8 +344,7 @@ pub fn resolve() -> (Config, Option<String>) {
     if let Some(first) = diags.warnings.first() {
         warning.get_or_insert_with(|| first.clone());
     }
-    let theme = nacelle::theme::legacy_theme();
-    (Config { theme, layout }, warning)
+    (Config { layout }, warning)
 }
 
 /// Loads the theme the configuration selects, reporting whatever the engine
@@ -309,127 +363,13 @@ pub fn list_engine_themes() -> Vec<String> {
     nacelle::theme::available_themes()
 }
 
-/// Clears the component options (a complete look was selected).
-pub fn clear_component_options() {
-    set_conf_kv("Style", "");
-    set_conf_kv("Layaut", "");
-    set_conf_kv("Sounds", "");
-}
-
-/// The component names a look is composed of, read from its symlinks:
-/// (style, layaut, sounds).
-fn look_components(dir: &Path) -> (Option<String>, Option<String>, Option<String>) {
-    let mut style = None;
-    let mut layaut = None;
-    let mut sounds = None;
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            let ext = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase());
-            // Only symlinks count: a look composed of shared components.
-            let Ok(target) = std::fs::read_link(&p) else { continue };
-            let stem = target
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string());
-            match ext.as_deref() {
-                Some("css") => style = stem,
-                Some("layaut") => layaut = stem,
-                // The sounds component is a whole directory, so the
-                // symlink target's final component is the theme name.
-                Some("sounds") => sounds = stem,
-                _ => {}
-            }
-        }
-    }
-    // A look without a layout or sounds symlink uses the defaults.
-    (
-        style,
-        layaut.or_else(|| Some("default".to_string())),
-        sounds.or_else(|| Some("default".to_string())),
-    )
-}
-
-/// Finds a look whose components are exactly (style, layaut, sounds).
-fn find_matching_look(style: &str, layaut: &str, sounds: &str) -> Option<String> {
-    for info in list_themes() {
-        let (s, l, snd) = look_components(&info.dir);
-        if s.as_deref() == Some(style)
-            && l.as_deref() == Some(layaut)
-            && snd.as_deref() == Some(sounds)
-        {
-            return Some(info.name);
-        }
-    }
-    None
-}
-
-/// Effective component names (style, layaut, sounds) implied by the
-/// current configuration — for a selected look these are its symlink
-/// targets, in component mode the Style=/Layaut=/Sounds= values (a
-/// missing one falls back to "default"), and with nothing set all three
-/// are "default".
-pub fn effective_components() -> (Option<String>, Option<String>, Option<String>) {
-    if let Some(name) = current_theme_name() {
-        if let Some(info) = list_themes().into_iter().find(|t| t.name == name) {
-            return look_components(&info.dir);
-        }
-        return (None, None, None);
-    }
-    let s = current_style_name();
-    let l = current_layaut_name();
-    let snd = current_sounds_name();
-    if s.is_none() && l.is_none() && snd.is_none() {
-        return (
-            Some("default".into()),
-            Some("default".into()),
-            Some("default".into()),
-        );
-    }
-    (
-        Some(s.unwrap_or_else(|| "default".into())),
-        Some(l.unwrap_or_else(|| "default".into())),
-        Some(snd.unwrap_or_else(|| "default".into())),
-    )
-}
-
-/// If the effective Style=/Layaut=/Sounds= triple (a missing one falls
-/// back to "default") matches some look, rewrites nacelle-desktop.conf so that
-/// only Look= is set and returns the look name.
-pub fn canonicalize_components() -> Option<String> {
-    if current_theme_name().is_some() {
-        return None;
-    }
-    let style_set = current_style_name();
-    let layaut_set = current_layaut_name();
-    let sounds_set = current_sounds_name();
-    if style_set.is_none() && layaut_set.is_none() && sounds_set.is_none() {
-        return None;
-    }
-    let s = style_set.unwrap_or_else(|| "default".into());
-    let l = layaut_set.unwrap_or_else(|| "default".into());
-    let snd = sounds_set.unwrap_or_else(|| "default".into());
-    let look = find_matching_look(&s, &l, &snd)?;
-    set_theme_option(&look);
-    clear_component_options();
-    Some(look)
-}
-
-/// Clears the Look= option (a component was selected).
-pub fn clear_look_option() {
-    set_conf_kv("Look", "");
-}
-
 /// Path of the bash startup file generated by nacelle-desktop.
 pub fn shellrc_path() -> PathBuf {
     config_dir().join("shellrc")
 }
 
 /// Accepts a config value only if it is a single safe path component
-/// (no separators, not "..", not absolute) — so Look=/Style=/Layaut=
+/// (no separators, not "..", not absolute) — so Layaut=/Sounds=
 /// values joined into data-directory paths cannot escape it.
 fn safe_component(name: &str) -> Option<String> {
     let n = name.trim();
@@ -445,18 +385,6 @@ fn safe_component(name: &str) -> Option<String> {
         (Some(std::path::Component::Normal(c)), None) if c == n => Some(n.to_string()),
         _ => None,
     }
-}
-
-/// Current Look= value from nacelle-desktop.conf (if a safe, non-empty name).
-pub fn current_theme_name() -> Option<String> {
-    let text = std::fs::read_to_string(config_dir().join(CONF_FILE)).ok()?;
-    let kv = parse_kv(&text);
-    kv.get("Look").and_then(|s| safe_component(s))
-}
-
-/// Saves the look choice to nacelle-desktop.conf, preserving the rest of the file.
-pub fn set_theme_option(name: &str) {
-    set_conf_kv("Look", name);
 }
 
 fn conf_kv() -> HashMap<String, String> {
@@ -503,7 +431,7 @@ const CONF_FILE: &str = "nacelle-desktop.conf";
 
 
 /// Sound theme names — the subdirectories of sounds/ that carry a
-/// metafile. Unlike looks, the DIRECTORY NAME is the theme name.
+/// metafile. The DIRECTORY NAME is the theme name.
 pub fn list_sound_themes() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for dir in asset_dirs("sounds") {
@@ -524,11 +452,10 @@ pub fn list_sound_themes() -> Vec<String> {
 }
 
 /// Directory of the sound theme the current configuration selects —
-/// from Sounds=, or from the chosen look's *.sounds symlink. None when
-/// it names a set that is not installed.
+/// Sounds=, or the "default" set when nothing is. None when it names a
+/// set that is not installed.
 pub fn active_sounds_dir() -> Option<PathBuf> {
-    let (_, _, sounds) = effective_components();
-    let name = safe_component(&sounds?)?;
+    let name = current_sounds_name().unwrap_or_else(|| "default".into());
     find_asset("sounds", &name).filter(|d| d.is_dir())
 }
 
@@ -541,64 +468,13 @@ pub fn set_sounds_option(name: &str) {
     set_conf_kv("Sounds", name);
 }
 
-/// File stems (no extension) of files with the given extension in a directory.
-fn list_stems(dir: &Path, ext: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let p = entry.path();
-            let matches = p.is_file()
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case(ext))
-                    .unwrap_or(false);
-            if matches {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    // Dotfiles are the program's own bookkeeping — the
-                    // extra widget boards live in .board<k>.layaut — and
-                    // are not offered as selectable layouts.
-                    if stem.starts_with('.') {
-                        continue;
-                    }
-                    out.push(stem.to_string());
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Style names available in style/ (no extensions).
-pub fn list_styles() -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for dir in asset_dirs("style") {
-        for stem in list_stems(&dir, "css") {
-            if !out.contains(&stem) {
-                out.push(stem);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
 pub fn list_layauts() -> Vec<String> {
     store().list()
-}
-
-/// Current Style= value from nacelle-desktop.conf (if a safe, non-empty name).
-pub fn current_style_name() -> Option<String> {
-    conf_kv().get("Style").and_then(|s| safe_component(s))
 }
 
 /// Current Layaut= value from nacelle-desktop.conf (if a safe, non-empty name).
 pub fn current_layaut_name() -> Option<String> {
     conf_kv().get("Layaut").and_then(|s| safe_component(s))
-}
-
-pub fn set_style_option(name: &str) {
-    set_conf_kv("Style", name);
 }
 
 fn font_prefs_for(prefix: &str, min: f32, max: f32) -> (f32, Option<String>, Option<String>) {
@@ -873,16 +749,9 @@ pub fn set_grid_padding(n: u32) {
     set_conf_kv("GridPadding", &n.to_string());
 }
 
-/// Selects a layout by name, with the standard component rules (the
-/// missing style falls back to "default", Look= is cleared and the pair
-/// is canonicalized back to a look when it matches one).
+/// Selects a layout by name.
 pub fn select_layaut(name: &str) {
     set_layaut_option(name);
-    if current_style_name().is_none() {
-        set_style_option("default");
-    }
-    clear_look_option();
-    canonicalize_components();
 }
 
 
@@ -1138,8 +1007,12 @@ mod tests {
         let colour_of = |name: &str| {
             set_engine_theme(name);
             assert_eq!(current_engine_theme().as_deref(), Some(name));
-            let (cfg, _) = resolve();
-            cfg.theme.base
+            // resolve() is what reloads the engine on a settings click.
+            let (_cfg, _) = resolve();
+            nacelle::theme::resolved().color(
+                nacelle::theme::id("accent.primary")
+                    .expect("the master declares accent.primary"),
+            )
         };
 
         let crimson = colour_of("crimson");
@@ -1564,6 +1437,108 @@ mod tests {
         assert_eq!(small.panels.len(), 1);
         assert_eq!(small.panels[0].0, wp("keyboard"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// u3 §6.3: a configuration carrying the retired Look=/Style= keys
+    /// migrates once, at startup. The look's inline .layaut — the one
+    /// thing a user could lose — is copied into the layaut store under
+    /// the look's name and selected as Layaut=; the dead keys leave the
+    /// file; Theme=default is written because nothing was set; every
+    /// other key survives verbatim. Hermetic: explicit paths and an
+    /// explicit AssetRoots, no environment (the env is shared between
+    /// parallel tests and races).
+    #[test]
+    fn look_and_style_retire_carrying_the_bundled_layaut() {
+        let dir = std::env::temp_dir()
+            .join(format!("nacelle-look-migration-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        let lookdir = data.join("look").join("retro");
+        std::fs::create_dir_all(&lookdir).unwrap();
+        std::fs::write(lookdir.join("meta"), "Name=Retro\n").unwrap();
+        std::fs::write(
+            lookdir.join("retro.layaut"),
+            "clock = 1.00 2.00 10.00 10.00\n",
+        )
+        .unwrap();
+        let conf = dir.join("nacelle-desktop.conf");
+        std::fs::write(&conf, "# kept\nLook=Retro\nStyle=neon\nSoundVolume=40\n").unwrap();
+        let roots = nacelle::assets::AssetRoots::new(vec![data.clone()], data.clone());
+
+        migrate_look_style_in(&conf, &roots);
+
+        let text = std::fs::read_to_string(&conf).unwrap();
+        let kv = parse_kv(&text);
+        assert!(
+            !kv.contains_key("Look") && !kv.contains_key("Style"),
+            "the dead keys must leave the file: {text}"
+        );
+        assert_eq!(kv.get("Layaut").map(String::as_str), Some("Retro"));
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("default"));
+        assert_eq!(kv.get("SoundVolume").map(String::as_str), Some("40"));
+        assert!(text.contains("# kept"), "comments survive the rewrite");
+        // The rescued layaut is installed: the store loads it by name.
+        let def = test_store(&data)
+            .load("Retro")
+            .expect("the look's layaut must be rescued into layauts/");
+        assert!(matches!(def.base, LayoutMode::Fixed(_)));
+
+        // Run-once: with the keys gone the file is left untouched.
+        let before = std::fs::read_to_string(&conf).unwrap();
+        migrate_look_style_in(&conf, &roots);
+        assert_eq!(before, std::fs::read_to_string(&conf).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The symlink half of u3 §6.3 step 2, plus its step 3: a look whose
+    /// .layaut is a symlink contributes only its target's stem — nothing
+    /// is copied — and an explicit Layaut= outranks the bundled layout
+    /// and is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_look_layaut_yields_its_stem_and_an_explicit_choice_wins() {
+        let dir = std::env::temp_dir()
+            .join(format!("nacelle-look-symlink-migration-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        let lookdir = data.join("look").join("tron");
+        std::fs::create_dir_all(&lookdir).unwrap();
+        std::fs::write(lookdir.join("meta"), "Name=Tron\n").unwrap();
+        // The shared layout the look linked to, installed where the
+        // link points; a dangling symlink bundles nothing, exactly as
+        // it always did.
+        std::fs::create_dir_all(data.join("layauts")).unwrap();
+        std::fs::write(
+            data.join("layauts").join("neon.layaut"),
+            "clock = 1.00 2.00 10.00 10.00\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../layauts/neon.layaut",
+            lookdir.join("tron.layaut"),
+        )
+        .unwrap();
+        let roots = nacelle::assets::AssetRoots::new(vec![data.clone()], data.clone());
+
+        // Nothing else set: the stem becomes the selection.
+        let conf = dir.join("a.conf");
+        std::fs::write(&conf, "Look=Tron\n").unwrap();
+        migrate_look_style_in(&conf, &roots);
+        let kv = parse_kv(&std::fs::read_to_string(&conf).unwrap());
+        assert_eq!(kv.get("Layaut").map(String::as_str), Some("neon"));
+        assert!(
+            !data.join("layauts").join("Tron.layaut").exists(),
+            "a symlinked layaut is named, never copied"
+        );
+
+        // An explicit Layaut= already in the file stays what it is.
+        let conf2 = dir.join("b.conf");
+        std::fs::write(&conf2, "Look=Tron\nLayaut=mine\n").unwrap();
+        migrate_look_style_in(&conf2, &roots);
+        let kv2 = parse_kv(&std::fs::read_to_string(&conf2).unwrap());
+        assert_eq!(kv2.get("Layaut").map(String::as_str), Some("mine"));
+        assert!(!kv2.contains_key("Look"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

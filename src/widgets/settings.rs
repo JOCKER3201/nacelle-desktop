@@ -1,5 +1,5 @@
 //! Modal settings window (centered). Main view: CLOSE + THEMES. The THEMES
-//! view is a submenu with LOOK (the theme engine's themes), STYLES, LAYAUTS
+//! view is a submenu with LOOK (the theme engine's themes), LAYAUTS
 //! (layouts) and SOUNDS (sound themes). A theme comes from the toolkit — the
 //! eight compiled in plus anything installed on the search path — and is
 //! written as Theme=; layouts and sound sets are read from the data
@@ -19,7 +19,6 @@ enum View {
     Menu,
     Themes,
     Look,
-    Styles,
     Layauts,
     Sounds,
     Font,
@@ -36,11 +35,9 @@ enum Act {
     Back,
     OpenThemes,
     OpenLook,
-    OpenStyles,
     OpenLayauts,
     OpenSounds,
     Look(usize),
-    Style(usize),
     Layaut(usize),
     Sounds(usize),
     OpenFont,
@@ -211,12 +208,10 @@ pub struct Settings {
     view: View,
     /// The engine's theme names, for the THEMES list.
     themes: Vec<String>,
-    styles: Vec<String>,
     layauts: Vec<String>,
     sounds: Vec<String>,
     /// Current selections from nacelle-desktop.conf (highlighted in the lists).
     current_look: Option<String>,
-    current_style: Option<String>,
     current_layaut: Option<String>,
     current_sounds: Option<String>,
     /// Font view state, indexed by section (0 = Term, 1 = Ui).
@@ -312,11 +307,9 @@ impl Settings {
             open: false,
             view: View::Menu,
             themes: Vec::new(),
-            styles: Vec::new(),
             layauts: Vec::new(),
             sounds: Vec::new(),
             current_look: None,
-            current_style: None,
             current_layaut: None,
             current_sounds: None,
             families: [Vec::new(), Vec::new()],
@@ -580,7 +573,7 @@ impl Settings {
             Act::Close | Act::Back => {}
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
             Act::VolumeTrack => {}
-            Act::Look(_) | Act::Style(_) | Act::Layaut(_) | Act::Sounds(_) => {}
+            Act::Look(_) | Act::Layaut(_) | Act::Sounds(_) => {}
             _ => emit(Sfx::Click),
         }
         match act {
@@ -592,9 +585,7 @@ impl Settings {
                 emit(Sfx::Click);
                 self.dropdown = None;
                 self.view = match self.view {
-                    View::Look | View::Styles | View::Layauts | View::Sounds => {
-                        View::Themes
-                    }
+                    View::Look | View::Layauts | View::Sounds => View::Themes,
                     _ => View::Menu,
                 }
             }
@@ -606,11 +597,6 @@ impl Settings {
                 self.themes = config::list_engine_themes();
                 self.refresh_current();
                 self.view = View::Look;
-            }
-            Act::OpenStyles => {
-                self.styles = config::list_styles();
-                self.refresh_current();
-                self.view = View::Styles;
             }
             Act::OpenLayauts => {
                 self.layauts = config::list_layauts();
@@ -633,29 +619,9 @@ impl Settings {
                     return true;
                 }
             }
-            Act::Style(i) => {
-                // A component clears Look=; the missing other component
-                // is automatically set to "default".
-                if let Some(name) = self.styles.get(i).cloned() {
-                    config::set_style_option(&name);
-                    if config::current_layaut_name().is_none() {
-                        config::set_layaut_option("default");
-                    }
-                    config::clear_look_option();
-                    config::canonicalize_components();
-                    self.refresh_current();
-                    emit(Sfx::Theme);
-                    return true;
-                }
-            }
             Act::Layaut(i) => {
                 if let Some(name) = self.layauts.get(i).cloned() {
                     config::set_layaut_option(&name);
-                    if config::current_style_name().is_none() {
-                        config::set_style_option("default");
-                    }
-                    config::clear_look_option();
-                    config::canonicalize_components();
                     self.refresh_current();
                     emit(Sfx::Theme);
                     return true;
@@ -664,11 +630,6 @@ impl Settings {
             Act::Sounds(i) => {
                 if let Some(name) = self.sounds.get(i).cloned() {
                     config::set_sounds_option(&name);
-                    if config::current_style_name().is_none() {
-                        config::set_style_option("default");
-                    }
-                    config::clear_look_option();
-                    config::canonicalize_components();
                     self.refresh_current();
                     emit(Sfx::Theme);
                     return true;
@@ -867,18 +828,19 @@ impl Settings {
         false
     }
 
-    /// Refreshes the selection highlights: the look from Look= and the
-    /// effective style/layaut components (a selected look also marks the
-    /// components it is composed of).
+    /// Refreshes the selection highlights from nacelle-desktop.conf:
+    /// the engine's theme (Theme=), the layout (Layaut=) and the sound
+    /// set (Sounds=), each falling back to "default" when unset.
     fn refresh_current(&mut self) {
-        // The engine's selection, not the retired Look=.
         self.current_look = Some(
             config::current_engine_theme().unwrap_or_else(|| "default".to_string()),
         );
-        let (style, layaut, sounds) = config::effective_components();
-        self.current_style = style;
-        self.current_layaut = layaut;
-        self.current_sounds = sounds;
+        self.current_layaut = Some(
+            config::current_layaut_name().unwrap_or_else(|| "default".to_string()),
+        );
+        self.current_sounds = Some(
+            config::current_sounds_name().unwrap_or_else(|| "default".to_string()),
+        );
     }
 
     pub fn draw(&mut self, ctx: &mut Ctx) {
@@ -908,7 +870,6 @@ impl Settings {
             View::Menu => "SETTINGS",
             View::Themes => "SETTINGS \u{2014} THEMES",
             View::Look => "SETTINGS \u{2014} LOOK",
-            View::Styles => "SETTINGS \u{2014} STYLES",
             View::Layauts => "SETTINGS \u{2014} LAYAUTS",
             View::Sounds => "SETTINGS \u{2014} SOUNDS",
             View::Font => "SETTINGS \u{2014} FONT",
@@ -995,7 +956,7 @@ impl Settings {
                 }
             }
             View::Themes => {
-                // Submenu: LOOK / STYLES / LAYAUTS.
+                // Submenu: LOOK / LAYAUTS / SOUNDS.
                 self.button(
                     ctx,
                     Rect::new(content.x, content.y, corner_w, btn_h),
@@ -1006,7 +967,6 @@ impl Settings {
                 let bx = content.x + (content.w - bw) / 2.0;
                 let entries = [
                     ("LOOK", Act::OpenLook),
-                    ("STYLES", Act::OpenStyles),
                     ("LAYAUTS", Act::OpenLayauts),
                     ("SOUNDS", Act::OpenSounds),
                 ];
@@ -1020,11 +980,6 @@ impl Settings {
                     self.themes.clone();
                 self.item_grid(ctx, content, btn_h, gap, corner_w, &names, Act::Look);
                 self.empty_note(ctx, content, btn_h, gap, &names, "NO LOOKS FOUND");
-            }
-            View::Styles => {
-                let names = self.styles.clone();
-                self.item_grid(ctx, content, btn_h, gap, corner_w, &names, Act::Style);
-                self.empty_note(ctx, content, btn_h, gap, &names, "NO STYLES FOUND");
             }
             View::Layauts => {
                 let names = self.layauts.clone();
@@ -1968,10 +1923,6 @@ impl Settings {
         let is_current = match act {
             Act::Look(i) => {
                 self.themes.get(i).map(|n| Some(n) == self.current_look.as_ref())
-                    == Some(true)
-            }
-            Act::Style(i) => {
-                self.styles.get(i).map(|s| Some(s) == self.current_style.as_ref())
                     == Some(true)
             }
             Act::Layaut(i) => {

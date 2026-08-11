@@ -2,6 +2,12 @@
 
 use super::Ctx;
 use crate::font::{FONT_MONO, FONT_UI};
+use nacelle::theme::{self, TokenId};
+use std::sync::OnceLock;
+
+fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
+    *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
+}
 
 const BOOT_LOG: &[&str] = &[
     "nacelle-desktop kernel interface initialized",
@@ -33,15 +39,17 @@ pub fn draw(ctx: &mut Ctx) -> bool {
         return false;
     }
     let px = ctx.font_px(1.3);
+    static BASE: OnceLock<TokenId> = OnceLock::new();
+    let base = theme::resolved().color(tok(&BASE, "accent.primary"));
     if t < 1.8 {
         // Scrolling log.
         let lines_shown = ((t / 1.6) * BOOT_LOG.len() as f64) as usize;
         let mut y = ctx.vh(3.0);
         for (i, line) in BOOT_LOG.iter().take(lines_shown + 1).enumerate() {
             let color = if i == lines_shown {
-                ctx.theme.base
+                base
             } else {
-                ctx.theme.base.alpha(0.6)
+                base.alpha(0.6)
             };
             ctx.dl.text(
                 ctx.fonts,
@@ -65,7 +73,7 @@ pub fn draw(ctx: &mut Ctx) -> bool {
             ctx.w / 2.0,
             ctx.h / 2.0 - big,
             "NACELLE",
-            ctx.theme.base,
+            base,
             big * 0.15,
         );
         let sub = ctx.font_px(1.2);
@@ -77,7 +85,7 @@ pub fn draw(ctx: &mut Ctx) -> bool {
             ctx.w / 2.0,
             ctx.h / 2.0 + big * 0.4,
             "INITIATING BOOT SEQUENCE",
-            ctx.theme.base.alpha(blink),
+            base.alpha(blink),
             sub * 0.3,
         );
     }
