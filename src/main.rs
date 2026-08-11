@@ -390,6 +390,11 @@ fn main() {
 
     // Desktop mode: every screen beyond the primary gets a hall — the
     // board environment with, for now, nothing but empty boards on it.
+    // Which hall the settings window is being drawn on, and where the
+    // pointer is there. The window follows the hand from screen to
+    // screen; None means the main window has it, as it always did.
+    let mut settings_host: Option<usize> = None;
+    let mut sala_mouse = (0.0f32, 0.0f32);
     let mut salas: Vec<sala::Sala> = if desktop_mode && screens.len() > 1 {
         screens
             .iter()
@@ -760,6 +765,37 @@ fn main() {
         () => {
             world.ids()
         };
+    }
+    // Every board as it would look at the given size, the current one
+    // marked — what the BOARDS view draws. Taken at the size of the
+    // screen the settings window is being drawn on, which is why this
+    // is a macro over (w, h) rather than the main window's numbers.
+    macro_rules! board_thumbs {
+        ($w:expr, $h:expr) => {{
+            let mut thumbs = Vec::new();
+            for k in all_boards!() {
+                let def = def_of!(k);
+                let lay = outer_layout(def, def.pick(screen), $w, $h, ui_padding);
+                let panels = widgets::Panel::all()
+                    .into_iter()
+                    .filter_map(|pnl| {
+                        let r = lay.p(pnl);
+                        (r.x < $w).then_some(widgets::PanelSpec {
+                            x: r.x / $w * 100.0,
+                            y: r.y / $h * 100.0,
+                            w: r.w / $w * 100.0,
+                            h: r.h / $h * 100.0,
+                        })
+                    })
+                    .collect();
+                thumbs.push(widgets::settings::BoardThumb {
+                    id: k,
+                    current: k == config::board_key(cur_board),
+                    panels,
+                });
+            }
+            thumbs
+        }};
     }
     // SAVE while standing on a board: the board's panels go into the
     // selected layout's file, and the world is re-read from it.
@@ -1408,13 +1444,100 @@ fn main() {
                 Event::WindowEvent { window_id, event }
                     if window_id != window.id() =>
                 {
-                    if let Some(s) =
-                        salas.iter_mut().find(|s| s.window.id() == window_id)
+                    if let Some(i) =
+                        salas.iter().position(|s| s.window.id() == window_id)
                     {
                         match event {
                             WindowEvent::Resized(_)
-                            | WindowEvent::ScaleFactorChanged { .. } => s.resize(),
-                            WindowEvent::RedrawRequested => s.draw(),
+                            | WindowEvent::ScaleFactorChanged { .. } => {
+                                salas[i].resize()
+                            }
+                            // The pointer arriving here is what moves the
+                            // settings window to this screen: it follows
+                            // the hand, and only the hand — the keyboard
+                            // keeps talking to the main window, because
+                            // the window's STATE is one and the same
+                            // wherever it is drawn.
+                            WindowEvent::CursorMoved { position, .. } => {
+                                sala_mouse = (position.x as f32, position.y as f32);
+                                settings_host = Some(i);
+                                if settings.open {
+                                    settings.drag(sala_mouse.0);
+                                    let pointer =
+                                        settings.hover(sala_mouse.0, sala_mouse.1);
+                                    salas[i].window.set_cursor_icon(if pointer {
+                                        CursorIcon::Pointer
+                                    } else {
+                                        CursorIcon::Default
+                                    });
+                                }
+                            }
+                            WindowEvent::MouseInput {
+                                state: ElementState::Pressed,
+                                button: MouseButton::Left,
+                                ..
+                            } if settings.open => {
+                                let size = salas[i].window.inner_size();
+                                if settings.click(
+                                    sala_mouse.0,
+                                    sala_mouse.1,
+                                    size.width as f32,
+                                    size.height as f32,
+                                    Some(&mut focus_ctl),
+                                ) {
+                                    apply_config!(
+                                        layout_spec, active_ov, popup, audio, fonts,
+                                        font_scale, ui_font_scale, last_term_key,
+                                        last_ui_key, window
+                                    );
+                                }
+                            }
+                            WindowEvent::MouseInput {
+                                state: ElementState::Released,
+                                button: MouseButton::Left,
+                                ..
+                            } if settings.open => {
+                                if settings.release() {
+                                    apply_config!(
+                                        layout_spec, active_ov, popup, audio, fonts,
+                                        font_scale, ui_font_scale, last_term_key,
+                                        last_ui_key, window
+                                    );
+                                }
+                            }
+                            WindowEvent::RedrawRequested => {
+                                if settings_host == Some(i) && settings.open {
+                                    let size = salas[i].window.inner_size();
+                                    let (sw, sh) =
+                                        (size.width as f32, size.height as f32);
+                                    settings.boards = board_thumbs!(sw, sh);
+                                    let t = start.elapsed().as_secs_f64();
+                                    let (m, tfs, ufs) =
+                                        (sala_mouse, font_scale, ui_font_scale);
+                                    let (settings_ref, focus_ref) =
+                                        (&mut settings, &mut focus_ctl);
+                                    salas[i].draw_hosted(
+                                        &mut fonts,
+                                        |dl, w, h, fonts| {
+                                            let mut ctx = widgets::Ctx {
+                                                dl,
+                                                fonts,
+                                                w,
+                                                h,
+                                                t,
+                                                mouse: m,
+                                                term_font_scale: tfs,
+                                                ui_font_scale: ufs,
+                                                panel_scale: 1.0,
+                                                focus: Some(focus_ref),
+                                            };
+                                            settings_ref.draw(&mut ctx);
+                                        },
+                                    );
+                                } else {
+                                    salas[i].draw();
+                                }
+                            }
                             // A hall is part of the desktop: closing it
                             // closes nothing.
                             WindowEvent::CloseRequested => eprintln!(
@@ -1445,6 +1568,9 @@ fn main() {
                     WindowEvent::ModifiersChanged(m) => mods = m.state(),
                     WindowEvent::CursorMoved { position, .. } => {
                         mouse = (position.x as f32, position.y as f32);
+                        // The hand came back to the main screen, and the
+                        // settings window comes with it.
+                        settings_host = None;
                         // An accepted drag capture owns the pointer:
                         // every motion goes to the widget as drag(Move)
                         // and nothing below (board pan, editor hover)
@@ -3236,34 +3362,14 @@ fn main() {
                             // The BOARDS view draws whatever this hands
                             // it: every board as it would look here and
                             // now, the current one marked.
-                            if settings.open {
-                                let key = screen;
-                                let mut thumbs = Vec::new();
-                                for k in all_boards!() {
-                                    let def = def_of!(k);
-                                    let lay =
-                                        outer_layout(def, def.pick(key), w, h, ui_padding);
-                                    let panels = widgets::Panel::all()
-                                        .into_iter()
-                                        .filter_map(|pnl| {
-                                            let r = lay.p(pnl);
-                                            (r.x < w).then_some(widgets::PanelSpec {
-                                                x: r.x / w * 100.0,
-                                                y: r.y / h * 100.0,
-                                                w: r.w / w * 100.0,
-                                                h: r.h / h * 100.0,
-                                            })
-                                        })
-                                        .collect();
-                                    thumbs.push(widgets::settings::BoardThumb {
-                                        id: k,
-                                        current: k == config::board_key(cur_board),
-                                        panels,
-                                    });
-                                }
-                                settings.boards = thumbs;
+                            // Drawn HERE only while no hall is hosting it
+                            // — the window is one, and it is drawn once.
+                            if settings.open && settings_host.is_none() {
+                                settings.boards = board_thumbs!(w, h);
                             }
-                            settings.draw(&mut ctx);
+                            if settings_host.is_none() {
+                                settings.draw(&mut ctx);
+                            }
                             // With the settings window open over the editor
                             // its buttons share the window's plane.
                             if editor.active && settings.open {
@@ -3399,6 +3505,15 @@ fn main() {
                         // Only the touched rows travel — a glyph-churn frame
                         // re-uploads a shelf, not the whole four megabytes.
                         let atlas_rows = fonts.take_dirty_rows();
+                        // A hall's renderer has its own copy of the glyph
+                        // atlas; whatever this frame drained belongs to it
+                        // too, or the settings window would arrive there
+                        // with holes where the main window took the rows.
+                        if let Some((y0, rows)) = atlas_rows {
+                            for s in salas.iter_mut() {
+                                s.note_atlas_rows(y0, rows);
+                            }
+                        }
                         let fsize = window.inner_size();
                         // The swapchain clear is the absolute bed — one
                         // rung below the board's own fill; the master
