@@ -31,11 +31,18 @@ struct Role {
     size: OnceLock<TokenId>,
     min: OnceLock<TokenId>,
     track: OnceLock<TokenId>,
+    lead: OnceLock<TokenId>,
 }
 
 impl Role {
     const fn new(name: &'static str) -> Self {
-        Role { name, size: OnceLock::new(), min: OnceLock::new(), track: OnceLock::new() }
+        Role {
+            name,
+            size: OnceLock::new(),
+            min: OnceLock::new(),
+            track: OnceLock::new(),
+            lead: OnceLock::new(),
+        }
     }
     fn px(&self, ctx: &Ctx) -> f32 {
         let t = theme::resolved();
@@ -53,6 +60,15 @@ impl Role {
             theme::id(&format!("type.{}.tracking", self.name)).unwrap_or(TokenId::MISSING)
         });
         px * t.px(k)
+    }
+    /// The role's line height as a multiple of its px — the height a
+    /// line of it OCCUPIES, which is what a box centres.
+    fn leading(&self) -> f32 {
+        let t = theme::resolved();
+        let l = *self.lead.get_or_init(|| {
+            theme::id(&format!("type.{}.leading", self.name)).unwrap_or(TokenId::MISSING)
+        });
+        t.px(l)
     }
 }
 
@@ -189,10 +205,6 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
     // OK button — a parallelogram like the control panel buttons; its
     // colours come from the button class's baked state ladder.
     static BORDER: OnceLock<TokenId> = OnceLock::new();
-    static LEAD: OnceLock<TokenId> = OnceLock::new();
-    static MODE: OnceLock<TokenId> = OnceLock::new();
-    static OPTICAL: OnceLock<Option<u16>> = OnceLock::new();
-    static BIAS: OnceLock<TokenId> = OnceLock::new();
     static CLASS: OnceLock<Option<u16>> = OnceLock::new();
     let br = resolution_dialog_ok_rect(w, h);
     let hover = br.contains(ctx.mouse.0, ctx.mouse.1);
@@ -213,15 +225,7 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
         ctx.dl.ring(br, &corners, seg, edge_w, col(st.edge));
     }
     let bpx = ROLE_BUTTON.px(ctx);
-    // Centre one leading-height line in the box, nudged by the theme's
-    // cap-height bias when the rhythm block centres optically.
-    let mode = tok(&MODE, "rhythm.center_mode");
-    let optical =
-        *OPTICAL.get_or_init(|| theme::enum_index(mode, "optical")) == Some(t.enum_of(mode));
-    let mut ty = br.y + (br.h - bpx * t.px(tok(&LEAD, "type.button.leading"))) / 2.0;
-    if optical {
-        ty += bpx * t.px(tok(&BIAS, "rhythm.cap_center_bias"));
-    }
+    let ty = ok_label_y(br, bpx);
     ctx.dl.text_center(
         ctx.fonts,
         FONT_UI,
@@ -232,4 +236,45 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
         col(st.text),
         ROLE_BUTTON.tracking(bpx),
     );
+}
+
+/// Where OK sits in its button: one leading-height line centred in the
+/// box, nudged by the theme's cap-height bias when the rhythm block
+/// centres optically — said in the one place the rest of this crate's
+/// chrome says it now.
+fn ok_label_y(br: Rect, px: f32) -> f32 {
+    super::center_line_y(br.y, br.h, px, ROLE_BUTTON.leading())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::{token_px, Themed};
+
+    /// The dialog is drawn before anything else in the program can be,
+    /// so its one label is also the first thing a theme's rhythm block
+    /// has to reach. It reaches it through the crate's shared centring
+    /// now, and this is the guard that the move changed nothing: the
+    /// master still nudges the line, and `center_mode` still decides
+    /// whether it does.
+    #[test]
+    fn the_ok_label_still_follows_the_rhythm_block() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let br = Rect::new(0.0, 200.0, 300.0, 60.0);
+        let px = 18.0;
+        let line = br.y + (br.h - px * ROLE_BUTTON.leading()) / 2.0;
+        let optical = ok_label_y(br, px);
+        let bias = token_px("rhythm.cap_center_bias");
+        assert!(
+            ((optical - line) - px * bias).abs() < 1e-3,
+            "the master's optical nudge is not in the button: {optical} vs {line}"
+        );
+
+        let _t = Themed::new("geometric-ok", "[rhythm]\ncenter_mode = geometric\n");
+        assert!(
+            (ok_label_y(br, px) - line).abs() < 1e-3,
+            "a geometrically centring theme still got the nudge"
+        );
+    }
 }

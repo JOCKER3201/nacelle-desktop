@@ -303,6 +303,47 @@ pub struct Screen {
 
 type PlatePair = (Option<nacelle::theme::Plate>, Option<nacelle::theme::Plate>);
 
+/// The gutter of ONE screen, in the only form the layout editor takes.
+///
+/// A bare `f32` in that position is how the same defect came back twice.
+/// There are two answers to "how wide is the gutter": the theme's length
+/// at THIS screen's height — fractions and all, which is what the boards
+/// are solved with ([`Screen::pad`]) — and `config::grid_prefs().3`,
+/// which is whole pixels because it is the number the settings spinner
+/// edits. The second is one `as f32` away from every call site, and an
+/// editor given it draws its grid up to half a pixel per `u` off the
+/// panels it is editing. At the shipped 9u and 1080 lines that is 49
+/// against 48.6, and the screen says nothing about it: a WYSIWYG editor
+/// quietly lying about where the panels are.
+///
+/// A test would only catch the call sites a test can reach, and the two
+/// that matter are on [`Screen`], which needs a window and an event loop
+/// to exist. So the wrong number is made UNSPEAKABLE instead: the field
+/// is private to this module and [`Screen::gutter`] is the only thing
+/// that fills it, so `grid_prefs().3 as f32` no longer type-checks
+/// anywhere on the way to the editor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gutter(f32);
+
+impl Gutter {
+    /// The length itself, for the editor, which has to do arithmetic
+    /// with it. Reading is safe; it is MINTING one that is restricted.
+    pub fn px(self) -> f32 {
+        self.0
+    }
+
+    /// A stand-in for a screen, in tests that cannot have one.
+    ///
+    /// `Screen::new` wants a window and an event loop, so the editor's
+    /// own tests reach its doors directly — and they are testing exactly
+    /// that a fractional gutter survives them. Test-only by
+    /// construction: nothing shipped can reach this.
+    #[cfg(test)]
+    pub fn of_test(px: f32) -> Gutter {
+        Gutter(px)
+    }
+}
+
 impl Screen {
     /// A borderless fullscreen window on one monitor, with its own
     /// renderer, its own layaut and its own widgets. A screen that
@@ -341,6 +382,12 @@ impl Screen {
         let size = window.inner_size();
         let gfx = nacelle_renderer::Gfx::new(&window, size.width, size.height);
         let key = screen_key(&window);
+        // The band around this screen's panels, asked once and handed to
+        // both the boards and the editor drawn over them. The editor may
+        // not ask for itself: a second reading is a second answer the
+        // moment the two are taken under different window heights, and
+        // then the editor's grid no longer sits on the panels it edits.
+        let pad = config::panel_gutter(config::grid_padding_override());
         let mut sc = Screen {
             connector,
             window,
@@ -357,14 +404,14 @@ impl Screen {
             drag_capture: None,
             press_inst: None,
             kbd: None,
-            editor: widgets::editor::Editor::new(),
+            editor: widgets::editor::Editor::new(Gutter(pad)),
             preview: (0..widgets::panel_count()).map(|_| None).collect(),
             booting: true,
             last_render: Instant::now() - std::time::Duration::from_secs(1),
             mouse: (0.0, 0.0),
             term_inst: None,
             dl: DrawList::new(),
-            pad: config::grid_prefs().3 as f32,
+            pad,
             backdrop: None,
             overlay: None,
             plate_key: None,
@@ -550,6 +597,19 @@ impl Screen {
         }
     }
 
+    /// The gutter this screen's boards are actually solved with, in the
+    /// form the editor takes.
+    ///
+    /// The ONE place a [`Gutter`] comes into being: `pad` is the theme's
+    /// length at this screen's height, unrounded, and the editor is
+    /// drawn over boards laid out with exactly it. Everything that could
+    /// answer the same question differently — the settings file's whole
+    /// pixels above all — has no way to reach the editor now, because it
+    /// cannot make one of these.
+    pub fn gutter(&self) -> Gutter {
+        Gutter(self.pad)
+    }
+
     /// Enters the layout editor over THIS screen, with THIS screen's
     /// rectangles and this screen's pixels.
     ///
@@ -559,7 +619,7 @@ impl Screen {
     /// what may stand here.
     pub fn enter_editor(&mut self) {
         let (w, h) = self.size();
-        let (snap, cols, rows, pad) = config::grid_prefs();
+        let (snap, cols, rows, _) = config::grid_prefs();
         // The editor edits the OUTER panel rects.
         let outer = self.solve(self.board);
         let k = nacelle::layout::board_key(self.board);
@@ -575,7 +635,32 @@ impl Screen {
         // board — or another screen showing the same layaut — holds.
         let next_id = self.world.layout().instances.next_free();
         self.editor
-            .start(&outer, w, h, snap, cols, rows, pad as f32, k, takes, next_id);
+            // The gutter this screen is actually drawing with, not a
+            // second reading of the file: a slider still under the hand
+            // has changed the one and not yet the other.
+            .start(&outer, w, h, snap, cols, rows, self.gutter(), k, takes, next_id);
+    }
+
+    /// Brings a running editor into line with grid preferences the
+    /// settings window has just changed.
+    ///
+    /// The gutter is taken here and nowhere else, and it is
+    /// [`Screen::gutter`] — the very length this screen's boards were
+    /// solved with. The event loop is given no gutter to pass, on
+    /// purpose: the one it had in hand was `grid_prefs`', which is whole
+    /// pixels because that is what the settings spinner edits, and
+    /// handing it over slid the editor's grid off the panels it is drawn
+    /// over by up to half a pixel per u. The screen that draws the
+    /// boards is the only owner of that number, and since the editor's
+    /// doors take a [`Gutter`] rather than an `f32`, it is now the only
+    /// thing that CAN own it — a comment is not a guard, and this one
+    /// was ignored twice.
+    pub fn sync_editor(&mut self) {
+        if !self.editor.active {
+            return;
+        }
+        let (w, h) = self.size();
+        self.editor.sync_from_screen(self.gutter(), w, h);
     }
 
     /// This screen's layaut with the edited board folded back into it —

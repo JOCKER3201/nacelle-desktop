@@ -1149,6 +1149,43 @@ pub fn set_sound_ambient(on: bool) {
 /// were the limits is still a number this program has to draw.
 pub const GRID_MIN: u32 = 15;
 pub const GRID_MAX: u32 = 100;
+/// How wide a gutter the settings window will let anyone type.
+pub const GRID_PAD_MAX: u32 = 40;
+
+/// `GridPadding=`, if the file carries one.
+///
+/// The band around a panel is a length like every other, so the theme owns
+/// it — `layout.panel_gutter` — and this key is the user's stage-5 override
+/// of that one token, the arrangement `Density=` already has with
+/// `metric.density`. Held apart from the length itself because only the
+/// override comes from a file: re-reading it costs the config cascade,
+/// re-reading the theme's costs an array index, and the second happens
+/// whenever the engine re-bakes.
+///
+/// The bound is on the typed number alone. A length the theme wrote is not
+/// this program's to cap.
+pub fn grid_padding_override() -> Option<u32> {
+    conf_kv()
+        .get("GridPadding")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|n| n.min(GRID_PAD_MAX))
+}
+
+/// The band kept clear around every panel on a board, in device px.
+///
+/// `u` is a function of the window height, so this answer belongs to the
+/// screen and the bake that asked it, not to the process.
+pub fn panel_gutter(user: Option<u32>) -> f32 {
+    if let Some(n) = user {
+        return n as f32;
+    }
+    static GUTTER: std::sync::OnceLock<nacelle::theme::TokenId> = std::sync::OnceLock::new();
+    let id = *GUTTER.get_or_init(|| {
+        nacelle::theme::id("layout.panel_gutter")
+            .unwrap_or(nacelle::theme::TokenId::MISSING)
+    });
+    nacelle::theme::resolved().px(id)
+}
 
 pub fn grid_prefs() -> (bool, u32, u32, u32) {
     let kv = conf_kv();
@@ -1165,11 +1202,14 @@ pub fn grid_prefs() -> (bool, u32, u32, u32) {
         .get("GridSnap")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let pad = kv
-        .get("GridPadding")
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(8)
-        .min(40);
+    // Whole pixels because this is the number the settings spinner edits;
+    // the layout itself asks `panel_gutter` and gets the theme's own.
+    let pad = panel_gutter(
+        kv.get("GridPadding")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|n| n.min(GRID_PAD_MAX)),
+    )
+    .round() as u32;
     let cells = |key: &str| num(key, GRID_MIN).clamp(GRID_MIN, GRID_MAX);
     (snap, cells("GridCols"), cells("GridRows"), pad)
 }
@@ -2795,5 +2835,214 @@ mod tests {
             "each screen keeps its own layaut; only the order of the list changed"
         );
         assert_ne!(monday, tuesday, "the two layauts differ, so the check means something");
+    }
+
+    /// A configuration cascade with nothing in it, so `GridPadding=` is
+    /// genuinely absent — the state a fresh install is in, and the only
+    /// state in which the theme's answer is the one that shows.
+    fn empty_conf(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("nacelle-gutter-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the fixture tree must be writable");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("XDG_CONFIG_DIRS", &dir);
+        dir
+    }
+
+    /// The band around every panel on every board came out of the code as
+    /// a flat eight device pixels, at every resolution and every density,
+    /// which no theme could reach. It is a length now, and this is what
+    /// says so: the same program, two themes, two gutters.
+    #[test]
+    fn the_theme_sets_the_band_around_every_panel() {
+        let _theme = crate::widgets::theme_test_lock();
+        let _env = env_lock();
+        let dir = empty_conf("theme");
+        assert!(
+            grid_padding_override().is_none(),
+            "the fixture must carry no GridPadding, or this proves nothing"
+        );
+
+        let shipped = panel_gutter(None);
+        assert_eq!(
+            shipped,
+            crate::widgets::token_px("layout.panel_gutter"),
+            "the gutter must BE the token, not a number that happens to match it"
+        );
+        // Far from the shipped 1.5u, and not a round eight either, so
+        // neither the old literal nor a rounding could produce it.
+        let _wide = crate::widgets::Themed::new(
+            "gutter",
+            "[layout]\npanel_gutter = 9u\n",
+        );
+        let wide = panel_gutter(None);
+        assert!(
+            wide > shipped * 3.0,
+            "a theme asking for 9u must widen the gutter: {shipped} -> {wide}"
+        );
+
+        // And the content boxes the widgets are actually drawn in follow
+        // it: `padded` is the call every board makes on every frame, and
+        // this is the whole distance between a token and a pixel.
+        let id = nacelle::layout::InstanceId::new(1);
+        let mut board = nacelle::base::Layout::empty(400.0, 300.0);
+        board.place(
+            id,
+            nacelle::base::Panel(0),
+            nacelle::base::Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        let shipped_box = board.padded(shipped).of(id);
+        let wide_box = board.padded(wide).of(id);
+        assert!(
+            wide_box.w < shipped_box.w && wide_box.h < shipped_box.h,
+            "the content box must shrink when the theme widens the gutter: \
+             {shipped_box:?} -> {wide_box:?}"
+        );
+        assert!(wide_box.x > shipped_box.x, "and move inwards on both axes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GridPadding=` is the user's stage-5 override of that one token,
+    /// the arrangement `Density=` already has with `metric.density`: the
+    /// theme is what the interface looks like until the user has said
+    /// otherwise, and after that the user wins.
+    #[test]
+    fn the_users_grid_padding_still_overrides_the_theme() {
+        let _theme = crate::widgets::theme_test_lock();
+        let _env = env_lock();
+        let dir = empty_conf("user");
+        set_grid_padding(31);
+        assert_eq!(grid_padding_override(), Some(31));
+        assert_eq!(panel_gutter(grid_padding_override()), 31.0);
+        // Even under a theme that wants something else entirely.
+        let _wide =
+            crate::widgets::Themed::new("gutter-user", "[layout]\npanel_gutter = 9u\n");
+        assert_eq!(panel_gutter(grid_padding_override()), 31.0);
+        // And a number no spinner could have produced is still bounded.
+        set_grid_padding(GRID_PAD_MAX + 1000);
+        assert_eq!(grid_padding_override(), Some(GRID_PAD_MAX));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two monitors of two heights are two gutters — and the engine's
+    /// epoch names neither of them.
+    ///
+    /// Every screen sets the viewport as it draws, so on a mixed-height
+    /// desktop the published bake alternates between the two. Because a
+    /// bake is cached under `(sibling, u)` and carries the epoch it was
+    /// born with, the epoch alternates too: it does not run forward, it
+    /// flips. Anything that re-read a u-derived length whenever the epoch
+    /// moved would therefore fire on EVERY frame, and would hand both
+    /// screens whichever height drew last — the neighbour's. That is why
+    /// the gutter is taken per screen, under the viewport that screen has
+    /// just set, and why it is the one thing the lens guard leaves alone.
+    #[test]
+    fn two_screen_heights_are_two_gutters_and_the_epoch_names_neither() {
+        let _theme = crate::widgets::theme_test_lock();
+        let _env = env_lock();
+        let dir = empty_conf("viewport");
+        // Far from the shipped gutter, so the two heights cannot round
+        // together into one number.
+        let _wide =
+            crate::widgets::Themed::new("gutter-vp", "[layout]\npanel_gutter = 9u\n");
+
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        let short = panel_gutter(None);
+        let short_epoch = nacelle::theme::epoch();
+
+        nacelle::theme::set_viewport(2160.0, 1.0);
+        let tall = panel_gutter(None);
+        let tall_epoch = nacelle::theme::epoch();
+
+        assert!(
+            tall > short,
+            "a taller screen must get a wider gutter, or the gutter is not a u: \
+             {short} -> {tall}"
+        );
+        assert_ne!(
+            short_epoch, tall_epoch,
+            "the two heights must publish two bakes, or there is nothing to guard"
+        );
+
+        // The turn of the screw: back to the first height, the epoch does
+        // not advance past the second — it returns to the value the first
+        // screen had. A guard comparing against a remembered epoch never
+        // reaches a resting state on this desktop.
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        assert_eq!(
+            panel_gutter(None),
+            short,
+            "the same height must answer the same gutter"
+        );
+        assert_eq!(
+            nacelle::theme::epoch(),
+            short_epoch,
+            "the epoch must FLIP BACK, not advance: this is exactly why it cannot \
+             be used to decide when a per-screen length is stale"
+        );
+
+        // The user's override is not a u and is the same on both screens,
+        // which is what lets it be carried on the frame instead.
+        assert_eq!(panel_gutter(Some(31)), 31.0);
+        nacelle::theme::set_viewport(2160.0, 1.0);
+        assert_eq!(panel_gutter(Some(31)), 31.0);
+
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `grid_prefs` answers the gutter ROUNDED, because whole pixels are
+    /// what the settings spinner edits. The board is solved with the
+    /// unrounded length. So the two readings are not interchangeable, and
+    /// anything drawn OVER the board — the grid editor — has to be handed
+    /// the board's own or its cells sit off the panels they describe.
+    ///
+    /// This is the reading `apply_config!` used to take. It is kept here
+    /// as a live measurement rather than a remark, so that the day the
+    /// gutter is made whole-pixel by construction, this test says so
+    /// instead of quietly passing.
+    #[test]
+    fn the_spinners_gutter_is_rounded_and_the_boards_is_not() {
+        let _theme = crate::widgets::theme_test_lock();
+        let _env = env_lock();
+        let dir = empty_conf("rounding");
+        assert!(
+            grid_padding_override().is_none(),
+            "the fixture must carry no GridPadding, or the theme is never asked"
+        );
+        let _wide =
+            crate::widgets::Themed::new("gutter-round", "[layout]\npanel_gutter = 9u\n");
+
+        // Some height at which the theme's gutter is not a whole number of
+        // device pixels. A u is a fraction of the window, so most heights
+        // are such a height.
+        let split = (600..=2400).step_by(3).find_map(|h| {
+            nacelle::theme::set_viewport(h as f32, 1.0);
+            let exact = panel_gutter(None);
+            (exact.fract() > 0.01 && exact.fract() < 0.99).then_some((h, exact))
+        });
+        let Some((h, exact)) = split else {
+            panic!("no height in 600..2400 gave a fractional gutter — if the gutter \
+                    is now whole by construction, the editor no longer needs its own \
+                    reading and this test should be retired deliberately");
+        };
+
+        let spinner = grid_prefs().3;
+        assert_eq!(
+            spinner,
+            exact.round() as u32,
+            "the spinner must show the gutter rounded, not some other number"
+        );
+        assert_ne!(
+            spinner as f32, exact,
+            "at {h} lines the two readings differ ({exact} vs {spinner}); the editor \
+             must take the board's, which is what `sc.pad` carries"
+        );
+
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
