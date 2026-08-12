@@ -63,7 +63,6 @@
 use super::{Ctx, PanelSpec, Rect};
 use std::borrow::Cow;
 use crate::config::{self, GRID_MAX, GRID_MIN};
-use crate::font::FONT_UI;
 use nacelle::focus::{Caps, FocusCtl, FocusId, Key as FKey, KeyEv, Mods, Nav};
 use nacelle::theme::bake::StateStyle;
 use nacelle::theme::parse::State;
@@ -462,6 +461,11 @@ static MODAL_PAD: OnceLock<TokenId> = OnceLock::new();
 struct Type {
     px: f32,
     track: f32,
+    /// The font slot the role's `face` names. Read from the role, not
+    /// chosen here: every text call in this file wrote `FONT_UI`, which
+    /// is the family decided at the call site while `type.<role>.face`
+    /// sat in the master with no reader on this side of the boundary.
+    face: u8,
     /// Line height as a MULTIPLE of `px` — the form the centring
     /// arithmetic takes it in.
     leading: f32,
@@ -493,7 +497,7 @@ impl Type {
 fn bound(ctx: &Ctx, cell: &'static OnceLock<TokenId>, binding: &'static str) -> Type {
     let role = nacelle::ui::bound_role(cell, binding);
     let px = role.px(ctx, 1.0);
-    Type { px, track: role.tracking_px(px), leading: role.leading() }
+    Type { px, track: role.tracking_px(px), leading: role.leading(), face: role.font() }
 }
 
 // One binding per place this file writes text. Every name below is a
@@ -2447,9 +2451,9 @@ impl Settings {
                 let f = role_label(ctx);
                 let v = role_value(ctx);
                 (
-                    ctx.fonts.measure(FONT_UI, f.px, label, f.track)
+                    ctx.fonts.measure(f.face, f.px, label, f.track)
                         + th.px(tok(&LABEL_PAD, "rhythm.label_pad")),
-                    ctx.fonts.measure(FONT_UI, v.px, value, v.track)
+                    ctx.fonts.measure(v.face, v.px, value, v.track)
                         + th.px(tok(&VALUE_GUTTER, "rhythm.value_gutter")),
                 )
             }
@@ -2519,7 +2523,7 @@ impl Settings {
                 let vy = center_y(ctx, rc.band, v);
                 ctx.dl.text_right(
                     ctx.fonts,
-                    FONT_UI,
+                    v.face,
                     v.px,
                     rc.content.right(),
                     vy,
@@ -2567,7 +2571,7 @@ impl Settings {
                 let s = self.text_of(*text);
                 ctx.dl.text(
                     ctx.fonts,
-                    FONT_UI,
+                    n.face,
                     n.px,
                     rc.content.x,
                     ny,
@@ -2585,7 +2589,7 @@ impl Settings {
                 let s = self.text_of(*text);
                 ctx.dl.text_center(
                     ctx.fonts,
-                    FONT_UI,
+                    v.face,
                     v.px,
                     rc.content.cx(),
                     ty,
@@ -2600,7 +2604,7 @@ impl Settings {
                 let s = self.text_of(*text);
                 ctx.dl.text_center(
                     ctx.fonts,
-                    FONT_UI,
+                    n.face,
                     n.px,
                     rc.content.cx(),
                     rc.content.bottom() - rc.m.hint_inset,
@@ -2627,7 +2631,7 @@ impl Settings {
         let s = self.text_of(*label);
         ctx.dl.text_center(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             r.cx(),
             ty,
@@ -2645,7 +2649,7 @@ impl Settings {
         let ty = center_y(ctx, rc.band, f);
         ctx.dl.text(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             rc.content.x,
             ty,
@@ -2738,7 +2742,7 @@ impl Settings {
             let ty = center_y(ctx, rc.band, f);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 r.cx(),
                 ty,
@@ -2786,7 +2790,7 @@ impl Settings {
         let ty = center_y(ctx, rc.band, f);
         ctx.dl.text_center(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             r.cx(),
             ty,
@@ -3175,7 +3179,7 @@ impl Settings {
             );
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 tile.cx(),
                 tile.bottom() + th.px(tok(&CAP_GAP, "boards.tile.caption_gap")),
@@ -3400,7 +3404,7 @@ impl Settings {
                 .quad([[ax - s, cy], [ax + s, cy - s], [ax + s, cy + s], [ax + s, cy + s]], color);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 r.cx() + s,
                 ty,

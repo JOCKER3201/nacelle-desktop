@@ -392,15 +392,19 @@ fn main() {
     let mut pad_override = config::grid_padding_override();
     let mut last_term_key = (tfam.clone().unwrap_or_default(), twgt.clone().unwrap_or_default());
     let mut last_ui_key = (ufam.clone().unwrap_or_default(), uwgt.clone().unwrap_or_default());
-    if tfam.is_some() || twgt.is_some() {
-        if let Some(f) = font::load_variant_for(tfam.as_deref(), twgt.as_deref(), false) {
-            fonts.set_mono(f);
-        }
-    }
-    if ufam.is_some() || uwgt.is_some() {
-        if let Some(f) = font::load_variant_for(ufam.as_deref(), uwgt.as_deref(), true) {
-            fonts.set_ui(f);
-        }
+    // The user's four settings go to the LOADER, not to two slots.
+    // §5.16 gives the theme eight face blocks with a family list and a
+    // weight each; loading one file here and dropping it into slot 0
+    // could only ever have answered two of them, which is why every
+    // `ui_medium` and every `display` in the master used to arrive at the
+    // atlas as the one interface Regular.
+    if tfam.is_some() || twgt.is_some() || ufam.is_some() || uwgt.is_some() {
+        fonts.reload_faces(&font::FaceChoice {
+            ui_family: ufam.clone(),
+            ui_weight: uwgt.clone(),
+            mono_family: tfam.clone(),
+            mono_weight: twgt.clone(),
+        });
     }
 
     // Window backend selection: Wayland natively, but an X11 session or
@@ -906,29 +910,24 @@ fn main() {
                 tfam.clone().unwrap_or_default(),
                 twgt.clone().unwrap_or_default(),
             );
-            if tkey != last_term_key {
-                last_term_key = tkey;
-                if tfam.is_none() && twgt.is_none() {
-                    fonts.set_mono(font::load_default_mono());
-                } else if let Some(f) =
-                    font::load_variant_for(tfam.as_deref(), twgt.as_deref(), false)
-                {
-                    fonts.set_mono(f);
-                }
-            }
             let ukey = (
                 ufam.clone().unwrap_or_default(),
                 uwgt.clone().unwrap_or_default(),
             );
-            if ukey != last_ui_key {
+            // One reload for both halves: the loader resolves all eight
+            // slots from the theme with these four settings folded in, and
+            // an empty setting means "whatever the master says", which is
+            // the same answer a fresh start gives. Two separate calls
+            // would reset the atlas twice for one settings change.
+            if tkey != last_term_key || ukey != last_ui_key {
+                last_term_key = tkey;
                 last_ui_key = ukey;
-                if ufam.is_none() && uwgt.is_none() {
-                    fonts.set_ui(font::load_default_ui());
-                } else if let Some(f) =
-                    font::load_variant_for(ufam.as_deref(), uwgt.as_deref(), true)
-                {
-                    fonts.set_ui(f);
-                }
+                fonts.reload_faces(&font::FaceChoice {
+                    ui_family: ufam.clone(),
+                    ui_weight: uwgt.clone(),
+                    mono_family: tfam.clone(),
+                    mono_weight: twgt.clone(),
+                });
             }
             apply_lens!();
             // Before the reload, because that is what hands the new

@@ -765,7 +765,7 @@ dependencies = [
 [[package]]
 name = "libnacelle"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/libnacelle#489b92f431322c53a19fc9a1598267e1bd81bcc9"
+source = "git+https://github.com/JOCKER3201/libnacelle#87805dfa08f081c5f14c0dc3cf40bcba4c15e716"
 dependencies = [
  "chrono",
  "fontdue",
@@ -862,7 +862,7 @@ dependencies = [
 [[package]]
 name = "nacelle-launcher-core"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libc",
  "libnacelle",
@@ -883,7 +883,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-ai"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
 ]
@@ -891,7 +891,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-appcats"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
  "nacelle-launcher-core",
@@ -900,7 +900,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-appgrid"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
  "nacelle-launcher-core",
@@ -909,7 +909,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-control"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
 ]
@@ -917,7 +917,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-filesystem"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
 ]
@@ -925,7 +925,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-keyboard"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
 ]
@@ -933,7 +933,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-search"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
  "nacelle-launcher-core",
@@ -942,7 +942,7 @@ dependencies = [
 [[package]]
 name = "nacelle-widget-shell"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-addons#5e2137e588be8966ab0dfb6e8af032c111edf9f8"
+source = "git+https://github.com/JOCKER3201/nacelle-addons#0a1891be84d03a144885ca7b445b2a02308ca08c"
 dependencies = [
  "libnacelle",
 ]

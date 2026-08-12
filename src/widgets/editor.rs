@@ -23,7 +23,6 @@
 //! terminal has to leave the other exactly where it stands.
 
 use super::{Ctx, Layout, Panel, PanelSpec, Rect, WidgetCategory, OFF_SPEC};
-use crate::font::FONT_UI;
 use crate::screen::Gutter;
 use nacelle::layout::{BoardId, Instance, InstanceId, InstanceList};
 use nacelle::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
@@ -39,68 +38,74 @@ fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
-/// One type role's hot ids, resolved once. Size is the theme's px times
-/// the user's font preference, floored by the role's `min_px`; tracking
-/// is the role's em value multiplied out per run — the same arithmetic
-/// the object layer uses.
-struct Role {
-    name: &'static str,
-    size: OnceLock<TokenId>,
-    min: OnceLock<TokenId>,
-    track: OnceLock<TokenId>,
-    lead: OnceLock<TokenId>,
+// The role each of this file's runs is set in, named by the TOKEN that
+// binds it and never by the role itself.
+//
+// A local `Role` stood here, holding four role NAMES — and the comment
+// over it listed the six master bindings it was standing in for, which is
+// the whole confession: `editor.proxy.label_role`, `editor.hint.role`,
+// `editor.list.title_role`, `modal.title.role`, `settings.hint.role` and
+// `emptystate.role` were all declared and read by nothing, so a theme
+// re-roling this window moved the settings window beside it and left this
+// one where it was. It also read half a ladder — the role's own `min_px`
+// but not the global `type.min_px` under it, and no `max_px` ceiling at
+// all — so a theme capping a role capped every line in the program except
+// these five.
+//
+// [`nacelle::ui::bound_role`] is the toolkit's own reader, which is what
+// makes "how big is this role" one question with one answer.
+static ROLE_LABEL: OnceLock<TokenId> = OnceLock::new();
+static ROLE_HINT: OnceLock<TokenId> = OnceLock::new();
+static ROLE_MODAL_HINT: OnceLock<TokenId> = OnceLock::new();
+static ROLE_LIST_TITLE: OnceLock<TokenId> = OnceLock::new();
+static ROLE_MODAL_TITLE: OnceLock<TokenId> = OnceLock::new();
+static ROLE_EMPTY: OnceLock<TokenId> = OnceLock::new();
+
+/// A proxy's name tag — the little plate over a placed widget, and the
+/// same plate on an ADD WIDGET miniature.
+fn role_label() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_LABEL, "editor.proxy.label_role")
 }
 
-impl Role {
-    const fn new(name: &'static str) -> Self {
-        Role {
-            name,
-            size: OnceLock::new(),
-            min: OnceLock::new(),
-            track: OnceLock::new(),
-            lead: OnceLock::new(),
-        }
-    }
-    fn px(&self, ctx: &Ctx) -> f32 {
-        let t = theme::resolved();
-        let s = *self.size.get_or_init(|| {
-            theme::id(&format!("type.{}.size", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        let m = *self.min.get_or_init(|| {
-            theme::id(&format!("type.{}.min_px", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        // `ui_font_scale` is NOT a factor here: the user's interface scale
-        // is `metric.ui_scale`, the viewport multiplies u by it, and
-        // `type.<role>.size` is written in u — so `t.px(s)` already grew.
-        // The panel shrink is the one factor left, because it is runtime
-        // geometry no bake can know.
-        (t.px(s) * ctx.panel_scale).max(t.px(m))
-    }
-    fn tracking(&self, px: f32) -> f32 {
-        let t = theme::resolved();
-        let k = *self.track.get_or_init(|| {
-            theme::id(&format!("type.{}.tracking", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        px * t.px(k)
-    }
-    /// The role's line height as a multiple of its px — the height a
-    /// line of it OCCUPIES, which is what a box centres.
-    fn leading(&self) -> f32 {
-        let t = theme::resolved();
-        let l = *self.lead.get_or_init(|| {
-            theme::id(&format!("type.{}.leading", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        t.px(l)
-    }
+/// The one line pinned to the board's bottom-left corner.
+fn role_hint() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_HINT, "editor.hint.role")
 }
 
-// The roles the editor's own chrome binds its text to in the master:
-// `editor.proxy.label_role`, `editor.hint.role`, `editor.list.title_role`,
-// `modal.title.role`, `settings.hint.role` and the empty-state's `value`.
-static ROLE_LABEL: Role = Role::new("caption");
-static ROLE_HINT: Role = Role::new("tooltip");
-static ROLE_TITLE: Role = Role::new("title.window");
-static ROLE_VALUE: Role = Role::new("value");
+/// The line under the SAVE AS field. A MODAL's hint, so it takes the
+/// binding the settings window's hints take and not the board's: the two
+/// used to be one role by accident of both landing on `caption`.
+fn role_modal_hint() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_MODAL_HINT, "settings.hint.role")
+}
+
+/// The ADD WIDGET window's own title.
+fn role_list_title() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_LIST_TITLE, "editor.list.title_role")
+}
+
+/// The SAVE AS modal's title band.
+fn role_modal_title() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_MODAL_TITLE, "modal.title.role")
+}
+
+/// NO WIDGETS INSTALLED FOR THIS BOARD — the line a panel with nothing
+/// to show is set in, everywhere in the program.
+fn role_empty() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_EMPTY, "emptystate.role")
+}
+
+/// A role's px for this frame.
+///
+/// `ui_font_scale` is NOT a factor: the user's interface scale is
+/// `metric.ui_scale`, the viewport multiplies u by it, and every
+/// `type.<role>.size` is written in u — so the baked px already grew.
+/// The shrink argument is 1.0 because there is no widget stack here to
+/// shrink for; `ctx.panel_scale` rides inside [`nacelle::ui::Role::px`],
+/// which is exactly what this file's own reader multiplied by.
+fn px_of(role: nacelle::ui::Role, ctx: &Ctx) -> f32 {
+    role.px(ctx, 1.0)
+}
 
 /// Edge-grab margin (resize handles), with its device-px floor.
 fn grab_edge() -> f32 {
@@ -122,9 +127,12 @@ fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
     static PAD: OnceLock<TokenId> = OnceLock::new();
     static INSET: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
-    let px = ROLE_LABEL.px(ctx);
-    let track = ROLE_LABEL.tracking(px);
-    let tw = ctx.fonts.measure(FONT_UI, px, label, track);
+    let role = role_label();
+    let px = px_of(role, ctx);
+    let track = role.tracking_px(px);
+    // The role's own face, not this call site's guess at one.
+    let face = role.font();
+    let tw = ctx.fonts.measure(face, px, label, track);
     ctx.dl.rect(
         x,
         y,
@@ -134,7 +142,7 @@ fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
     );
     ctx.dl.text(
         ctx.fonts,
-        FONT_UI,
+        face,
         px,
         x + t.px(tok(&INSET, "panel.title.inset_x")),
         nameplate_text_y(y, px),
@@ -152,7 +160,7 @@ fn nameplate_h() -> f32 {
 
 /// Where the label sits inside a plate whose top edge is at `top`.
 fn nameplate_text_y(top: f32, px: f32) -> f32 {
-    super::center_line_y(top, nameplate_h(), px, ROLE_LABEL.leading())
+    super::center_line_y(top, nameplate_h(), px, role_label().leading())
 }
 
 /// Where a modal's title sits in a title band starting at `top`. Upper
@@ -161,7 +169,7 @@ fn nameplate_text_y(top: f32, px: f32) -> f32 {
 fn modal_title_y(top: f32, px: f32) -> f32 {
     static BAND_H: OnceLock<TokenId> = OnceLock::new();
     let band_h = theme::resolved().px(tok(&BAND_H, "modal.title.band_h"));
-    super::center_line_y(top, band_h, px, ROLE_TITLE.leading())
+    super::center_line_y(top, band_h, px, role_modal_title().leading())
 }
 
 /// How far the tear-off growth has run `elapsed` seconds in: the raw
@@ -1319,16 +1327,17 @@ impl Editor {
         static HINT_X: OnceLock<TokenId> = OnceLock::new();
         static HINT_Y: OnceLock<TokenId> = OnceLock::new();
         static HINT_C: OnceLock<TokenId> = OnceLock::new();
-        let hint_px = ROLE_HINT.px(ctx);
+        let hint = role_hint();
+        let hint_px = px_of(hint, ctx);
         ctx.dl.text(
             ctx.fonts,
-            FONT_UI,
+            hint.font(),
             hint_px,
             t.px(tok(&HINT_X, "editor.hint.inset_x")),
             h - t.px(tok(&HINT_Y, "editor.hint.inset_y")),
             "DRAG TO MOVE \u{2014} DRAG EDGES TO RESIZE \u{2014} X REMOVES \u{2014} ESC EXITS WITHOUT SAVING",
             col(t.color(tok(&HINT_C, "text.muted"))),
-            ROLE_HINT.tracking(hint_px),
+            hint.tracking_px(hint_px),
         );
 
         // ADD WIDGET list window (opaque).
@@ -1344,10 +1353,11 @@ impl Editor {
             let (win, items) = self.add_list_rects(w, h);
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
             nacelle::object::window::frame(ctx, win);
-            let tpx = ROLE_TITLE.px(ctx);
+            let list_title = role_list_title();
+            let tpx = px_of(list_title, ctx);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                list_title.font(),
                 tpx,
                 win.cx(),
                 win.y + list_pad(),
@@ -1356,7 +1366,7 @@ impl Editor {
                     hold_secs().ceil()
                 ),
                 col(t.color(tok(&TITLE_C, "text.title"))),
-                ROLE_TITLE.tracking(tpx),
+                list_title.tracking_px(tpx),
             );
             let offer = self.offer();
             if offer.is_empty() {
@@ -1364,16 +1374,17 @@ impl Editor {
                 // installation holds no widget this board could take.
                 // "Everything is already placed" is no longer a state
                 // that exists — a placed widget is still on offer.
-                let px = ROLE_VALUE.px(ctx);
+                let empty = role_empty();
+                let px = px_of(empty, ctx);
                 ctx.dl.text_center(
                     ctx.fonts,
-                    FONT_UI,
+                    empty.font(),
                     px,
                     win.cx(),
                     win.y + win.h / 2.0,
                     "NO WIDGETS INSTALLED FOR THIS BOARD",
                     col(t.color(tok(&EMPTY_C, "text.muted"))),
-                    ROLE_VALUE.tracking(px),
+                    empty.tracking_px(px),
                 );
             }
             let tile_class = *TILE_CLASS.get_or_init(|| theme::class_id("tile"));
@@ -1461,16 +1472,17 @@ impl Editor {
             let bx = (w - bw) / 2.0;
             let by = (h - bh) / 2.0;
             nacelle::object::window::frame(ctx, Rect::new(bx, by, bw, bh));
-            let tpx = ROLE_TITLE.px(ctx);
+            let modal_title = role_modal_title();
+            let tpx = px_of(modal_title, ctx);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                modal_title.font(),
                 tpx,
                 bx + bw / 2.0,
                 modal_title_y(by, tpx),
                 "SAVE AS \u{2014} TYPE A NAME",
                 col(t.color(tok(&TITLE_C, "text.title"))),
-                ROLE_TITLE.tracking(tpx),
+                modal_title.tracking_px(tpx),
             );
             // The field: modal padding aside, [field] geometry, the
             // model already holds caret/selection/preedit. The desktop
@@ -1509,16 +1521,17 @@ impl Editor {
                 );
                 self.naming_caret = out.caret;
             }
-            let hpx = ROLE_LABEL.px(ctx);
+            let modal_hint = role_modal_hint();
+            let hpx = px_of(modal_hint, ctx);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                modal_hint.font(),
                 hpx,
                 bx + bw / 2.0,
                 field.bottom() + t.px(tok(&HINT_INSET, "settings.hint_inset")),
                 "ENTER SAVES \u{2014} ESC CANCELS",
                 col(t.color(tok(&HINT_C, "text.muted"))),
-                ROLE_LABEL.tracking(hpx),
+                modal_hint.tracking_px(hpx),
             );
         }
     }
@@ -1829,7 +1842,7 @@ mod tests {
         let _theme = crate::widgets::theme_test_lock();
         let (top, px) = (100.0, 20.0);
         let plate_h = nameplate_h();
-        let leading = ROLE_LABEL.leading();
+        let leading = role_label().leading();
         let bias = number("rhythm.cap_center_bias");
         assert!(leading > 1.0, "the master gives type.caption a line taller than its glyphs");
 
