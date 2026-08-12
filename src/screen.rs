@@ -149,6 +149,15 @@ impl WidgetSet {
         self.items.iter_mut().filter_map(|l| l.inst.as_mut())
     }
 
+    /// Which widget a placement is currently running — the other half
+    /// of its identity, for state that outlives a frame by remembering
+    /// a placement NUMBER (who owns the keyboard, who was told the
+    /// button went down). An id alone cannot say whether that state is
+    /// still about the same thing; the pair can.
+    pub fn widget_of(&self, id: InstanceId) -> Option<Panel> {
+        self.items.iter().find(|l| l.id == id).map(|l| l.widget)
+    }
+
     /// The content box one placement's last draw used; None before it
     /// has drawn once.
     pub fn content(&self, id: InstanceId) -> Option<Rect> {
@@ -227,6 +236,27 @@ pub struct Screen {
     /// A left press a widget's `drag(Begin)` accepted owns the pointer
     /// until it is released (F1 §5.1).
     pub drag_capture: Option<InstanceId>,
+    /// Which placement was told the button went DOWN, so exactly one
+    /// release closes it. Separate from `drag_capture` on purpose: the
+    /// press is delivered whether or not the widget then accepted the
+    /// gesture, and what it turned into afterwards — a capture, a board
+    /// ride, a plain click — must not decide whether its release ever
+    /// arrives. A widget left holding a press that never came up is a
+    /// control stuck dark.
+    pub press_inst: Option<InstanceId>,
+    /// Which placement owns the KEYBOARD here.
+    ///
+    /// Per screen, unlike the settings window and the menu, because the
+    /// keys have already been routed before the program sees them: they
+    /// arrive at whichever window the display server gave focus to, so
+    /// the screen the event came in on is the only one that could
+    /// answer for them. None means nobody has claimed it and every key
+    /// keeps the route it had at boot — the shell's.
+    ///
+    /// This is CONTAINER focus, one per container, and not a second
+    /// control chain: `FocusCtl` remains the one of those, and this
+    /// only decides which widget the next key is OFFERED to.
+    pub kbd: Option<InstanceId>,
     /// The layout editor over THIS screen: a screen is arranged where
     /// it is looked at, against its own pixels.
     pub editor: widgets::editor::Editor,
@@ -325,6 +355,8 @@ impl Screen {
             go_queue: Vec::new(),
             widgets: WidgetSet::new(),
             drag_capture: None,
+            press_inst: None,
+            kbd: None,
             editor: widgets::editor::Editor::new(),
             preview: (0..widgets::panel_count()).map(|_| None).collect(),
             booting: true,
@@ -433,7 +465,25 @@ impl Screen {
     /// longer do — see [`WidgetSet`] for the invariant.
     pub fn sync_widgets(&mut self) {
         let present = self.present();
+        // Everything this screen remembers by placement NUMBER — who
+        // owns the keyboard, who was told the button went down — is
+        // asked to survive the coming sync, BEFORE it happens, because
+        // afterwards there is nothing left to compare against.
+        //
+        // The number alone is not the test. Two layauts are two id
+        // spaces, so a sync can drop the box at a number and build
+        // another widget's under the same one; a check by identity
+        // would leave the newcomer holding somebody else's keyboard and
+        // the release of a press it never got.
+        let survives = |held: Option<InstanceId>| -> Option<InstanceId> {
+            let id = held?;
+            let was = self.widgets.widget_of(id)?;
+            present.iter().any(|(i, w)| *i == id && *w == was).then_some(id)
+        };
+        let (kbd, pressed) = (survives(self.kbd), survives(self.press_inst));
         self.widgets.sync(&present, make_widget);
+        self.kbd = kbd;
+        self.press_inst = pressed;
     }
 
     /// Starts the one-neighbour move to `t` — the cube sideways, the
@@ -923,6 +973,34 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert_eq!(set.running(), 0);
         assert!(set.get_mut(id(1)).is_none());
+    }
+
+    /// The pair a screen's remembered placement is checked as — the
+    /// number AND the widget standing on it.
+    ///
+    /// This is what makes state that outlives a frame (who owns the
+    /// keyboard, who was told the button went down) survivable across a
+    /// sync. The dangerous case is not the placement that leaves, which
+    /// would answer nothing anyway: it is the number the next layaut
+    /// hands to ANOTHER widget, which a check by identity alone would
+    /// let quietly inherit both.
+    #[test]
+    fn a_placement_is_its_number_and_its_widget_together() {
+        let c = counter();
+        let mut set = WidgetSet::new();
+        set.sync(&[(id(1), Panel(0)), (id(2), Panel(3))], |_| spawn(&c));
+        assert_eq!(set.widget_of(id(1)), Some(Panel(0)));
+        assert_eq!(set.widget_of(id(2)), Some(Panel(3)));
+        assert_eq!(set.widget_of(id(9)), None, "a number nobody placed");
+        // A placement that has left every board: gone, and the pair
+        // says so.
+        set.sync(&[(id(2), Panel(3))], |_| spawn(&c));
+        assert_eq!(set.widget_of(id(1)), None);
+        // The same number, another widget. The number is still in the
+        // set — which is exactly why the number alone cannot be the
+        // question; the pair has changed, and that is the answer.
+        set.sync(&[(id(2), Panel(7))], |_| spawn(&c));
+        assert_eq!(set.widget_of(id(2)), Some(Panel(7)));
     }
 
     /// Two layauts are two id spaces. Swapping the one a screen shows
