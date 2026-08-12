@@ -704,10 +704,18 @@ fn main() {
         }};
     }
 
-    // Routes one drag phase to a placement's widget, in the content box
-    // its last draw used — the same rect discipline as click and wheel.
-    macro_rules! widget_drag {
-        ($si:expr, $id:expr, $phase:expr, $x:expr, $y:expr) => {{
+    // Routes one pointer event to a placement's widget, in the content
+    // box its last draw used — the same rect discipline as click and
+    // wheel.
+    //
+    // The METHOD is a parameter because the press, the release and the
+    // three drag phases differ in nothing else: they all need the
+    // frame's `Host`, the placement's content box and the same fallback
+    // for a placement holding no widget, and writing those lines out
+    // once per method is how the five of them start disagreeing about
+    // which rectangle a widget was answered in.
+    macro_rules! widget_pointer {
+        ($si:expr, $id:expr, $method:ident ( $($arg:expr),* )) => {{
             let si: usize = $si;
             let id: InstanceId = $id;
             let sc = &mut screens[si];
@@ -728,7 +736,7 @@ fn main() {
             };
             sc.widgets
                 .get_mut(id)
-                .map(|wg| wg.drag($phase, $x, $y, r, &host))
+                .map(|wg| wg.$method($($arg,)* r, &host))
                 .unwrap_or(widgets::Action::None)
         }};
     }
@@ -786,6 +794,121 @@ fn main() {
                 if let Some(s) = sessions[active].as_mut() {
                     s.paste(&text);
                 }
+            }
+        }};
+    }
+    // Everything a widget may ask the application for, in ONE place.
+    //
+    // Four routes reach it now — the click, the press, the release and
+    // the key the focused widget consumed — and each of them was a
+    // reason to write the list out again. A request that meant one
+    // thing from a click and nothing from a key would be a contract
+    // with a hole in it, and the hole would be invisible: the widget
+    // would simply be ignored.
+    //
+    // `$elwt` is a parameter and everything else is not, for one
+    // reason: a name written in a macro body resolves where the macro
+    // is DEFINED. The sessions, the settings window and the rest are
+    // locals of this function and already in scope here; the loop's
+    // handle is a parameter of the closure below, which does not exist
+    // yet, so it has to be handed in at every call.
+    macro_rules! apply_action {
+        ($action:expr, $elwt:expr) => {{
+            match $action {
+                widgets::Action::Bytes(bytes) => {
+                    if let Some(s) = sessions[active].as_mut() {
+                        s.pty.write(&bytes);
+                        s.term.view_offset = 0;
+                    }
+                }
+                widgets::Action::OpenDir(dir) => {
+                    // Entering a directory = cd in the active tab (a
+                    // leading space skips bash history).
+                    if let Some(s) = sessions[active].as_mut() {
+                        let quoted = dir.display().to_string().replace('\'', "'\\''");
+                        s.pty.write(format!(" cd '{quoted}'\r").as_bytes());
+                        s.term.view_offset = 0;
+                    }
+                }
+                widgets::Action::OpenFile(file) => {
+                    // Application associated with the extension.
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&file)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                // A tab number comes from a widget, and a widget is a
+                // file someone can replace: the number is checked here
+                // rather than trusted, because indexing past the end
+                // would take the whole desktop down with it.
+                widgets::Action::SelectTab(i) if i >= sessions.len() => {
+                    eprintln!(
+                        "nacelle-desktop: a widget asked for session {i}; there are {}",
+                        sessions.len()
+                    );
+                }
+                widgets::Action::SelectTab(i) => {
+                    if sessions[i].is_some() {
+                        active = i;
+                    } else {
+                        // A new tab starts where the active shell is,
+                        // which is what the file panel is showing.
+                        let from = sessions[active]
+                            .as_mut()
+                            .and_then(|s| s.cwd())
+                            .unwrap_or_else(|| home.clone());
+                        match Session::spawn(grid.0, grid.1, &from) {
+                            Ok(s) => {
+                                sessions[i] = Some(s);
+                                active = i;
+                            }
+                            Err(e) => {
+                                eprintln!("nacelle-desktop: cannot open PTY: {e}")
+                            }
+                        }
+                    }
+                }
+                widgets::Action::Exit => {
+                    eprintln!("nacelle-desktop: closed from the control panel");
+                    $elwt.exit();
+                }
+                widgets::Action::OpenSettings => settings.show(),
+                widgets::Action::ScrollTerminal(n) => {
+                    if let Some(s) = sessions[active].as_mut() {
+                        s.term.scroll_view(n);
+                    }
+                }
+                widgets::Action::TermSelect { op, col, row, base } => {
+                    apply_term_select!(op, col, row, base)
+                }
+                widgets::Action::PastePrimary => {
+                    paste_into_active!(nacelle::clipboard::Board::Primary)
+                }
+                // Nothing to do by construction: it is the press path's
+                // "the gesture is mine", and only `drag(Begin)` decides
+                // that. From anywhere else — a click, a press, a key —
+                // it means nothing, which is what the contract says.
+                widgets::Action::Capture => {}
+                widgets::Action::None => {}
+            }
+        }};
+    }
+    // The release that closes the press a widget was told about, at
+    // whatever point the pointer has reached — which may be outside the
+    // widget, because a press released off its own edge is a press the
+    // user took back and only the widget can decide that.
+    //
+    // No sound: the click that usually follows makes it, and a release
+    // that clicked too would double every button in the program.
+    macro_rules! release_pressed {
+        ($si:expr, $elwt:expr) => {{
+            let si: usize = $si;
+            if let Some(id) = screens[si].press_inst.take() {
+                let at = screens[si].mouse;
+                let a = widget_pointer!(si, id, release(at.0, at.1));
+                apply_action!(a, $elwt);
             }
         }};
     }
@@ -1250,7 +1373,11 @@ fn main() {
                         // sees it — the single capture path.
                         if let Some(id) = screens[si].drag_capture {
                             if let widgets::Action::TermSelect { op, col, row, base } =
-                                widget_drag!(si, id, widgets::DragPhase::Move, mouse.0, mouse.1)
+                                widget_pointer!(
+                                    si,
+                                    id,
+                                    drag(widgets::DragPhase::Move, mouse.0, mouse.1)
+                                )
                             {
                                 apply_term_select!(op, col, row, base);
                             }
@@ -1441,12 +1568,28 @@ fn main() {
                         // neither had the press.
                         if let Some(id) = screens[si].drag_capture.take() {
                             if let widgets::Action::TermSelect { op, col, row, base } =
-                                widget_drag!(si, id, widgets::DragPhase::End, mouse.0, mouse.1)
+                                widget_pointer!(
+                                    si,
+                                    id,
+                                    drag(widgets::DragPhase::End, mouse.0, mouse.1)
+                                )
                             {
                                 apply_term_select!(op, col, row, base);
                             }
+                            // The button coming up, AFTER the gesture it
+                            // belonged to: a widget tracking its own
+                            // down/up pair hears the whole drag before
+                            // the end of it (F2 §6).
+                            release_pressed!(si, elwt);
                             return;
                         }
+                        // No capture. The release closes the pair BEFORE
+                        // the click that concludes it — and it is
+                        // delivered here, above every early return
+                        // below, because what the press turned into (a
+                        // board ride, an editor grab, nothing at all)
+                        // must not decide whether its release arrives.
+                        release_pressed!(si, elwt);
                         if screens[si].editor.active && !settings.open {
                             screens[si].editor.mouse_up();
                             return;
@@ -1552,89 +1695,7 @@ fn main() {
                         ) {
                             nacelle::sound::emit(nacelle::sound::Event::Click);
                         }
-                        match action {
-                            widgets::Action::Bytes(bytes) => {
-                                if let Some(s) = sessions[active].as_mut() {
-                                    s.pty.write(&bytes);
-                                    s.term.view_offset = 0;
-                                }
-                            }
-                            widgets::Action::OpenDir(dir) => {
-                                // Entering a directory = cd in the active
-                                // tab (a leading space skips bash history).
-                                if let Some(s) = sessions[active].as_mut() {
-                                    let quoted =
-                                        dir.display().to_string().replace('\'', "'\\''");
-                                    s.pty.write(format!(" cd '{quoted}'\r").as_bytes());
-                                    s.term.view_offset = 0;
-                                }
-                            }
-                            widgets::Action::OpenFile(file) => {
-                                // Application associated with the extension.
-                                let _ = std::process::Command::new("xdg-open")
-                                    .arg(&file)
-                                    .stdin(std::process::Stdio::null())
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn();
-                            }
-                            // A tab number comes from a widget, and a
-                            // widget is a file someone can replace: the
-                            // number is checked here rather than trusted,
-                            // because indexing past the end would take the
-                            // whole desktop down with it.
-                            widgets::Action::SelectTab(i) if i >= sessions.len() => {
-                                eprintln!(
-                                    "nacelle-desktop: a widget asked for session {i}; there are {}",
-                                    sessions.len()
-                                );
-                            }
-                            widgets::Action::SelectTab(i) => {
-                                if sessions[i].is_some() {
-                                    active = i;
-                                } else {
-                                    // A new tab starts where the active
-                                    // shell is, which is what the file
-                                    // panel is showing.
-                                    let start = sessions[active]
-                                        .as_mut()
-                                        .and_then(|s| s.cwd())
-                                        .unwrap_or_else(|| home.clone());
-                                    match Session::spawn(grid.0, grid.1, &start) {
-                                        Ok(s) => {
-                                            sessions[i] = Some(s);
-                                            active = i;
-                                        }
-                                        Err(e) => {
-                                            eprintln!("nacelle-desktop: cannot open PTY: {e}")
-                                        }
-                                    }
-                                }
-                            }
-                            widgets::Action::Exit => {
-                                eprintln!("nacelle-desktop: closed from the control panel");
-                                elwt.exit();
-                            }
-                            widgets::Action::OpenSettings => settings.show(),
-                            widgets::Action::ScrollTerminal(n) => {
-                                if let Some(s) = sessions[active].as_mut() {
-                                    s.term.scroll_view(n);
-                                }
-                            }
-                            // A widget may also answer these from a
-                            // click; the handlers are the drag path's.
-                            widgets::Action::TermSelect { op, col, row, base } => {
-                                apply_term_select!(op, col, row, base)
-                            }
-                            widgets::Action::PastePrimary => {
-                                paste_into_active!(nacelle::clipboard::Board::Primary)
-                            }
-                            // Nothing to do by construction: it is the
-                            // press path's "the gesture is mine", and a
-                            // click is not a gesture to capture.
-                            widgets::Action::Capture => {}
-                            widgets::Action::None => {}
-                        }
+                        apply_action!(action, elwt);
                     }
                     WindowEvent::MouseInput {
                         state: ElementState::Pressed,
@@ -1794,7 +1855,27 @@ fn main() {
                         };
                         click_last = Some((Instant::now(), mouse.0, mouse.1));
                         let layout = screens[si].content_layout();
-                        if let Some(pl) = layout.hit(mouse.0, mouse.1) {
+                        let hit = layout.hit(mouse.0, mouse.1);
+                        // The keyboard follows the press, whether or not
+                        // the widget wants the gesture: container focus
+                        // is click-to-focus everywhere else in the
+                        // program and this is the same rule. A press on
+                        // no placement at all gives it back, so the keys
+                        // return to the route they had at boot rather
+                        // than staying with a widget the user has
+                        // visibly left.
+                        screens[si].kbd = hit.map(|pl| pl.id);
+                        if let Some(pl) = hit {
+                            // The button going DOWN, before the gesture
+                            // question below. It is delivered first and
+                            // unconditionally because it is not part of
+                            // that question: a control darkens while it
+                            // is held whether or not it then accepts a
+                            // drag, and `press_inst` is what guarantees
+                            // exactly one release closes it.
+                            screens[si].press_inst = Some(pl.id);
+                            let a = widget_pointer!(si, pl.id, press(mouse.0, mouse.1));
+                            apply_action!(a, elwt);
                             // The widget's own answer decides who owns
                             // the hand: anything but None takes the
                             // capture (the contract `Widget::drag`
@@ -1802,12 +1883,10 @@ fn main() {
                             // gesture. A selection asks for something
                             // while it captures; a scroll thumb asks
                             // for nothing and says so with Capture.
-                            match widget_drag!(
+                            match widget_pointer!(
                                 si,
                                 pl.id,
-                                widgets::DragPhase::Begin,
-                                mouse.0,
-                                mouse.1
+                                drag(widgets::DragPhase::Begin, mouse.0, mouse.1)
                             ) {
                                 widgets::Action::None => {}
                                 widgets::Action::TermSelect { op, col, row, base } => {
@@ -2146,6 +2225,44 @@ fn main() {
                             }
                             return;
                         }
+                        // The neutral event, built ONCE for the three
+                        // things below that each used to spell the key
+                        // out for themselves: the on-screen keyboard's
+                        // highlight, the shortcut registry, and the
+                        // widget that owns the keyboard.
+                        let kev = focus_key_ev(&key_event.logical_key, mods);
+                        // Lighting a key up is not the same question as
+                        // who receives it, so it is answered separately
+                        // and first. A BROADCAST, to every widget of
+                        // every screen: which of them draws an on-screen
+                        // keyboard is not this program's business, and
+                        // nobody can consume it.
+                        //
+                        // It used to sit INSIDE the `key_to_bytes` block
+                        // at the bottom, which made it accidentally
+                        // conditional on the key having a terminal
+                        // sequence — and it spelled five names of its
+                        // own, so the arrows, HOME, END and DELETE
+                        // reached the keyboard widget as nothing at all
+                        // despite it knowing all four. Both are gone:
+                        // the names come from the boundary's own table
+                        // (`runtime::keys`), which is the same table the
+                        // focused-key entry uses, so the two paths
+                        // cannot drift apart again.
+                        if let Some(kev) = kev.as_ref() {
+                            let ch = match kev.key {
+                                nacelle::focus::Key::Char(c) => Some(c),
+                                _ => None,
+                            };
+                            let label = nacelle::runtime::keys::name_of(kev.key);
+                            if ch.is_some() || label.is_some() {
+                                for sc in screens.iter_mut() {
+                                    for wg in sc.widgets.each_mut() {
+                                        wg.key_feedback(ch, label);
+                                    }
+                                }
+                            }
+                        }
                         // Application shortcuts.
                         if let Key::Named(NamedKey::F11) = key_event.logical_key {
                             let fs = screens[si].window.fullscreen();
@@ -2173,10 +2290,10 @@ fn main() {
                         // when it then does nothing (no selection, an
                         // empty clipboard): Ctrl+Shift+C must never
                         // fall through and become a ^C.
-                        if let Some(kev) = focus_key_ev(&key_event.logical_key, mods) {
+                        if let Some(kev) = kev.as_ref() {
                             use nacelle::clipboard::Board;
                             use nacelle::focus::Scope;
-                            match shortcuts.lookup_over_greedy(&[Scope::Global], &kev) {
+                            match shortcuts.lookup_over_greedy(&[Scope::Global], kev) {
                                 Some(CMD_COPY) => {
                                     let text = sessions[active]
                                         .as_ref()
@@ -2219,6 +2336,50 @@ fn main() {
                                 _ => {}
                             }
                         }
+                        // The widget that owns the keyboard gets the key
+                        // next, and its answer is the whole decision:
+                        // consumed means the host spends the key on
+                        // nothing else — not the shell's bytes below,
+                        // and not the focus navigation a later phase
+                        // puts here.
+                        //
+                        // Only ONE widget is asked, which is the point:
+                        // the broadcast above cannot carry this because
+                        // two text fields on one board would both eat
+                        // the same character, and a broadcast has no
+                        // answer to give. The modifiers ride along, so
+                        // select-all, undo and the clipboard chords are
+                        // reachable inside a field at all.
+                        //
+                        // Nobody owning the keyboard is the boot state
+                        // and stays the default: with `kbd` unset every
+                        // key keeps exactly the route it had before any
+                        // of this existed.
+                        //
+                        // The event carries no `text`, deliberately.
+                        // The boundary does not carry one either (a
+                        // multi-character IME commit is not one key), so
+                        // filling it here would make a widget linked
+                        // into this binary type dead keys that the SAME
+                        // widget shipped as a file could not — and the
+                        // two builds being one behaviour is the point of
+                        // building them from one source. A field falls
+                        // back to the bare character, which is what
+                        // `text_input::key_msg` promises.
+                        if let (Some(id), Some(kev)) = (screens[si].kbd, kev.as_ref()) {
+                            let taken =
+                                screens[si].widgets.get_mut(id).and_then(|w| w.key(kev));
+                            if let Some(action) = taken {
+                                // A key that reached a widget sounds like
+                                // a key: the sound belongs to the press,
+                                // not to the PTY write it usually ends
+                                // in. Exactly one path runs, so this can
+                                // never double the sound below.
+                                nacelle::sound::emit(key_sound(&key_event.logical_key));
+                                apply_action!(action, elwt);
+                                return;
+                            }
+                        }
                         let app_cursor = sessions[active]
                             .as_ref()
                             .map(|s| s.term.app_cursor)
@@ -2226,38 +2387,7 @@ fn main() {
                         if let Some(bytes) =
                             key_to_bytes(&key_event.logical_key, mods, app_cursor)
                         {
-                            // Highlight the key on the on-screen keyboard.
-                            let (ch, label) = match &key_event.logical_key {
-                                Key::Character(s) => (s.chars().next(), None),
-                                Key::Named(NamedKey::Enter) => (None, Some("ENTER")),
-                                Key::Named(NamedKey::Backspace) => (None, Some("BACK")),
-                                Key::Named(NamedKey::Space) => (None, Some("SPACE")),
-                                Key::Named(NamedKey::Tab) => (None, Some("TAB")),
-                                Key::Named(NamedKey::Escape) => (None, Some("ESC")),
-                                _ => (None, None),
-                            };
-                            // Announced to every widget of every screen:
-                            // which of them draws an on-screen keyboard
-                            // is not this program's business, and the
-                            // ones that draw none ignore it (the
-                            // interface's default is to do nothing).
-                            for sc in screens.iter_mut() {
-                                for wg in sc.widgets.each_mut() {
-                                    wg.key_feedback(ch, label);
-                                }
-                            }
-                            // Typing: Enter and Backspace have their own
-                            // sounds, every other key shares the rotating
-                            // Key variants.
-                            nacelle::sound::emit(match &key_event.logical_key {
-                                Key::Named(NamedKey::Enter) => {
-                                    nacelle::sound::Event::KeyReturn
-                                }
-                                Key::Named(NamedKey::Backspace) => {
-                                    nacelle::sound::Event::KeyErase
-                                }
-                                _ => nacelle::sound::Event::Key,
-                            });
+                            nacelle::sound::emit(key_sound(&key_event.logical_key));
                             if let Some(s) = sessions[active].as_mut() {
                                 s.pty.write(&bytes);
                                 s.term.view_offset = 0;
@@ -2610,6 +2740,12 @@ fn draw_screen(
             sc.cube = None;
             if landed {
                 sc.board = to;
+                // A widget lives on ONE board, so arriving somewhere
+                // else means whoever held the keyboard is no longer on
+                // screen. It gives the keys back rather than eating
+                // them from off-stage, where the user has nothing to
+                // click to take them away from it.
+                sc.kbd = None;
                 // The world's notion of "here" must land with us, or
                 // the next rebuild would send us home.
                 sc.world.set_current(to);
@@ -3269,6 +3405,22 @@ fn focus_key_ev(key: &Key, mods: ModifiersState) -> Option<nacelle::focus::KeyEv
     Some(KeyEv { key: k, mods: m, repeat: false, text: None })
 }
 
+/// The sound a key press makes: Enter and Backspace have their own,
+/// every other key shares the rotating Key variants.
+///
+/// A function rather than the inline `match` it used to be, because two
+/// paths now end a key press — the widget that consumed it and the shell
+/// that got its bytes — and a key that sounded different depending on
+/// which of them took it would be the program telling the user something
+/// untrue about their own keyboard.
+fn key_sound(key: &Key) -> nacelle::sound::Event {
+    match key {
+        Key::Named(NamedKey::Enter) => nacelle::sound::Event::KeyReturn,
+        Key::Named(NamedKey::Backspace) => nacelle::sound::Event::KeyErase,
+        _ => nacelle::sound::Event::Key,
+    }
+}
+
 fn key_to_bytes(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
     let esc: u8 = 0x1b;
     match key {
@@ -3341,5 +3493,87 @@ fn key_to_bytes(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec
             Some(out)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nacelle::focus::{Key as FKey, Mods};
+    use nacelle::runtime::keys;
+
+    fn named(n: NamedKey) -> Key {
+        Key::Named(n)
+    }
+
+    /// What the on-screen keyboard is told a key IS.
+    ///
+    /// The desktop used to answer this from a table of five names
+    /// written where the terminal's bytes were built, so a key with no
+    /// PTY sequence was announced to nobody and the nine names that
+    /// table did not hold arrived as nothing at all — the arrows, HOME,
+    /// END and DELETE among them, all four of which the keyboard widget
+    /// already understood. Both halves are now the boundary's own table,
+    /// and this is what keeps a second one from growing back.
+    #[test]
+    fn every_named_key_the_desktop_translates_is_announced_by_its_word() {
+        let m = ModifiersState::empty();
+        let word =
+            |n: NamedKey| focus_key_ev(&named(n), m).and_then(|k| keys::name_of(k.key));
+        // The five the old inline table held: unchanged, so nothing an
+        // on-screen keyboard already lit up stops lighting up.
+        assert_eq!(word(NamedKey::Enter), Some(keys::ENTER));
+        assert_eq!(word(NamedKey::Backspace), Some(keys::BACK));
+        assert_eq!(word(NamedKey::Space), Some(keys::SPACE));
+        assert_eq!(word(NamedKey::Tab), Some(keys::TAB));
+        assert_eq!(word(NamedKey::Escape), Some(keys::ESC));
+        // The nine it did not: this is the defect, stated as a test.
+        assert_eq!(word(NamedKey::ArrowUp), Some(keys::UP));
+        assert_eq!(word(NamedKey::ArrowDown), Some(keys::DOWN));
+        assert_eq!(word(NamedKey::ArrowLeft), Some(keys::LEFT));
+        assert_eq!(word(NamedKey::ArrowRight), Some(keys::RIGHT));
+        assert_eq!(word(NamedKey::Home), Some(keys::HOME));
+        assert_eq!(word(NamedKey::End), Some(keys::END));
+        assert_eq!(word(NamedKey::Delete), Some(keys::DELETE));
+        assert_eq!(word(NamedKey::PageUp), Some(keys::PAGE_UP));
+        assert_eq!(word(NamedKey::PageDown), Some(keys::PAGE_DOWN));
+        // A character rides as a scalar, never as a name — the two ways
+        // a key crosses, and never both at once.
+        let ev = focus_key_ev(&Key::Character("a".into()), m).expect("a letter is a key");
+        assert_eq!(ev.key, FKey::Char('a'));
+        assert_eq!(keys::name_of(ev.key), None);
+        // The keys the contract does not name stay the application's
+        // shortcuts; F11 is the fullscreen toggle and must not become a
+        // widget's key.
+        assert_eq!(word(NamedKey::F11), None);
+        assert_eq!(word(NamedKey::Insert), None);
+    }
+
+    /// The modifiers the focused-key route carries. Without them a field
+    /// cannot tell select-all from a typed 'a', which is the whole
+    /// reason the entry carries a mask at all.
+    #[test]
+    fn the_modifier_mask_reaches_the_widget_as_the_toolkits_own_set() {
+        let ev = |m| focus_key_ev(&Key::Character("a".into()), m).expect("a letter").mods;
+        assert_eq!(ev(ModifiersState::empty()), Mods::NONE);
+        assert_eq!(ev(ModifiersState::CONTROL), Mods::CTRL);
+        assert_eq!(
+            ev(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            Mods::CTRL | Mods::SHIFT
+        );
+        assert_eq!(ev(ModifiersState::ALT), Mods::ALT);
+        assert_eq!(ev(ModifiersState::SUPER), Mods::SUPER);
+    }
+
+    /// One key, one sound, whoever ends up taking it. The rule used to
+    /// live inside the terminal-bytes block, so a key a widget consumed
+    /// was silent while the same key typed into the shell was not.
+    #[test]
+    fn a_key_sounds_the_same_whoever_consumes_it() {
+        use nacelle::sound::Event;
+        assert_eq!(key_sound(&named(NamedKey::Enter)), Event::KeyReturn);
+        assert_eq!(key_sound(&named(NamedKey::Backspace)), Event::KeyErase);
+        assert_eq!(key_sound(&Key::Character("a".into())), Event::Key);
+        assert_eq!(key_sound(&named(NamedKey::ArrowDown)), Event::Key);
     }
 }
