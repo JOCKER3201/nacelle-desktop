@@ -58,9 +58,26 @@
 //! themes; the Layaut= and Sounds= options name a file from layauts/
 //! (without an extension) and a directory from sounds/. Empty values or
 //! missing options = defaults built into the code.
+//!
+//! A machine with several screens gives each of them a desktop of its
+//! own, so Layaut= is only the DEFAULT arrangement. A screen takes a
+//! layaut of its own when the file names it by connector:
+//!
+//!   Layaut=console          # every screen not named below
+//!   Layaut[DP-1]=cockpit    # the monitor on DisplayPort 1
+//!   Layaut[eDP-1]=panel     # the laptop's own screen
+//!
+//! The connector — DP-1, HDMI-A-1, eDP-1 — is what the display server
+//! calls the socket a screen hangs off, and the program prints it for
+//! every screen at startup. It is the only stable name a screen has:
+//! the order screens come up in depends on which monitor is switched
+//! on first, so a number in that order would name a different screen
+//! every morning. Case is not significant, an empty value means "no
+//! layaut of its own", and a name no layauts/ file answers to costs
+//! that screen nothing but a line in the log — it takes the default.
 
-use crate::widgets::{LayoutSpec, Panel, PanelSpec};
-use std::collections::HashMap;
+use crate::widgets::PanelSpec;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 
@@ -74,7 +91,7 @@ use std::path::{Path, PathBuf};
 
 
 
-pub use nacelle::layout::{board_key, BoardId, LayoutDef, ResOverride};
+pub use nacelle::layout::{BoardId, InstanceId, LayoutDef};
 use nacelle::assets::AssetRoots;
 use nacelle::layout::LayautStore;
 
@@ -329,18 +346,207 @@ pub fn set_engine_theme(name: &str) {
 
 /// The layout half of the configuration: `Layaut=` names one, and
 /// anything missing falls back to the responsive built-in default.
+///
+/// This is the DEFAULT desktop — the one every screen the
+/// configuration does not name by connector shows. See
+/// [`screen_layaut`] for the per-screen answer.
 fn resolve_layout(warning: &mut Option<String>) -> LayoutDef {
     let lname = current_layaut_name().unwrap_or_else(|| "default".into());
-    match layaut_by_name(&lname) {
-        Some(l) => l,
-        None => {
-            eprintln!("nacelle-desktop: layaut '{lname}' is not installed");
-            *warning = Some(format!(
-                "Layaut '{lname}' is not installed \u{2014} using the default layaut"
-            ));
-            layaut_by_name("default").unwrap_or_default()
-        }
+    load_layaut_or_default(&lname, warning).1
+}
+
+/// Loads a layaut by name, degrading to the built-in default when it
+/// is not installed and saying so. Returns the name actually loaded,
+/// because a caller that saves back into "the layaut this screen
+/// shows" must not write into a file that does not exist.
+fn load_layaut_or_default(name: &str, warning: &mut Option<String>) -> (String, LayoutDef) {
+    if let Some(l) = layaut_by_name(name) {
+        return (name.to_string(), l);
     }
+    eprintln!("nacelle-desktop: layaut '{name}' is not installed");
+    *warning = Some(format!(
+        "Layaut '{name}' is not installed \u{2014} using the default layaut"
+    ));
+    ("default".to_string(), layaut_by_name("default").unwrap_or_default())
+}
+
+/// The configuration key one screen's layaut is written under:
+/// `Layaut[DP-1]`. None when the text is not a connector name — a key
+/// nothing could ever match a screen to is not worth writing, and
+/// keeping brackets and separators out of it is what keeps the file
+/// parseable by the same two rules as every other line.
+fn screen_layaut_key(connector: &str) -> Option<String> {
+    let c = connector.trim();
+    (crate::screens::connector_of(c).as_deref() == Some(c)).then(|| format!("Layaut[{c}]"))
+}
+
+/// Every connector→layaut assignment in an already-cascaded
+/// configuration map, in connector order.
+///
+/// Takes the map rather than reading the files, so a test hands it
+/// three lines and touches nothing process-wide.
+///
+/// A value is carried through as written and NOT checked against the
+/// installed layauts here: whether it names something real is
+/// [`choose_layaut`]'s judgement, which is also the only place that
+/// can say so in the log. Dropping it here would lose the sentence.
+fn screen_layauts_in(kv: &HashMap<String, String>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (key, value) in kv {
+        // `Layaut [DP-1]` reads as `Layaut[DP-1]`: this is a file
+        // people type into, and a space before the bracket is not a
+        // different intention.
+        let Some(inner) = key
+            .trim()
+            .strip_prefix("Layaut")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('['))
+            .and_then(|rest| rest.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let inner = inner.trim();
+        if crate::screens::connector_of(inner).as_deref() != Some(inner) {
+            continue;
+        }
+        let name = value.trim();
+        // An empty value is a value: it is how the user's own file
+        // says "this screen has no layaut of its own" over a system
+        // file that gave it one, exactly as ColorLut= says "off".
+        if name.is_empty() {
+            continue;
+        }
+        out.insert(inner.to_string(), name.to_string());
+    }
+    out
+}
+
+/// What one screen's layaut resolves to, and the one sentence the log
+/// gets when the configuration asked for something that is not there.
+struct ScreenLayaut {
+    name: String,
+    note: Option<String>,
+}
+
+/// Which layaut a connector takes: the one it is assigned when that
+/// layaut is installed, the desktop's default in every other case.
+///
+/// Pure, and handed everything it judges by — the assignments, the
+/// default and the names the store actually holds — because this
+/// decision has to be testable on a machine that has no screens, and
+/// because it must never be able to name a layaut the store did not
+/// list: that is what keeps a hand-written value out of the paths
+/// built from it.
+fn choose_layaut(
+    connector: Option<&str>,
+    assigned: &BTreeMap<String, String>,
+    default_name: &str,
+    installed: &[String],
+) -> ScreenLayaut {
+    let default = || ScreenLayaut { name: default_name.to_string(), note: None };
+    // Case is not significant: RandR says eDP-1 and a user typing
+    // edp-1 means that same screen, not a screen the machine lacks.
+    let Some((c, want)) = connector.and_then(|c| {
+        assigned
+            .iter()
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(c))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }) else {
+        return default();
+    };
+    if installed.iter().any(|n| n == want) {
+        return ScreenLayaut { name: want.to_string(), note: None };
+    }
+    ScreenLayaut {
+        name: default_name.to_string(),
+        note: Some(format!(
+            "screen {c} is assigned layaut '{want}', which is not installed \u{2014} \
+             that screen takes the default layaut '{default_name}' instead"
+        )),
+    }
+}
+
+// The per-screen layaut API below — read it, write it, resolve it —
+// has no caller in this file. It is answered here and asked
+// elsewhere: main.rs hands each screen the layaut its connector is
+// assigned, and the settings screen writes the assignments once it
+// exists (until then the user writes the line by hand, which is what
+// the format is shaped for). `allow(dead_code)` says exactly that,
+// and comes off the day each one is called.
+
+/// Every connector→layaut assignment the configuration carries, the
+/// user's file laid over the system ones.
+#[allow(dead_code)]
+pub fn screen_layauts() -> BTreeMap<String, String> {
+    screen_layauts_in(&conf_kv())
+}
+
+/// The layaut assigned to one connector, if any. Case is not
+/// significant.
+#[allow(dead_code)]
+pub fn layaut_for_connector(connector: &str) -> Option<String> {
+    screen_layauts()
+        .into_iter()
+        .find(|(k, _)| k.as_str().eq_ignore_ascii_case(connector))
+        .map(|(_, v)| v)
+}
+
+/// Assigns a layaut to a connector. An empty name CLEARS the
+/// assignment — written as an empty value rather than deleted, so the
+/// user's file also overrules one a system file makes.
+#[allow(dead_code)]
+pub fn set_layaut_for_connector(connector: &str, name: &str) {
+    let Some(key) = screen_layaut_key(connector) else {
+        eprintln!(
+            "nacelle-desktop: '{connector}' is not a connector name \u{2014} \
+             no screen was assigned a layaut"
+        );
+        return;
+    };
+    set_conf_kv(&key, name.trim());
+}
+
+/// The NAME of the layaut a screen takes, by the connector it hangs
+/// off. None connector — a screen the display server would not name —
+/// takes the default, and so does a screen nothing was written for.
+///
+/// Reads the configuration files and lists the layaut store, so it is
+/// asked when a screen appears or the configuration changes, never
+/// per frame. [`screen_layaut`] is the one that reports a fallback;
+/// this one answers quietly, so a caller comparing two screens does
+/// not fill the log.
+#[allow(dead_code)]
+pub fn screen_layaut_name(connector: Option<&str>) -> String {
+    choose_layaut(
+        connector,
+        &screen_layauts(),
+        &current_layaut_name().unwrap_or_else(|| "default".into()),
+        &list_layauts(),
+    )
+    .name
+}
+
+/// The layaut a screen takes: the name and the layout itself.
+///
+/// This is the whole of "one screen, one desktop": a screen the
+/// configuration names by connector takes that layaut, and every
+/// other screen takes the default one. A configuration naming a
+/// layaut this machine does not have is a mistake in a file, never a
+/// reason not to start — the screen falls back to the default and the
+/// log says which screen, which layaut and what it got instead.
+#[allow(dead_code)]
+pub fn screen_layaut(connector: Option<&str>) -> (String, LayoutDef) {
+    let chosen = choose_layaut(
+        connector,
+        &screen_layauts(),
+        &current_layaut_name().unwrap_or_else(|| "default".into()),
+        &list_layauts(),
+    );
+    if let Some(note) = &chosen.note {
+        eprintln!("nacelle-desktop: {note}");
+    }
+    let mut warning = None;
+    load_layaut_or_default(&chosen.name, &mut warning)
 }
 
 /// What a retired look's directory bundled as its layout: a symlink
@@ -889,12 +1095,17 @@ pub fn set_grid_snap(on: bool) {
 
 
 
+/// The board's placements BY IDENTITY: the grid editor hands back one
+/// entry per instance standing on the board, and the store drops the
+/// instances it no longer names. By identity and not by widget, because
+/// a board may hold the same widget twice and only the id says which
+/// of the two rectangles moved.
 pub fn set_board_in_layaut(
     name: &str,
     k: BoardId,
-    spec: &LayoutSpec,
+    rects: &[(InstanceId, PanelSpec)],
 ) -> std::io::Result<()> {
-    store().set_board(name, k, spec)
+    store().set_board(name, k, rects)
 }
 
 pub fn add_board_in_layaut(name: &str, side: i8) -> std::io::Result<()> {
@@ -928,25 +1139,33 @@ pub fn select_layaut(name: &str) {
 
 
 
+/// SAVE AS. `def` is taken by mutable reference because writing a
+/// layout down is what turns its COMPOSED placements into saved ones:
+/// the caller's copy has to learn the new identities, or it would go on
+/// holding ids the file does not have.
 pub fn save_layaut_full(
     name: &str,
-    spec: &LayoutSpec,
+    def: &mut LayoutDef,
     key: (u32, u32, u32),
 ) -> std::io::Result<()> {
-    store().save_full(name, spec, key)
+    store().save_full(name, def, key)
 }
 
 
 
 
 
+/// SAVE. `changes` names the INSTANCES the editor moved — the second
+/// terminal the user dragged on his 4K screen is that instance, not
+/// "the terminal" — and `def` is the caller's own model, written back
+/// materialized (see [`save_layaut_full`]).
 pub fn save_layaut_overrides(
     name: &str,
     key: (u32, u32, u32),
-    changes: &[(Panel, PanelSpec)],
-    full: &LayoutSpec,
+    changes: &[(InstanceId, PanelSpec)],
+    def: &mut LayoutDef,
 ) -> std::io::Result<()> {
-    store().save_overrides(name, key, changes, full)
+    store().save_overrides(name, key, changes, def)
 }
 
 
@@ -1036,11 +1255,26 @@ fn set_conf_kv(key: &str, value: &str) {
         }
     }
     let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = set_kv_in_text(&text, key, value);
+    if let Err(e) = std::fs::write(&path, out) {
+        eprintln!("nacelle-desktop: cannot write {}: {e}", path.display());
+    }
+}
+
+/// `Key=Value` set on the TEXT of a configuration file: the line is
+/// replaced where it stands, and appended when there is none. Every
+/// other line — the comments, the order, keys this program has never
+/// heard of — survives verbatim.
+///
+/// The pure half of [`set_conf_kv`], and what the tests exercise: the
+/// environment is shared by tests running in parallel, so a test that
+/// wrote through it would be testing the other tests too.
+fn set_kv_in_text(text: &str, key: &str, value: &str) -> String {
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
+    let prefix = format!("{key}=");
     let mut replaced = false;
     for line in lines.iter_mut() {
-        let t = line.trim_start();
-        if t.starts_with(&format!("{key}=")) {
+        if line.trim_start().starts_with(&prefix) {
             *line = format!("{key}={value}");
             replaced = true;
             break;
@@ -1051,9 +1285,7 @@ fn set_conf_kv(key: &str, value: &str) {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    if let Err(e) = std::fs::write(&path, out) {
-        eprintln!("nacelle-desktop: cannot write {}: {e}", path.display());
-    }
+    out
 }
 
 /// The one configuration directory anything is ever WRITTEN to:
@@ -1200,7 +1432,9 @@ fn find_file(dir: &Path, ext: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use crate::widgets::LayoutMode;
+    // A widget KIND: only the tests still name one directly — the
+    // interface below speaks in instance identities.
+    use crate::widgets::{LayoutMode, Panel};
 
     fn test_store(dir: &std::path::Path) -> nacelle::layout::LayautStore {
         nacelle::layout::LayautStore::new(nacelle::assets::AssetRoots::new(
@@ -1218,12 +1452,16 @@ mod tests {
     /// resolver had stopped reading.
     #[test]
     fn selecting_a_theme_changes_the_colours_the_program_draws_with() {
+        // This test SELECTS themes in a process-wide engine; nothing
+        // that reads one may run beside it (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
         fixture_registry();
         let dir = std::env::temp_dir().join(format!("nacelle-theme-switch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // Deliberately NOT created: the program makes no configuration
         // directory at startup, so the first settings click is what
         // has to bring it into being.
+        let _env = env_lock();
         std::env::set_var("XDG_CONFIG_HOME", &dir);
 
         let colour_of = |name: &str| {
@@ -1375,6 +1613,25 @@ mod tests {
     /// process-wide registry is fixed by the first call *or the first
     /// read*, so one test resolving a layout before the staging would
     /// freeze it empty for all the others.
+    /// Serialises every test that writes an XDG variable.
+    ///
+    /// `std::env::set_var` is PROCESS-wide while `cargo test` runs its
+    /// tests on many threads: one test pointing XDG_CONFIG_HOME at its
+    /// own directory silently redirected another test's `resolve()`
+    /// half way through, and the theme-switch test read somebody else's
+    /// configuration and saw the wrong accent. Nothing about that was
+    /// visible in the failure — the colour was simply not the one the
+    /// theme names. Per-PID directories are not enough; the variable
+    /// itself is the shared thing.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        // A poisoned lock only means some other test panicked while
+        // holding it; the variable it set is being overwritten anyway.
+        L.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     fn fixture_registry() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
@@ -1622,40 +1879,54 @@ mod tests {
                     [board 4]\ncpu = 10.00 10.00 30.00 30.00\n\n[board -3]\n\n[board 0 2]\nmemory = 1.00 1.00 20.00 20.00\n";
         let def = nacelle::layout::layaut::parse(text, "t");
         assert_eq!(def.boards.len(), 3);
-        // A board parsed from rect lines is a fixed board.
-        let fixed = |bd: &nacelle::layout::BoardDef| -> LayoutSpec {
-            match &bd.base {
-                LayoutMode::Fixed(s) => s.clone(),
-                _ => panic!("expected a fixed board"),
-            }
+        // A board parsed from rect lines places by rectangle, and the
+        // rectangles are on its INSTANCES — the board itself only says
+        // that it reads them.
+        let rects_board = |bd: &nacelle::layout::BoardDef| {
+            assert!(
+                matches!(bd.base, LayoutMode::Rects),
+                "a board written as rect lines places by rectangle"
+            );
+        };
+        let rect_on = |k: BoardId, w: Panel| {
+            def.board_instances(k).into_iter().find(|i| i.widget == w).and_then(|i| i.rect)
         };
         // Gaps close: the only positive board is board 1, the only
         // negative is board -1, wherever the file put them.
         let b1 = def.boards.iter().find(|(k, _)| *k == (1, 0)).expect("board 1");
         assert!(def.boards.iter().any(|(k, _)| *k == (-1, 0)), "board -1");
-        assert!((fixed(&b1.1).p(wp("cpu")).w - 30.0).abs() < 0.01);
-        // The empty one is a place with nothing on it.
+        rects_board(&b1.1);
+        assert!((rect_on((1, 0), wp("cpu")).expect("cpu stands on board 1").w - 30.0).abs() < 0.01);
+        // The empty one is a place with nothing on it. Where the old
+        // per-widget table answered "off screen" for a widget it did
+        // not place, an instance list simply has no entry for it.
         let bm = def.boards.iter().find(|(k, _)| *k == (-1, 0)).unwrap();
         // The vertical arm renumbers just the same: [board 0 2] with
         // nothing above it is the first board below home.
         assert!(def.boards.iter().any(|(k, _)| *k == (0, 1)), "board (0,1)");
-        assert!(fixed(&bm.1).p(wp("cpu")).x >= 100.0);
+        rects_board(&bm.1);
+        assert!(def.board_instances((-1, 0)).is_empty(), "board -1 holds nothing");
+        // The instances went with their boards through normalisation.
+        assert!(rect_on((0, 1), wp("memory")).is_some(), "memory rode down with its board");
 
         // A full-base rewrite (SAVE on the base's screen) keeps them.
         let dir = std::env::temp_dir().join("nacelle-desktop-boards-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("layauts")).unwrap();
         std::fs::write(dir.join("layauts/t.layaut"), text).unwrap();
-        let mut full = LayoutSpec::default();
-        full.set(wp("clock"), PanelSpec { x: 7.0, y: 8.0, w: 11.0, h: 12.0 });
-        test_store(&dir).save_full("t", &full, (1920, 1080, 27)).unwrap();
+        // What the desktop actually saves: the model it loaded, with
+        // one INSTANCE moved — the rectangle the editor dragged.
+        let mut full = nacelle::layout::layaut::parse(text, "t");
+        let clock = full.instances.first_of(wp("clock")).expect("the clock is placed");
+        full.instances.set_rect(clock, Some(PanelSpec { x: 7.0, y: 8.0, w: 11.0, h: 12.0 }));
+        test_store(&dir).save_full("t", &mut full, (1920, 1080, 27)).unwrap();
         let after = std::fs::read_to_string(dir.join("layauts/t.layaut")).unwrap();
         let def2 = nacelle::layout::layaut::parse(&after, "t");
         assert_eq!(def2.boards.len(), 3, "boards must survive a base rewrite");
         assert!(after.contains("[1280x720@7]"), "overrides must survive too");
 
         // And an overrides rewrite keeps them just the same.
-        test_store(&dir).save_overrides("t", (2560, 1440, 32), &[], &full).unwrap();
+        test_store(&dir).save_overrides("t", (2560, 1440, 32), &[], &mut full).unwrap();
         let def3 =
             nacelle::layout::layaut::parse(&std::fs::read_to_string(dir.join("layauts/t.layaut")).unwrap(), "t");
         assert_eq!(def3.boards.len(), 3);
@@ -1732,7 +2003,15 @@ mod tests {
             assert_eq!(a.grow, b.grow, "column {i} grow");
             assert_eq!(a.collapse, b.collapse, "column {i} collapse");
             assert_eq!(a.gap, b.gap, "column {i} gap");
-            assert_eq!(a.panels, b.panels, "column {i} panels/weights");
+            // Widget and weight, entry by entry — NOT the instance
+            // ids: the file's placements carry saved identities and
+            // the composed arrangement carries generated ones, so two
+            // arrangements are the same arrangement when they stack
+            // the same widgets in the same order at the same shares.
+            let entries = |c: &nacelle::FlexColumn| -> Vec<(Panel, f32)> {
+                c.panels.iter().map(|it| (it.widget, it.weight)).collect()
+            };
+            assert_eq!(entries(a), entries(b), "column {i} panels/weights");
         }
         // The sizes table: same panels, same reference and minimum.
         let as_map = |v: &[(Panel, f32, f32)]| -> std::collections::HashMap<Panel, (f32, f32)> {
@@ -1776,12 +2055,26 @@ mod tests {
             let LayoutMode::Custom(fl) = &def.base else {
                 panic!("{name}.layaut must be a flexbox layout");
             };
+            // A layout MAY now place a widget twice — that is what an
+            // instance list is for — but the SHIPPED arrangements are
+            // the reference ones and hold exactly one of each.
             let mut seen = std::collections::HashSet::new();
             for c in &fl.columns {
-                for (p, _) in &c.panels {
-                    assert!(seen.insert(*p), "{} appears twice in {name}", p.name());
+                for it in &c.panels {
+                    assert!(
+                        seen.insert(it.widget),
+                        "{} appears twice in {name}",
+                        it.widget.name()
+                    );
                 }
             }
+            // And one column entry per instance the file placed, so the
+            // count above really is the count of placements.
+            assert_eq!(
+                fl.columns.iter().map(|c| c.panels.len()).sum::<usize>(),
+                def.instances.len(),
+                "{name}.layaut must place each of its instances in a column"
+            );
             // Every BOARD widget: a shipped board layaut cannot place a
             // widget whose home is a fixture, and the fixtures ship
             // empty on purpose — the launcher pair is offered when the
@@ -1798,20 +2091,31 @@ mod tests {
         }
     }
 
+    /// The flexbox parser now records INSTANCES as it goes, so a caller
+    /// hands it a board and a list to fill. These tests only care about
+    /// the columns it returns, so they give it a scratch list and drop
+    /// it — the instances are exercised by the toolkit's own tests.
+    fn parse_flex_scratch(
+        src: &str,
+    ) -> Option<(nacelle::FlexLayaut, Vec<(nacelle::Panel, f32, f32)>)> {
+        let mut insts = nacelle::layout::InstanceList::new();
+        nacelle::layout::layaut::parse_flex_into(src, (0, 0), &mut insts)
+    }
+
     /// The units and pad_x keys live OUTSIDE any [column]; a board
     /// section holding [column] lines parses as a flexbox board and
     /// round-trips through the write path.
     #[test]
     fn units_pad_and_flex_boards_parse_and_roundtrip() {
         fixture_registry();
-        let (fl, _) = nacelle::layout::layaut::parse_flex(
+        let (fl, _) = parse_flex_scratch(
             "units = px\npad_x = 3.2\n[column]\nbasis = 20\npanel = clock 7\n",
         )
         .expect("parses");
         assert!(fl.units_px);
         assert_eq!(fl.pad_x, Some(3.2));
         // Omitting both keeps the defaults.
-        let (fl2, _) = nacelle::layout::layaut::parse_flex("[column]\npanel = clock 7\n").unwrap();
+        let (fl2, _) = parse_flex_scratch("[column]\npanel = clock 7\n").unwrap();
         assert!(!fl2.units_px);
         assert_eq!(fl2.pad_x, None);
 
@@ -1827,7 +2131,9 @@ mod tests {
         assert_eq!(bfl.columns.len(), 1);
         assert_eq!(bd.sizes.len(), 1);
         let mut out = String::new();
-        nacelle::layout::layaut::serialize_boards(&mut out, &def.boards);
+        // The serializer takes the layout's instances too: a board's
+        // rectangles are on them, and a flexbox column names them.
+        nacelle::layout::layaut::serialize_boards(&mut out, &def.boards, &def.instances);
         let def2 = nacelle::layout::layaut::parse(&format!("clock = 1 2 10 10\n{out}"), "t");
         assert_eq!(def2.boards.len(), 1);
         assert!(matches!(def2.boards[0].1.base, LayoutMode::Custom(_)));
@@ -1842,6 +2148,7 @@ mod tests {
         let dir = std::env::temp_dir().join("nacelle-desktop-clear-screen-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let _env = env_lock();
         std::env::set_var("XDG_DATA_HOME", &dir);
         let ldir = dir.join("nacelle-desktop").join("layauts");
         std::fs::create_dir_all(&ldir).unwrap();
@@ -1876,7 +2183,7 @@ mod tests {
     #[test]
     fn a_layout_carries_the_panel_sizes() {
         fixture_registry();
-        let (fl, sizes) = nacelle::layout::layaut::parse_flex(
+        let (fl, sizes) = parse_flex_scratch(
             "[column]\n\
              basis = 20\n\
              panel = clock 7.0 ref 9.5 min 4.0\n\
@@ -1913,67 +2220,100 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layauts").join(format!("{name}.layaut"));
 
+        // What the grid editor hands the store: one INSTANCE per placed
+        // widget, each carrying the rectangle it was dragged to. Every
+        // save below names those identities — a screen section moves
+        // THIS rectangle, not "the filesystem panel", which is the whole
+        // point of the instance model.
+        let mut full = LayoutDef::from_base(LayoutMode::Rects);
+        let clock = full.instances.add(
+            wp("clock"),
+            (0, 0),
+            Some(PanelSpec { x: 1.0, y: 2.0, w: 10.0, h: 10.0 }),
+        );
+        full.instances.add(
+            wp("shell"),
+            (0, 0),
+            Some(PanelSpec { x: 20.0, y: 2.0, w: 60.0, h: 60.0 }),
+        );
+        let fs = full.instances.add(
+            wp("filesystem"),
+            (0, 0),
+            Some(PanelSpec { x: 1.0, y: 30.0, w: 20.0, h: 20.0 }),
+        );
+        let kb = full.instances.add(
+            wp("keyboard"),
+            (0, 0),
+            Some(PanelSpec { x: 1.0, y: 60.0, w: 90.0, h: 20.0 }),
+        );
+        // The screen this base was authored on: SAVE rewrites the base
+        // there and writes a [WxH@D] section on any other.
+        full.base_screen = Some((2560, 1440, 32));
+
         // SAVE AS on a 2560x1440 32" screen: the full base.
-        let mut full = LayoutSpec::default();
-        full.set(wp("clock"), PanelSpec { x: 1.0, y: 2.0, w: 10.0, h: 10.0 });
-        full.set(wp("shell"), PanelSpec { x: 20.0, y: 2.0, w: 60.0, h: 60.0 });
-        test_store(&dir).save_full(name, &full, (2560, 1440, 32)).unwrap();
+        test_store(&dir).save_full(name, &mut full, (2560, 1440, 32)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("screen = 2560x1440@32"));
-        assert!(text.contains("clock = 1.00 2.00 10.00 10.00"));
+        assert!(text.contains(&format!("clock#{clock} = 1.00 2.00 10.00 10.00")));
 
         // SAVE on the SAME screen: the base itself is rewritten in full.
         let mut full2 = full.clone();
-        full2.set(wp("clock"), PanelSpec { x: 3.0, y: 4.0, w: 11.0, h: 11.0 });
-        test_store(&dir).save_overrides(name, (2560, 1440, 32), &[], &full2).unwrap();
+        full2
+            .instances
+            .set_rect(clock, Some(PanelSpec { x: 3.0, y: 4.0, w: 11.0, h: 11.0 }));
+        test_store(&dir).save_overrides(name, (2560, 1440, 32), &[], &mut full2).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("clock = 3.00 4.00 11.00 11.00"));
+        assert!(text.contains(&format!("clock#{clock} = 3.00 4.00 11.00 11.00")));
         assert!(!text.contains("[2560x1440@32]"));
 
-        // First save on a DIFFERENT screen: one changed panel -> section.
+        // First save on a DIFFERENT screen: one changed instance -> section.
         let fs_spec = PanelSpec { x: 30.0, y: 10.0, w: 20.0, h: 40.0 };
         test_store(&dir).save_overrides(
             name,
             (1920, 1080, 27),
-            &[(wp("filesystem"), fs_spec)],
-            &full2,
+            &[(fs, fs_spec)],
+            &mut full2,
         )
         .unwrap();
-        // Another screen: another panel.
+        // Another screen: another instance.
         let kb_spec = PanelSpec { x: 5.0, y: 60.0, w: 90.0, h: 30.0 };
         test_store(&dir).save_overrides(
             name,
             (1280, 720, 7),
-            &[(wp("keyboard"), kb_spec)],
-            &full2,
+            &[(kb, kb_spec)],
+            &mut full2,
         )
         .unwrap();
-        // First screen again: update the same panel.
+        // First screen again: update the same instance.
         let fs_spec2 = PanelSpec { x: 40.0, y: 12.0, w: 22.0, h: 44.0 };
         test_store(&dir).save_overrides(
             name,
             (1920, 1080, 27),
-            &[(wp("filesystem"), fs_spec2)],
-            &full2,
+            &[(fs, fs_spec2)],
+            &mut full2,
         )
         .unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         let def = nacelle::layout::layaut::parse(&text, name);
         // Base preserved (rewritten clock position from the same-screen SAVE).
-        assert!(text.contains("clock = 3.00 4.00 11.00 11.00"));
-        assert!(matches!(def.base, LayoutMode::Fixed(_)));
+        assert!(text.contains(&format!("clock#{clock} = 3.00 4.00 11.00 11.00")));
+        assert!(matches!(def.base, LayoutMode::Rects));
+        // The identities survived the round trip through the file, so
+        // the sections still point at the instances they were written
+        // for.
+        assert_eq!(def.instances.get(fs).map(|i| i.widget), Some(wp("filesystem")));
         // Two sections, exact matches only.
         assert_eq!(def.overrides.len(), 2);
         assert!(def.pick((2560, 1440, 27)).is_none());
         let big = def.pick((1920, 1080, 27)).unwrap();
-        assert_eq!(big.panels.len(), 1);
-        let (p, ps) = &big.panels[0];
-        assert_eq!(*p, wp("filesystem"));
+        assert_eq!(big.rects.len(), 1);
+        let (id, ps) = &big.rects[0];
+        assert_eq!(*id, fs);
         assert!((ps.x - 40.0).abs() < 0.01 && (ps.h - 44.0).abs() < 0.01);
         let small = def.pick((1280, 720, 7)).unwrap();
-        assert_eq!(small.panels.len(), 1);
-        assert_eq!(small.panels[0].0, wp("keyboard"));
+        assert_eq!(small.rects.len(), 1);
+        assert_eq!(small.rects[0].0, kb);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2021,7 +2361,11 @@ mod tests {
         let def = test_store(&data)
             .load("Retro")
             .expect("the look's layaut must be rescued into layauts/");
-        assert!(matches!(def.base, LayoutMode::Fixed(_)));
+        // Rectangles, and the one the look carried: the rescued file is
+        // the arrangement itself, not an empty placeholder under its
+        // name.
+        assert!(matches!(def.base, LayoutMode::Rects));
+        assert_eq!(def.instances.count_of(wp("clock")), 1);
 
         // Run-once: with the keys gone the file is left untouched.
         let before = std::fs::read_to_string(&conf).unwrap();
@@ -2080,5 +2424,172 @@ mod tests {
         assert_eq!(kv2.get("Layaut").map(String::as_str), Some("mine"));
         assert!(!kv2.contains_key("Look"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The layauts a hand-written file assigns, and what each screen
+    /// then takes. Hermetic: an explicit configuration text and an
+    /// explicit list of installed layauts, so this says what the rule
+    /// is rather than what this machine's screens happen to be.
+    #[test]
+    fn every_screen_takes_the_layaut_its_connector_is_assigned() {
+        fixture_registry();
+        let kv = parse_kv(
+            "# the desktop\n\
+             Layaut=console\n\
+             Layaut[DP-1]=cockpit\n\
+             Layaut [eDP-1] = panel\n\
+             Layaut[HDMI-A-1]=\n\
+             Layaut[Dell Inc.]=nonsense\n\
+             Theme=default\n",
+        );
+        let assigned = screen_layauts_in(&kv);
+        assert_eq!(
+            assigned.get("DP-1").map(String::as_str),
+            Some("cockpit"),
+            "the connector in the brackets names the screen"
+        );
+        assert_eq!(
+            assigned.get("eDP-1").map(String::as_str),
+            Some("panel"),
+            "a file people type into forgives a space before the bracket and around the ="
+        );
+        assert!(
+            !assigned.contains_key("HDMI-A-1"),
+            "an empty value is 'no layaut of its own', not a layaut called ''"
+        );
+        assert!(
+            assigned.keys().all(|k| k != "Dell Inc."),
+            "a make and model names no screen and cannot be a key: {assigned:?}"
+        );
+        assert_eq!(
+            kv.get("Layaut").map(String::as_str),
+            Some("console"),
+            "the per-screen keys leave the default one alone"
+        );
+
+        let installed = [
+            "default".to_string(),
+            "console".to_string(),
+            "cockpit".to_string(),
+            "panel".to_string(),
+        ];
+        for (connector, want) in [
+            (Some("DP-1"), "cockpit"),
+            (Some("eDP-1"), "panel"),
+            // Assigned nothing, named nothing, and no name at all: all
+            // three are the default desktop.
+            (Some("HDMI-A-1"), "console"),
+            (Some("DP-3"), "console"),
+            (None, "console"),
+        ] {
+            let got = choose_layaut(connector, &assigned, "console", &installed);
+            assert_eq!(got.name, want, "screen {connector:?} takes '{want}'");
+            assert!(got.note.is_none(), "nothing to report for {connector:?}");
+        }
+        // The user typed the connector in another case than RandR says
+        // it; it is the same socket and the same screen.
+        assert_eq!(
+            choose_layaut(Some("edp-1"), &assigned, "console", &installed).name,
+            "panel"
+        );
+    }
+
+    /// Writing an assignment, and taking it back. The file is a
+    /// user-editable one, so what matters as much as the value is that
+    /// everything else in it comes out untouched.
+    #[test]
+    fn an_assignment_is_written_beside_the_rest_of_the_file() {
+        fixture_registry();
+        let before = "# my desktop\nTheme=crimson\nLayaut=console\n";
+        let text = set_kv_in_text(
+            before,
+            &screen_layaut_key("DP-1").expect("DP-1 is a connector"),
+            "cockpit",
+        );
+        let kv = parse_kv(&text);
+        assert_eq!(
+            screen_layauts_in(&kv).get("DP-1").map(String::as_str),
+            Some("cockpit"),
+            "what was written must read back: {text}"
+        );
+        assert_eq!(kv.get("Layaut").map(String::as_str), Some("console"),
+            "the default layaut is a different key and must not be touched");
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("crimson"));
+        assert!(text.contains("# my desktop"), "comments survive: {text}");
+
+        // Assigning again replaces the line rather than adding a second.
+        let text2 = set_kv_in_text(&text, "Layaut[DP-1]", "hangar");
+        assert_eq!(text2.matches("Layaut[DP-1]").count(), 1, "one line per screen: {text2}");
+        assert_eq!(
+            screen_layauts_in(&parse_kv(&text2)).get("DP-1").map(String::as_str),
+            Some("hangar")
+        );
+
+        // Clearing writes an empty value: the assignment is gone, and
+        // the line stays to overrule a system file that makes one.
+        let text3 = set_kv_in_text(&text2, "Layaut[DP-1]", "");
+        assert!(text3.contains("Layaut[DP-1]="), "the key stays as an explicit off: {text3}");
+        assert!(screen_layauts_in(&parse_kv(&text3)).is_empty());
+
+        // A key nothing could match a screen to is never written.
+        assert!(screen_layaut_key("HDMI-A-1").is_some());
+        for bad in ["", "Dell Inc. U2720Q", "DP-1]", "screen 2"] {
+            assert!(screen_layaut_key(bad).is_none(), "'{bad}' must not become a key");
+        }
+    }
+
+    /// A screen assigned a layaut this machine does not have. The
+    /// desktop starts, that screen shows the default, and the log gets
+    /// one sentence naming the screen, the layaut and what it took
+    /// instead — a mistake in a file is not a reason not to start.
+    #[test]
+    fn an_assignment_to_a_layaut_that_is_not_installed_falls_back_to_the_default() {
+        fixture_registry();
+        let assigned = screen_layauts_in(&parse_kv("Layaut[DP-1]=cockpit\n"));
+        let installed = ["default".to_string(), "console".to_string()];
+        let got = choose_layaut(Some("DP-1"), &assigned, "console", &installed);
+        assert_eq!(got.name, "console", "the screen falls back to the default layaut");
+        let note = got.note.expect("a fallback must say so");
+        assert!(note.contains("DP-1"), "the sentence names the screen: {note}");
+        assert!(note.contains("cockpit"), "and the layaut that is missing: {note}");
+        assert!(note.contains("console"), "and what it took instead: {note}");
+
+        // The same rule keeps a hand-written value out of the paths
+        // built from it: only a name the store listed is ever chosen.
+        let evil = screen_layauts_in(&parse_kv("Layaut[DP-1]=../../etc/passwd\n"));
+        assert_eq!(choose_layaut(Some("DP-1"), &evil, "console", &installed).name, "console");
+    }
+
+    /// The point of keying screens by connector: which monitor comes
+    /// up first is not a property of anything. The same two screens
+    /// surveyed in either order take the same two layauts, and a
+    /// position in the list would have swapped them.
+    #[test]
+    fn an_assignment_survives_the_screens_coming_up_in_another_order() {
+        fixture_registry();
+        let assigned = screen_layauts_in(&parse_kv(
+            "Layaut[DP-1]=cockpit\nLayaut[HDMI-A-1]=hangar\n",
+        ));
+        let installed = [
+            "default".to_string(),
+            "console".to_string(),
+            "cockpit".to_string(),
+            "hangar".to_string(),
+        ];
+        let survey = |order: [&str; 2]| -> Vec<String> {
+            order
+                .iter()
+                .map(|c| choose_layaut(Some(c), &assigned, "console", &installed).name)
+                .collect()
+        };
+        let monday = survey(["DP-1", "HDMI-A-1"]);
+        let tuesday = survey(["HDMI-A-1", "DP-1"]);
+        assert_eq!(monday, vec!["cockpit".to_string(), "hangar".to_string()]);
+        assert_eq!(
+            tuesday,
+            vec!["hangar".to_string(), "cockpit".to_string()],
+            "each screen keeps its own layaut; only the order of the list changed"
+        );
+        assert_ne!(monday, tuesday, "the two layauts differ, so the check means something");
     }
 }

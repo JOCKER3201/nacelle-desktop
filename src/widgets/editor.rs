@@ -1,19 +1,30 @@
 //! Layout editor: an Android-style snap grid over the live interface.
 //! Entered from SETTINGS -> GRID -> EDIT GRID. The grid becomes visible;
 //! panels can be moved by dragging, resized by dragging their edges or
-//! corners, removed with the X in their top-right corner and added back
-//! via the ADD WIDGET button (hold an entry for the themed hold time —
-//! the list hides and the widget follows the cursor until you drop it
-//! on the grid). With SNAP TO GRID enabled every panel edge is aligned to the
+//! corners, removed with the X in their top-right corner and added via
+//! the ADD WIDGET button (hold an entry for the themed hold time — the
+//! list hides and the widget follows the cursor until you drop it on the
+//! grid). With SNAP TO GRID enabled every panel edge is aligned to the
 //! grid cells — including an automatic fit of all panels when the editor
 //! opens. The editor works on the OUTER panel rectangles; the widget
 //! padding (SETTINGS -> GRID) insets the content inside them.
 //! Bottom-right buttons: ADD WIDGET, SAVE (overwrites the currently
 //! selected layout), SAVE AS (asks for a name) and CANCEL (exits
 //! without saving).
+//!
+//! Everything here works on INSTANCES, not on widgets. A board holds a
+//! list of placements ([`nacelle::layout::InstanceList`]), each with an
+//! identity of its own, so the same widget may stand on the same board
+//! as many times as it is dragged out: two terminals are two shells,
+//! two file browsers keep two current directories. That is why ADD
+//! WIDGET offers every widget the board takes at all times — there is
+//! no longer such a thing as a widget that is "already used up" — and
+//! why dragging, resizing and removing name an identity: removing one
+//! terminal has to leave the other exactly where it stands.
 
-use super::{panel_count, Ctx, Layout, LayoutSpec, Panel, PanelSpec, Rect, OFF_SPEC};
+use super::{Ctx, Layout, Panel, PanelSpec, Rect, WidgetCategory, OFF_SPEC};
 use crate::font::FONT_UI;
+use nacelle::layout::{BoardId, Instance, InstanceId, InstanceList};
 use nacelle::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -89,6 +100,17 @@ fn hold_secs() -> f32 {
     (theme::resolved().px(tok(&D, "editor.add_hold_ms")) / 1000.0).max(0.0)
 }
 
+/// How far the pointer may wander off a held ADD WIDGET entry before
+/// the hold is abandoned, with its device-px floor. Holding a control
+/// for a second is a still gesture, not a motionless one.
+fn hold_slack() -> f32 {
+    static S: OnceLock<TokenId> = OnceLock::new();
+    static SM: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    t.px(tok(&S, "editor.list.hold_slack"))
+        .max(t.px(tok(&SM, "editor.list.hold_slack_min_px")))
+}
+
 /// Padding inside the ADD WIDGET window, with its device-px floor.
 fn list_pad() -> f32 {
     static P: OnceLock<TokenId> = OnceLock::new();
@@ -134,7 +156,8 @@ pub enum CursorKind {
     Nesw,
 }
 
-/// Active drag: moving the panel or resizing by its edges.
+/// Active drag: moving the instance or resizing by its edges.
+#[derive(Clone, Copy)]
 enum Mode {
     Move { dx: f32, dy: f32 },
     Resize { l: bool, r: bool, t: bool, b: bool },
@@ -148,12 +171,22 @@ pub struct Editor {
     /// Widget padding: the outer rect is always this much larger than
     /// the inner content container on every side.
     padding: f32,
-    /// Edited panel rects in percent of the window, Panel order.
-    rects: Vec<PanelSpec>,
-    /// The rects as they were when the editor opened — SAVE stores only
-    /// the panels that differ from this.
-    initial: Vec<PanelSpec>,
-    drag: Option<(usize, Mode)>,
+    /// Which board is being edited — the board every instance placed
+    /// here belongs to, and the one the caller writes back.
+    board: BoardId,
+    /// Which kind of widget this board takes. The board decides, not
+    /// the editor: an ordinary board, the APPGRID fixture and the
+    /// SEARCH AND AI fixture each hold their own kind.
+    takes: WidgetCategory,
+    /// The instances standing on that board, with the rectangles the
+    /// user is dragging around, in percent of the window. The list owns
+    /// the identities: a widget pulled out of ADD WIDGET is a brand-new
+    /// one, and no id is ever handed out twice.
+    list: InstanceList,
+    /// The list as it was when the editor opened — SAVE stores only
+    /// what differs from this, and CANCEL puts it back.
+    initial: Vec<Instance>,
+    drag: Option<(InstanceId, Mode)>,
     /// SAVE AS name prompt; Some = the prompt is open. The field is the
     /// F1 §3 input object — caret, selection, undo and IME land here
     /// through the model, not through bespoke prompt code.
@@ -168,17 +201,14 @@ pub struct Editor {
     /// The field's caret box last frame, in window px — what the
     /// application anchors the IME candidate window to.
     pub naming_caret: Option<Rect>,
-    /// Panels that live on ANOTHER board. A widget exists once, so a
-    /// panel placed elsewhere is not offered by ADD WIDGET here —
-    /// moving it means removing it there first.
-    blocked: Vec<bool>,
     /// ADD WIDGET list window.
     add_open: bool,
-    /// Held list entry: (panel index, hold start).
-    adding: Option<(usize, Instant)>,
-    /// Pull-out animation after a completed hold: the widget grows from
-    /// its miniature size to the placement size under the cursor.
-    grow: Option<(usize, Instant, f32, f32)>,
+    /// Held list entry: (widget, hold start). A KIND, because the list
+    /// offers kinds — the instance does not exist until the hold ends.
+    adding: Option<(Panel, Instant)>,
+    /// Pull-out animation after a completed hold: the instance grows
+    /// from its miniature size to the placement size under the cursor.
+    grow: Option<(InstanceId, Instant, f32, f32)>,
     flash: Option<(usize, Instant)>,
 }
 
@@ -191,8 +221,31 @@ fn pct(r: Rect, w: f32, h: f32) -> PanelSpec {
     }
 }
 
-fn on_screen(p: &PanelSpec) -> bool {
-    p.x < 100.0
+/// Whether two rectangles are the same one, to the precision a layaut
+/// file writes.
+fn same_spec(a: &PanelSpec, b: &PanelSpec) -> bool {
+    (a.x - b.x).abs() < 0.05
+        && (a.y - b.y).abs() < 0.05
+        && (a.w - b.w).abs() < 0.05
+        && (a.h - b.h).abs() < 0.05
+}
+
+/// Puts one instance into a list exactly as the layout holds it.
+///
+/// `restore` refuses a COMPOSED identity on purpose — a file may not
+/// name one — but the editor is handed whatever the board is showing,
+/// and a board still arranged from the registry shows composed ones.
+/// They go back in through the door that mints them, so that editing
+/// such a board keeps the identities it was drawn with until the save
+/// turns them into the user's own ([`nacelle::layout::LayoutDef::
+/// materialize`]).
+fn seed(list: &mut InstanceList, inst: Instance) {
+    if inst.id.is_generated() {
+        list.add_generated(inst.widget, inst.board, inst.id.get() - InstanceId::GENERATED);
+        list.set_rect(inst.id, inst.rect);
+    } else {
+        list.restore(inst);
+    }
 }
 
 impl Editor {
@@ -203,14 +256,15 @@ impl Editor {
             cols: crate::config::GRID_MIN,
             rows: crate::config::GRID_MIN,
             padding: 8.0,
-            rects: vec![OFF_SPEC; panel_count()],
-            initial: vec![OFF_SPEC; panel_count()],
+            board: (0, 0),
+            takes: WidgetCategory::default(),
+            list: InstanceList::new(),
+            initial: Vec::new(),
             drag: None,
             naming: None,
             naming_field: None,
             naming_click: None,
             naming_caret: None,
-            blocked: Vec::new(),
             add_open: false,
             adding: None,
             grow: None,
@@ -218,8 +272,15 @@ impl Editor {
         }
     }
 
-    /// Enters edit mode with the CURRENT panel rectangles (WYSIWYG).
-    /// With snapping enabled all panels are fitted to the grid at once.
+    /// Enters edit mode with the CURRENT instance rectangles (WYSIWYG).
+    /// With snapping enabled all of them are fitted to the grid at once.
+    ///
+    /// `board` and `takes` say which board is on the table and which
+    /// widgets it accepts; `next_id` is the identity counter of the
+    /// layout the board belongs to ([`InstanceList::next_free`]), so
+    /// that a widget dragged out here cannot be given an id some other
+    /// board is already using.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         layout: &Layout,
@@ -229,10 +290,13 @@ impl Editor {
         cols: u32,
         rows: u32,
         padding: f32,
-        blocked: Vec<bool>,
+        board: BoardId,
+        takes: WidgetCategory,
+        next_id: u32,
     ) {
         self.active = true;
-        self.blocked = blocked;
+        self.board = board;
+        self.takes = takes;
         self.snap = snap;
         self.cols = cols.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
         self.rows = rows.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
@@ -242,13 +306,29 @@ impl Editor {
         self.add_open = false;
         self.adding = None;
         self.grow = None;
-        self.rects = (0..panel_count())
-            .map(|i| pct(layout.panels[i], w, h))
-            .collect();
+        self.list = InstanceList::new();
+        self.list.reserve_up_to(next_id);
+        for p in layout.iter() {
+            // A rectangle parked outside the window was how the format
+            // used to say "removed". The editor removes for real now,
+            // so it does not take those in — and never writes one back.
+            if p.rect.x >= w {
+                continue;
+            }
+            seed(
+                &mut self.list,
+                Instance {
+                    id: p.id,
+                    widget: p.widget,
+                    board,
+                    rect: Some(pct(p.rect, w, h)),
+                },
+            );
+        }
         if self.snap {
             self.snap_all(w, h);
         }
-        self.initial = self.rects.clone();
+        self.initial = self.list.all().to_vec();
     }
 
     pub fn stop(&mut self) {
@@ -300,63 +380,117 @@ impl Editor {
         self.naming_caret = None;
     }
 
-    /// Fits every visible panel to the grid: each edge lands on the
-    /// nearest cell boundary.
-    fn snap_all(&mut self, w: f32, h: f32) {
-        let cw = w / self.cols as f32;
-        let ch = h / self.rows as f32;
-        for i in 0..self.rects.len() {
-            if !on_screen(&self.rects[i]) {
-                continue;
-            }
-            let r = self.px_rect(i, w, h);
-            let c0 = (r.x / cw).round().clamp(0.0, self.cols as f32 - 1.0);
-            let c1 = ((r.right()) / cw).round().clamp(c0 + 1.0, self.cols as f32);
-            let r0 = (r.y / ch).round().clamp(0.0, self.rows as f32 - 1.0);
-            let r1 = ((r.bottom()) / ch).round().clamp(r0 + 1.0, self.rows as f32);
-            let snapped =
-                Rect::new(c0 * cw, r0 * ch, (c1 - c0) * cw, (r1 - r0) * ch);
-            self.rects[i] = pct(snapped, w, h);
-        }
+    // ---- the edited board ------------------------------------------------
+
+    /// Every instance on the board, in placement order — the last one
+    /// is the topmost. The identity of a freshly dragged-out widget is
+    /// in here too, which is what the caller adds to its layout before
+    /// asking the store to write the board.
+    pub fn instances(&self) -> &[Instance] {
+        self.list.all()
     }
 
-    fn px_rect(&self, i: usize, w: f32, h: f32) -> Rect {
-        let p = &self.rects[i];
+    /// The board's placements as the store writes them.
+    pub fn rects(&self) -> Vec<(InstanceId, PanelSpec)> {
+        self.list
+            .all()
+            .iter()
+            .map(|i| (i.id, i.rect.unwrap_or(OFF_SPEC)))
+            .collect()
+    }
+
+    /// The identity counter to carry back into the layout, so that an
+    /// id this editor handed out is never handed out again.
+    pub fn next_free(&self) -> u32 {
+        self.list.next_free()
+    }
+
+    /// Which board this editor is holding.
+    pub fn board(&self) -> BoardId {
+        self.board
+    }
+
+    /// The rectangle of one instance in window pixels.
+    fn px_of(inst: &Instance, w: f32, h: f32) -> Rect {
+        let p = inst.rect.unwrap_or(OFF_SPEC);
         Rect::new(p.x / 100.0 * w, p.y / 100.0 * h, p.w / 100.0 * w, p.h / 100.0 * h)
     }
 
-    /// The edited layout in window pixels (drawn instead of the normal one).
+    fn px_rect(&self, id: InstanceId, w: f32, h: f32) -> Option<Rect> {
+        self.list.get(id).map(|i| Self::px_of(i, w, h))
+    }
+
+    /// The edited board in window pixels (drawn instead of the normal
+    /// one).
     pub fn layout(&self, w: f32, h: f32) -> Layout {
-        Layout { panels: (0..panel_count()).map(|i| self.px_rect(i, w, h)).collect() }
+        let mut l = Layout::empty(w, h);
+        for i in self.list.all() {
+            l.place(i.id, i.widget, Self::px_of(i, w, h));
+        }
+        l
     }
 
-    /// The edited layout as a percent spec for saving.
-    pub fn spec(&self) -> LayoutSpec {
-        LayoutSpec { panels: self.rects.clone() }
-    }
-
-    /// Panels whose rectangles differ from the given reference spec
-    /// (with a small tolerance) — the "only the changes" save payload.
-    pub fn changes_vs(&self, reference: &LayoutSpec) -> Vec<(Panel, PanelSpec)> {
+    /// Instances whose rectangle differs from the given reference (with
+    /// a small tolerance) — the "only the changes" save payload. A
+    /// widget dragged out since the reference was taken has no
+    /// rectangle there at all, so it counts as changed.
+    pub fn changes_vs(&self, reference: &[Instance]) -> Vec<(InstanceId, PanelSpec)> {
         let mut out = Vec::new();
-        for panel in Panel::all() {
-            let a = &self.rects[panel.idx()];
-            let b = reference.p(panel);
-            let both_hidden = a.x >= 100.0 && b.x >= 100.0;
-            let same = (a.x - b.x).abs() < 0.05
-                && (a.y - b.y).abs() < 0.05
-                && (a.w - b.w).abs() < 0.05
-                && (a.h - b.h).abs() < 0.05;
-            if !both_hidden && !same {
-                out.push((panel, *a));
+        for i in self.list.all() {
+            let now = i.rect.unwrap_or(OFF_SPEC);
+            let was = reference.iter().find(|r| r.id == i.id).and_then(|r| r.rect);
+            if !was.map(|b| same_spec(&now, &b)).unwrap_or(false) {
+                out.push((i.id, now));
             }
         }
         out
     }
 
-    /// Panels changed since the editor was opened.
-    pub fn changes_since_start(&self) -> Vec<(Panel, PanelSpec)> {
-        self.changes_vs(&LayoutSpec { panels: self.initial.clone() })
+    /// Instances changed since the editor was opened.
+    pub fn changes_since_start(&self) -> Vec<(InstanceId, PanelSpec)> {
+        self.changes_vs(&self.initial)
+    }
+
+    /// Instances the user took off the board since the editor opened.
+    ///
+    /// A removal is not a rectangle, so it cannot travel in
+    /// [`Editor::changes_since_start`]: the caller drops these from the
+    /// layout's own list, and the board simply stops holding them.
+    pub fn removed_since_start(&self) -> Vec<InstanceId> {
+        self.initial
+            .iter()
+            .map(|i| i.id)
+            .filter(|id| self.list.get(*id).is_none())
+            .collect()
+    }
+
+    /// Puts the board back exactly as it was found. The identities of
+    /// the abandoned widgets stay retired — an id is handed out once
+    /// and never again, whatever becomes of the placement that had it.
+    fn restore_initial(&mut self) {
+        let counter = self.list.next_free();
+        self.list = InstanceList::new();
+        for inst in self.initial.clone() {
+            seed(&mut self.list, inst);
+        }
+        self.list.reserve_up_to(counter);
+    }
+
+    /// Fits every instance to the grid: each edge lands on the nearest
+    /// cell boundary.
+    fn snap_all(&mut self, w: f32, h: f32) {
+        let cw = w / self.cols as f32;
+        let ch = h / self.rows as f32;
+        let ids: Vec<InstanceId> = self.list.all().iter().map(|i| i.id).collect();
+        for id in ids {
+            let Some(r) = self.px_rect(id, w, h) else { continue };
+            let c0 = (r.x / cw).round().clamp(0.0, self.cols as f32 - 1.0);
+            let c1 = ((r.right()) / cw).round().clamp(c0 + 1.0, self.cols as f32);
+            let r0 = (r.y / ch).round().clamp(0.0, self.rows as f32 - 1.0);
+            let r1 = ((r.bottom()) / ch).round().clamp(r0 + 1.0, self.rows as f32);
+            let snapped = Rect::new(c0 * cw, r0 * ch, (c1 - c0) * cw, (r1 - r0) * ch);
+            self.list.set_rect(id, Some(pct(snapped, w, h)));
+        }
     }
 
     fn save_buttons(w: f32, h: f32) -> [Rect; 6] {
@@ -389,13 +523,18 @@ impl Editor {
         }
     }
 
-    /// Hidden panels offered by the ADD WIDGET window — the ones not
-    /// placed here and not placed on any other board either.
-    fn hidden_panels(&self) -> Vec<usize> {
-        (0..self.rects.len())
-            .filter(|&i| {
-                !on_screen(&self.rects[i]) && !self.blocked.get(i).copied().unwrap_or(false)
-            })
+    /// What the ADD WIDGET window offers: every installed widget the
+    /// board takes, in registry order, always.
+    ///
+    /// Never "the ones not placed yet". A widget may stand on this
+    /// board twice, or here and on the board next door, so how many
+    /// instances of it exist says nothing about whether the user may
+    /// want one more — and the list that answered otherwise was the
+    /// thing that made a second terminal impossible to ask for.
+    fn offer(&self) -> Vec<Panel> {
+        Panel::all()
+            .into_iter()
+            .filter(|p| p.category() == self.takes)
             .collect()
     }
 
@@ -408,7 +547,7 @@ impl Editor {
         static ITEM_MIN: OnceLock<TokenId> = OnceLock::new();
         static MAX_H: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
-        let items = self.hidden_panels().len().max(1);
+        let items = self.offer().len().max(1);
         let bw = (w * t.px(tok(&W_FRAC, "editor.list.w_frac")))
             .max(t.px(tok(&W_MIN, "editor.list.w_min_px")));
         let pad = list_pad();
@@ -451,31 +590,35 @@ impl Editor {
         Rect::new(r.right() - s - inset, r.y + inset, s, s)
     }
 
-    /// Whether the panel can be removed from the grid. A widget that
-    /// declared itself ESSENTIAL never gets an X: switching it off
-    /// would leave the user with no way back — the way into the
-    /// settings is one of its buttons. Which widget that is, is the
-    /// widget's own declaration, so an installation whose way back
-    /// lives somewhere else is protected just the same.
-    fn removable(i: usize) -> bool {
-        !Panel(i as u16).essential()
+    /// Whether this instance can be taken off the board.
+    ///
+    /// A widget that declared itself ESSENTIAL is somebody's only way
+    /// back — the way into the settings is one of its buttons — so the
+    /// board keeps one of it: its LAST instance never gets an X. A
+    /// second copy is an ordinary placement, and removing it leaves the
+    /// way back exactly where it was. Which widget declares this is the
+    /// widget's own business, so an installation whose way back lives
+    /// somewhere else is protected just the same.
+    fn removable(&self, id: InstanceId) -> bool {
+        match self.list.get(id) {
+            Some(i) => !i.widget.essential() || self.list.count_of(i.widget) > 1,
+            None => false,
+        }
     }
 
-    /// Topmost panel whose body or edge area contains the point,
-    /// with the edge flags: (index, left, right, top, bottom).
-    fn panel_at(&self, x: f32, y: f32, w: f32, h: f32) -> Option<(usize, bool, bool, bool, bool)> {
+    /// Topmost instance whose body or edge area contains the point,
+    /// with the edge flags: (identity, left, right, top, bottom).
+    fn instance_at(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<(InstanceId, bool, bool, bool, bool)> {
         let edge = grab_edge();
-        for i in (0..self.rects.len()).rev() {
-            if !on_screen(&self.rects[i]) {
-                continue;
-            }
-            let r = self.px_rect(i, w, h);
-            let outer = Rect::new(
-                r.x - edge,
-                r.y - edge,
-                r.w + 2.0 * edge,
-                r.h + 2.0 * edge,
-            );
+        for inst in self.list.all().iter().rev() {
+            let r = Self::px_of(inst, w, h);
+            let outer = Rect::new(r.x - edge, r.y - edge, r.w + 2.0 * edge, r.h + 2.0 * edge);
             if !outer.contains(x, y) {
                 continue;
             }
@@ -484,7 +627,7 @@ impl Editor {
             let t = (y - r.y).abs() <= edge;
             let b = (y - r.bottom()).abs() <= edge;
             if l || rr || t || b || r.contains(x, y) {
-                return Some((i, l, rr, t, b));
+                return Some((inst.id, l, rr, t, b));
             }
         }
         None
@@ -502,8 +645,8 @@ impl Editor {
 
     /// Cursor shape for the given position (resize arrows on the edges).
     pub fn cursor_at(&self, x: f32, y: f32, w: f32, h: f32) -> CursorKind {
-        if let Some((i, mode)) = &self.drag {
-            if self.rects[*i].x >= 100.0 {
+        if let Some((id, mode)) = &self.drag {
+            if self.list.get(*id).is_none() {
                 return CursorKind::Normal;
             }
             return match mode {
@@ -514,10 +657,10 @@ impl Editor {
         if self.over_ui(x, y, w, h) {
             return CursorKind::Normal;
         }
-        match self.panel_at(x, y, w, h) {
-            Some((i, l, r, t, b)) => {
-                let pr = self.px_rect(i, w, h);
-                if Self::removable(i) && Self::x_rect(&pr).contains(x, y) {
+        match self.instance_at(x, y, w, h) {
+            Some((id, l, r, t, b)) => {
+                let Some(pr) = self.px_rect(id, w, h) else { return CursorKind::Normal };
+                if self.removable(id) && Self::x_rect(&pr).contains(x, y) {
                     CursorKind::Normal
                 } else if l || r || t || b {
                     edge_cursor(l, r, t, b)
@@ -556,7 +699,7 @@ impl Editor {
         if btns[4].contains(x, y) {
             // CANCEL — revert the unsaved changes, stay in the editor.
             self.flash = Some((4, Instant::now()));
-            self.rects = self.initial.clone();
+            self.restore_initial();
             self.drag = None;
             self.grow = None;
             return Some(EditorHit::Handled);
@@ -582,11 +725,11 @@ impl Editor {
         if self.add_open {
             // Hold an entry to start placing it; any other click closes.
             let (_, items) = self.add_list_rects(w, h);
-            let hidden = self.hidden_panels();
+            let offer = self.offer();
             for (slot, ir) in items.iter().enumerate() {
                 if ir.contains(x, y) {
-                    if let Some(&panel) = hidden.get(slot) {
-                        self.adding = Some((panel, Instant::now()));
+                    if let Some(&widget) = offer.get(slot) {
+                        self.adding = Some((widget, Instant::now()));
                     }
                     return EditorHit::Handled;
                 }
@@ -597,52 +740,57 @@ impl Editor {
         if let Some(hit) = self.buttons_hit(x, y, w, h) {
             return hit;
         }
-        if let Some((i, l, rr, t, b)) = self.panel_at(x, y, w, h) {
-            let r = self.px_rect(i, w, h);
-            // X in the top-right corner removes the widget from the grid.
-            if Self::removable(i) && Self::x_rect(&r).contains(x, y) {
-                self.rects[i] = OFF_SPEC;
+        if let Some((id, l, rr, t, b)) = self.instance_at(x, y, w, h) {
+            let Some(r) = self.px_rect(id, w, h) else { return EditorHit::Handled };
+            // X in the top-right corner takes THIS instance off the
+            // board; every other one keeps its identity and its place.
+            if self.removable(id) && Self::x_rect(&r).contains(x, y) {
+                self.list.remove(id);
                 self.drag = None;
+                self.grow = None;
                 nacelle::sound::emit(nacelle::sound::Event::Drop);
                 return EditorHit::Handled;
             }
             if l || rr || t || b {
-                self.drag = Some((i, Mode::Resize { l, r: rr, t, b }));
+                self.drag = Some((id, Mode::Resize { l, r: rr, t, b }));
             } else {
-                self.drag = Some((i, Mode::Move { dx: x - r.x, dy: y - r.y }));
+                self.drag = Some((id, Mode::Move { dx: x - r.x, dy: y - r.y }));
             }
             nacelle::sound::emit(nacelle::sound::Event::Grab);
         }
         EditorHit::Handled
     }
 
-    /// Mouse move while a panel is being dragged or resized.
+    /// Mouse move while an instance is being dragged or resized.
     pub fn mouse_move(&mut self, x: f32, y: f32, w: f32, h: f32) {
         // Wandering far away from the held ADD WIDGET entry cancels the
         // hold (a generous margin — small drift while holding is fine).
-        if let Some((panel, _)) = self.adding {
+        if let Some((widget, _)) = self.adding {
             let (_, items) = self.add_list_rects(w, h);
-            let hidden = self.hidden_panels();
-            let still = hidden
+            let still = self
+                .offer()
                 .iter()
-                .position(|&p| p == panel)
+                .position(|&p| p == widget)
                 .and_then(|slot| items.get(slot))
                 .map(|ir| {
-                    let m = 30.0;
-                    Rect::new(ir.x - m, ir.y - m, ir.w + 2.0 * m, ir.h + 2.0 * m)
-                        .contains(x, y)
+                    let m = hold_slack();
+                    Rect::new(ir.x - m, ir.y - m, ir.w + 2.0 * m, ir.h + 2.0 * m).contains(x, y)
                 })
                 .unwrap_or(false);
             if !still {
                 self.adding = None;
             }
         }
-        let Some((i, mode)) = &self.drag else { return };
-        let i = *i;
+        let Some((id, mode)) = self.drag else { return };
+        let Some(r) = self.px_rect(id, w, h) else {
+            // The instance went away under the drag (CANCEL, a removal);
+            // there is nothing left to move.
+            self.drag = None;
+            return;
+        };
         let cw = w / self.cols as f32;
         let ch = h / self.rows as f32;
-        let r = self.px_rect(i, w, h);
-        match mode {
+        let moved = match mode {
             Mode::Move { dx, dy } => {
                 let mut nx = (x - dx).clamp(0.0, (w - r.w).max(0.0));
                 let mut ny = (y - dy).clamp(0.0, (h - r.h).max(0.0));
@@ -653,11 +801,9 @@ impl Editor {
                     nx = nx.clamp(0.0, (w - r.w).max(0.0));
                     ny = ny.clamp(0.0, (h - r.h).max(0.0));
                 }
-                self.rects[i].x = nx / w * 100.0;
-                self.rects[i].y = ny / h * 100.0;
+                Rect::new(nx, ny, r.w, r.h)
             }
             Mode::Resize { l, r: rr, t, b } => {
-                let (l, rr, t, b) = (*l, *rr, *t, *b);
                 let (mut x0, mut x1) = (r.x, r.right());
                 let (mut y0, mut y1) = (r.y, r.bottom());
                 let m = self.min_outer();
@@ -694,9 +840,10 @@ impl Editor {
                         y1 = oclamp((y1 / ch).round() * ch, y0 + min_h, h);
                     }
                 }
-                self.rects[i] = pct(Rect::new(x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)), w, h);
+                Rect::new(x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0))
             }
-        }
+        };
+        self.list.set_rect(id, Some(pct(moved, w, h)));
     }
 
     pub fn mouse_up(&mut self) {
@@ -735,7 +882,6 @@ impl Editor {
             + t.px(tok(&M, "editor.min_content")).max(t.px(tok(&MM, "editor.min_content_min_px")))
     }
 
-    /// Placement size of a freshly added widget.
     /// How big a widget is when it first lands.
     ///
     /// One intent, expressed once: a fresh widget takes a share of the
@@ -761,6 +907,35 @@ impl Editor {
         }
     }
 
+    /// Pulls a widget out of the ADD WIDGET window: a BRAND-NEW
+    /// instance at the miniature's size, centred on the cursor and
+    /// already being dragged.
+    ///
+    /// New every time, which is the whole feature: holding the same
+    /// entry twice puts two independent widgets on the board — two
+    /// shells, two current directories — instead of picking the one
+    /// that is already there up again.
+    fn pull_out(
+        &mut self,
+        widget: Panel,
+        mini: (f32, f32),
+        at: (f32, f32),
+        w: f32,
+        h: f32,
+    ) -> InstanceId {
+        let ((mw, mh), (mx, my)) = (mini, at);
+        let r = Rect::new(
+            (mx - mw / 2.0).clamp(0.0, (w - mw).max(0.0)),
+            (my - mh / 2.0).clamp(0.0, (h - mh).max(0.0)),
+            mw,
+            mh,
+        );
+        let id = self.list.add(widget, self.board, Some(pct(r, w, h)));
+        self.drag = Some((id, Mode::Move { dx: mw / 2.0, dy: mh / 2.0 }));
+        self.grow = Some((id, Instant::now(), mw, mh));
+        id
+    }
+
     /// Draws just the editor's button stack — called from draw() and
     /// again ON TOP of the settings window when it is open over the
     /// editor, so the buttons share the window's plane.
@@ -784,90 +959,46 @@ impl Editor {
         }
     }
 
-    /// The editor as a HALL shows it: the grid and the edited rectangles
-    /// solved for the hall's own geometry, and nothing else. No hover,
-    /// no resize handles, no remove buttons, no button stack, no ADD
-    /// WIDGET window — every one of those is something to operate, and a
-    /// hall is a preview: the pointer over it is deliberately not routed
-    /// into the editor (see the hall's event arm in main). Hence `&self`
-    /// where [`Editor::draw`] takes `&mut self`: a hall frame can never
-    /// move a panel or advance an animation, so drawing the same editor
-    /// on four screens stays one editor.
-    pub fn draw_preview(&self, ctx: &mut Ctx) {
-        let t = theme::resolved();
-        let (w, h) = (ctx.w, ctx.h);
-        static GRID_C: OnceLock<TokenId> = OnceLock::new();
-        static GRID_W: OnceLock<TokenId> = OnceLock::new();
-        static PROXY_CLASS: OnceLock<Option<u16>> = OnceLock::new();
-        let grid_c = col(t.color(tok(&GRID_C, "component.editor.grid_line")));
-        let grid_w = t.px(tok(&GRID_W, "editor.grid.stroke"));
-        for i in 0..=self.cols {
-            let x = i as f32 / self.cols as f32 * w;
-            ctx.dl.line(x, 0.0, x, h, grid_w, grid_c);
-        }
-        for i in 0..=self.rows {
-            let y = i as f32 / self.rows as f32 * h;
-            ctx.dl.line(0.0, y, w, y, grid_w, grid_c);
-        }
-        // The resting proxy style — a hall has no cursor of its own to
-        // heat a rectangle with.
-        let edge = match *PROXY_CLASS.get_or_init(|| theme::class_id("editor.proxy")) {
-            Some(c) => t.class_state(c, State::Idle),
-            None => StateStyle::RAW,
-        }
-        .edge;
-        for i in 0..self.rects.len() {
-            if !on_screen(&self.rects[i]) {
-                continue;
-            }
-            let r = self.px_rect(i, w, h);
-            ctx.dl.rect_outline(r.x, r.y, r.w, r.h, proxy_border(false), col(edge));
-        }
-    }
 
     /// Draws the visible grid, panel outlines and the editor controls on
     /// top of the live interface. The `mini` callback draws a live
-    /// miniature of the given panel into a rectangle (used by the ADD
+    /// miniature of the given widget into a rectangle (used by the ADD
     /// WIDGET window). Also advances the ADD WIDGET hold — after the
     /// themed hold time the widget pulls out of the window, grows and
     /// follows the cursor.
-    pub fn draw<F: FnMut(&mut Ctx, usize, Rect)>(&mut self, ctx: &mut Ctx, mut mini: F) {
+    pub fn draw<F: FnMut(&mut Ctx, Panel, Rect)>(&mut self, ctx: &mut Ctx, mut mini: F) {
         let t = theme::resolved();
         let (w, h) = (ctx.w, ctx.h);
         let (mx, my) = ctx.mouse;
 
-        // ADD WIDGET hold finished -> the widget pulls out of the window
-        // (it starts at its miniature size and grows under the cursor).
-        if let Some((panel, t0)) = self.adding {
+        // ADD WIDGET hold finished -> a new instance pulls out of the
+        // window (it starts at its miniature size and grows under the
+        // cursor).
+        if let Some((widget, t0)) = self.adding {
             if t0.elapsed().as_secs_f32() >= hold_secs() {
                 let (_, items) = self.add_list_rects(w, h);
-                let slot = self.hidden_panels().iter().position(|&p| p == panel);
-                let (mw, mh) = slot
+                let (mw, mh) = self
+                    .offer()
+                    .iter()
+                    .position(|&p| p == widget)
                     .and_then(|s| items.get(s))
                     .map(|ir| (ir.w, ir.h))
                     .unwrap_or_else(|| {
-                // The degenerate path reuses a themed size instead of
-                // carrying a design of its own (governing principle).
-                let m = self.min_outer();
-                (m, m)
-            });
+                        // The degenerate path reuses a themed size instead
+                        // of carrying a design of its own (governing
+                        // principle).
+                        let m = self.min_outer();
+                        (m, m)
+                    });
                 self.adding = None;
                 self.add_open = false;
-                let r = Rect::new(
-                    (mx - mw / 2.0).clamp(0.0, (w - mw).max(0.0)),
-                    (my - mh / 2.0).clamp(0.0, (h - mh).max(0.0)),
-                    mw,
-                    mh,
-                );
-                self.rects[panel] = pct(r, w, h);
-                self.drag = Some((panel, Mode::Move { dx: mw / 2.0, dy: mh / 2.0 }));
-                self.grow = Some((panel, Instant::now(), mw, mh));
+                self.pull_out(widget, (mw, mh), (mx, my), w, h);
             }
         }
 
         // Growth animation: miniature -> placement size, centred on the
         // cursor while it is being dragged.
-        if let Some((panel, t0, mw, mh)) = self.grow {
+        if let Some((id, t0, mw, mh)) = self.grow {
             static GROW_MS: OnceLock<TokenId> = OnceLock::new();
             static GROW_EASE: OnceLock<TokenId> = OnceLock::new();
             static EASE_WORDS: OnceLock<[Option<u16>; 3]> = OnceLock::new();
@@ -892,30 +1023,33 @@ impl Editor {
             } else {
                 x
             };
-            let t01 = x;
-            let (tw, th) = self.spawn_size(w, h);
-            let (cw_, ch_) = (mw + (tw - mw) * e, mh + (th - mh) * e);
-            let r = self.px_rect(panel, w, h);
-            let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-            let nr = Rect::new(
-                (cx - cw_ / 2.0).clamp(0.0, (w - cw_).max(0.0)),
-                (cy - ch_ / 2.0).clamp(0.0, (h - ch_).max(0.0)),
-                cw_,
-                ch_,
-            );
-            self.rects[panel] = pct(nr, w, h);
-            if let Some((di, mode)) = self.drag.as_mut() {
-                if *di == panel {
-                    if let Mode::Move { dx, dy } = mode {
-                        *dx = cw_ / 2.0;
-                        *dy = ch_ / 2.0;
+            match self.px_rect(id, w, h) {
+                None => self.grow = None,
+                Some(r) => {
+                    let (tw, th) = self.spawn_size(w, h);
+                    let (cw_, ch_) = (mw + (tw - mw) * e, mh + (th - mh) * e);
+                    let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                    let nr = Rect::new(
+                        (cx - cw_ / 2.0).clamp(0.0, (w - cw_).max(0.0)),
+                        (cy - ch_ / 2.0).clamp(0.0, (h - ch_).max(0.0)),
+                        cw_,
+                        ch_,
+                    );
+                    self.list.set_rect(id, Some(pct(nr, w, h)));
+                    if let Some((di, mode)) = self.drag.as_mut() {
+                        if *di == id {
+                            if let Mode::Move { dx, dy } = mode {
+                                *dx = cw_ / 2.0;
+                                *dy = ch_ / 2.0;
+                            }
+                        }
                     }
-                }
-            }
-            if t01 >= 1.0 {
-                self.grow = None;
-                if self.snap && self.drag.is_none() {
-                    self.snap_all(w, h);
+                    if x >= 1.0 {
+                        self.grow = None;
+                        if self.snap && self.drag.is_none() {
+                            self.snap_all(w, h);
+                        }
+                    }
                 }
             }
         }
@@ -958,13 +1092,14 @@ impl Editor {
             None => StateStyle::RAW,
         };
         let edge = grab_edge();
-        let dragged = self.drag.as_ref().map(|(i, _)| *i);
-        for i in 0..self.rects.len() {
-            if !on_screen(&self.rects[i]) {
-                continue;
-            }
-            let r = self.px_rect(i, w, h);
-            let hot = dragged == Some(i)
+        let dragged = self.drag.as_ref().map(|(id, _)| *id);
+        // The rectangles are read from a copy: the loop below asks the
+        // list questions of its own (how many of this widget stand
+        // here), and the borrow checker will not have both at once.
+        let placed: Vec<Instance> = self.list.all().to_vec();
+        for inst in &placed {
+            let r = Self::px_of(inst, w, h);
+            let hot = dragged == Some(inst.id)
                 || (dragged.is_none() && !ui_hover && {
                     let outer = Rect::new(
                         r.x - edge,
@@ -998,7 +1133,7 @@ impl Editor {
             }
             let px = ROLE_LABEL.px(ctx);
             let track = ROLE_LABEL.tracking(px);
-            let label = Panel(i as u16).label();
+            let label = inst.widget.label();
             let tw = ctx.fonts.measure(FONT_UI, px, label, track);
             let plate_h = t.px(tok(&PLATE_H, "editor.proxy.label_h"));
             ctx.dl.rect(
@@ -1018,9 +1153,10 @@ impl Editor {
                 col(st.text),
                 track,
             );
-            // X in the top-right corner removes the widget from the grid
-            // — except on the panels that cannot be switched off.
-            if Self::removable(i) {
+            // X in the top-right corner takes this instance off the
+            // board — except where it is the last of something the
+            // user could not switch back on.
+            if self.removable(inst.id) {
                 let xr = Self::x_rect(&r);
                 let x_hot = !ui_hover && xr.contains(mx, my);
                 let xst = style(xbtn_class, x_hot);
@@ -1099,8 +1235,12 @@ impl Editor {
                 col(t.color(tok(&TITLE_C, "text.title"))),
                 ROLE_TITLE.tracking(tpx),
             );
-            let hidden = self.hidden_panels();
-            if hidden.is_empty() {
+            let offer = self.offer();
+            if offer.is_empty() {
+                // The only way this window has nothing to show: the
+                // installation holds no widget this board could take.
+                // "Everything is already placed" is no longer a state
+                // that exists — a placed widget is still on offer.
                 let px = ROLE_VALUE.px(ctx);
                 ctx.dl.text_center(
                     ctx.fonts,
@@ -1108,7 +1248,7 @@ impl Editor {
                     px,
                     win.cx(),
                     win.y + win.h / 2.0,
-                    "ALL WIDGETS ARE PLACED",
+                    "NO WIDGETS INSTALLED FOR THIS BOARD",
                     col(t.color(tok(&EMPTY_C, "text.muted"))),
                     ROLE_VALUE.tracking(px),
                 );
@@ -1119,8 +1259,8 @@ impl Editor {
                 None => StateStyle::RAW,
             };
             for (slot, ir) in items.iter().enumerate() {
-                let Some(&panel) = hidden.get(slot) else { break };
-                let held = self.adding.map(|(p, _)| p == panel).unwrap_or(false);
+                let Some(&widget) = offer.get(slot) else { break };
+                let held = self.adding.map(|(p, _)| p == widget).unwrap_or(false);
                 let hover = ir.contains(mx, my);
                 let st = tile(hover || held);
                 ctx.dl.rect(ir.x, ir.y, ir.w, ir.h, col(tile(false).fill));
@@ -1130,7 +1270,7 @@ impl Editor {
                 let m = t.px(tok(&MINI_PAD, "editor.list.pad_min_px"));
                 mini(
                     ctx,
-                    panel,
+                    widget,
                     Rect::new(
                         ir.x + m,
                         ir.y + m + head,
@@ -1165,8 +1305,7 @@ impl Editor {
                 // Small name tag like on the panels.
                 let px = ROLE_LABEL.px(ctx);
                 let track = ROLE_LABEL.tracking(px);
-                let tw =
-                    ctx.fonts.measure(FONT_UI, px, Panel(panel as u16).label(), track);
+                let tw = ctx.fonts.measure(FONT_UI, px, widget.label(), track);
                 let plate_h = t.px(tok(&PLATE2_H, "editor.proxy.label_h"));
                 ctx.dl.rect(
                     ir.x,
@@ -1181,7 +1320,7 @@ impl Editor {
                     px,
                     ir.x + t.px(tok(&TAG2_X, "panel.title.inset_x")),
                     ir.y + (plate_h - px) / 2.0,
-                    Panel(panel as u16).label(),
+                    widget.label(),
                     col(st.text),
                     track,
                 );
@@ -1287,5 +1426,259 @@ fn edge_cursor(l: bool, r: bool, t: bool, b: bool) -> CursorKind {
         CursorKind::Ew
     } else {
         CursorKind::Ns
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A window to place things in — the editor works in percentages,
+    /// so the numbers only have to be a plausible screen.
+    const W: f32 = 1920.0;
+    const H: f32 = 1080.0;
+
+    /// The widget registry these tests place from: the crates linked
+    /// into this program plus the addons shipped beside it, which is
+    /// the set the program itself comes up with.
+    ///
+    /// It must hold the SAME widgets as the fixture in `config`'s
+    /// tests. The registry is process-wide and fixed by the first call
+    /// — or by the first READ, which freezes it empty — and every unit
+    /// test of this program runs in one binary, so whichever fixture
+    /// wins the race has to leave the other one's tests true. Its
+    /// staging directory is its own, though: two fixtures sharing one
+    /// would be free to wipe it while the other is scanning it.
+    fn fixture_registry() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let stage = std::env::temp_dir()
+                .join(format!("nacelle-editor-registry-fixture-{}", std::process::id()));
+            let scripts = stage.join("addons").join("scripts");
+            let _ = std::fs::remove_dir_all(&stage);
+            std::fs::create_dir_all(&scripts).expect("the fixture tree must be writable");
+            let shipped = std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../nacelle-addons/scripts"
+            ));
+            let rd = std::fs::read_dir(shipped)
+                .expect("the nacelle-addons repository must sit next to this one");
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("rhai") {
+                    let name = path.file_name().expect("a file has a name");
+                    std::fs::copy(&path, scripts.join(name)).expect("stage the addon");
+                }
+            }
+            let roots = nacelle::assets::AssetRoots::new(vec![stage.clone()], stage);
+            let factory = [
+                nacelle_widget_ai::WIDGET,
+                nacelle_widget_appcats::WIDGET,
+                nacelle_widget_appgrid::WIDGET,
+                nacelle_widget_control::WIDGET,
+                nacelle_widget_filesystem::WIDGET,
+                nacelle_widget_keyboard::WIDGET,
+                nacelle_widget_search::WIDGET,
+                nacelle_widget_shell::WIDGET,
+            ]
+            .into_iter()
+            .fold(
+                nacelle::widget::factory::WidgetFactory::new(roots),
+                |f, w| f.with_builtin(w),
+            );
+            nacelle::base::set_registry(factory.registry());
+        });
+    }
+
+    /// Every widget an ordinary board takes.
+    fn board_widgets() -> Vec<Panel> {
+        fixture_registry();
+        Panel::all()
+            .into_iter()
+            .filter(|p| p.category() == WidgetCategory::Board)
+            .collect()
+    }
+
+    /// One of them to experiment on, chosen for having declared nothing
+    /// that would keep it on the board.
+    fn a_board_widget() -> Panel {
+        board_widgets()
+            .into_iter()
+            .find(|p| !p.essential())
+            .expect("the shipped set holds an ordinary board widget")
+    }
+
+    /// An editor over an empty board of a layout whose counter stands
+    /// at `next_id`.
+    fn editor_over(board: &Layout, next_id: u32) -> Editor {
+        fixture_registry();
+        let mut ed = Editor::new();
+        ed.start(board, W, H, false, 20, 20, 8.0, (0, 0), WidgetCategory::Board, next_id);
+        ed
+    }
+
+    /// Drags one widget out of the ADD WIDGET window and drops it.
+    fn place(ed: &mut Editor, widget: Panel, x: f32, y: f32) -> InstanceId {
+        let id = ed.pull_out(widget, (160.0, 90.0), (x, y), W, H);
+        ed.mouse_up();
+        id
+    }
+
+    fn rect_of(ed: &Editor, id: InstanceId) -> PanelSpec {
+        ed.list.get(id).and_then(|i| i.rect).expect("a placed instance has a rectangle")
+    }
+
+    /// The request this whole model exists for: the same widget, twice,
+    /// on one board — two placements with two identities, not one
+    /// placement moved.
+    #[test]
+    fn the_same_widget_stands_on_one_board_twice() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let w = a_board_widget();
+        let mut ed = editor_over(&Layout::empty(W, H), 1);
+        let a = place(&mut ed, w, 400.0, 300.0);
+        let b = place(&mut ed, w, 1400.0, 800.0);
+        assert_ne!(a, b, "the second pull-out is a second widget");
+        assert_eq!(ed.instances().len(), 2);
+        assert!(ed.instances().iter().all(|i| i.widget == w));
+        assert!(
+            !same_spec(&rect_of(&ed, a), &rect_of(&ed, b)),
+            "two instances, two rectangles"
+        );
+    }
+
+    /// Removing one of them leaves the other exactly where it stands —
+    /// the property a table indexed by widget could not have.
+    #[test]
+    fn removing_one_instance_leaves_the_other_untouched() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let w = a_board_widget();
+        let mut ed = editor_over(&Layout::empty(W, H), 1);
+        let a = place(&mut ed, w, 400.0, 300.0);
+        let b = place(&mut ed, w, 1400.0, 800.0);
+        let before = rect_of(&ed, b);
+
+        // Through the control the user actually clicks: the X in the
+        // top-right corner of the first one.
+        let xr = Editor::x_rect(&Editor::px_of(ed.list.get(a).expect("just placed"), W, H));
+        ed.mouse_down(xr.cx(), xr.y + xr.h / 2.0, W, H);
+
+        assert!(ed.list.get(a).is_none(), "the X removes the instance it sits on");
+        assert_eq!(ed.instances().len(), 1);
+        assert!(
+            same_spec(&rect_of(&ed, b), &before),
+            "the other one did not move"
+        );
+    }
+
+    /// Dragging is by identity too: the second terminal stays put while
+    /// the first one is pulled across the board.
+    #[test]
+    fn dragging_one_instance_moves_only_that_one() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let w = a_board_widget();
+        let mut ed = editor_over(&Layout::empty(W, H), 1);
+        let a = place(&mut ed, w, 400.0, 300.0);
+        let b = place(&mut ed, w, 1400.0, 800.0);
+        let before = rect_of(&ed, b);
+
+        let r = Editor::px_of(ed.list.get(a).expect("just placed"), W, H);
+        ed.mouse_down(r.cx(), r.y + r.h / 2.0, W, H);
+        ed.mouse_move(r.cx() + 200.0, r.y + r.h / 2.0 + 100.0, W, H);
+        ed.mouse_up();
+
+        assert!(rect_of(&ed, a).x > 0.0);
+        assert!(!same_spec(&rect_of(&ed, a), &before));
+        assert!(same_spec(&rect_of(&ed, b), &before), "the other one did not move");
+    }
+
+    /// ADD WIDGET stopped hiding things. Every widget the board takes
+    /// is on offer whatever is already standing there — and nothing of
+    /// another board's kind ever is.
+    #[test]
+    fn the_add_widget_list_hides_nothing() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let all = board_widgets();
+        let w = a_board_widget();
+        let mut ed = editor_over(&Layout::empty(W, H), 1);
+        assert_eq!(ed.offer(), all, "an empty board offers everything it takes");
+
+        place(&mut ed, w, 400.0, 300.0);
+        place(&mut ed, w, 1400.0, 800.0);
+        assert_eq!(
+            ed.offer(),
+            all,
+            "a widget standing here twice is still on offer a third time"
+        );
+        assert!(
+            Panel::all().len() > all.len(),
+            "the fixture holds widgets of other kinds, so the filter is doing something"
+        );
+        assert!(ed.offer().iter().all(|p| p.category() == WidgetCategory::Board));
+    }
+
+    /// A widget dragged out here may not be given an identity some
+    /// other board of the same layout is already using, and a removal
+    /// does not put one back into circulation.
+    #[test]
+    fn a_new_instance_never_takes_an_id_already_in_the_layout() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let w = a_board_widget();
+        // The board arrives with three placements; the layout's other
+        // boards have taken the counter as far as 9.
+        let mut board = Layout::empty(W, H);
+        for (n, x) in [(1u32, 0.0f32), (2, 300.0), (3, 600.0)] {
+            board.place(InstanceId::new(n), w, Rect::new(x, 0.0, 200.0, 150.0));
+        }
+        let mut ed = editor_over(&board, 9);
+        assert_eq!(ed.instances().len(), 3, "the board came in as it was drawn");
+
+        let a = place(&mut ed, w, 1000.0, 500.0);
+        assert!(a.get() >= 9, "the layout's counter is where the next id comes from");
+
+        // Take it off again: the id it held is retired, not recycled.
+        ed.list.remove(a);
+        let b = place(&mut ed, w, 1200.0, 600.0);
+        assert_ne!(a, b);
+
+        let mut ids: Vec<u32> = ed.instances().iter().map(|i| i.id.get()).collect();
+        let placed = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), placed, "no two placements share an identity");
+        assert!(ed.next_free() > b.get(), "the counter is carried back past what was used");
+    }
+
+    /// CANCEL puts the board back as it was found, and the identities
+    /// the abandoned widgets held stay retired.
+    #[test]
+    fn cancel_puts_the_board_back_without_reusing_identities() {
+        // The editor's geometry comes out of the theme, and the
+        // theme is a process-wide global (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let w = a_board_widget();
+        let mut board = Layout::empty(W, H);
+        board.place(InstanceId::new(4), w, Rect::new(0.0, 0.0, 200.0, 150.0));
+        let mut ed = editor_over(&board, 5);
+        let kept = rect_of(&ed, InstanceId::new(4));
+
+        let a = place(&mut ed, w, 1000.0, 500.0);
+        let btns = Editor::save_buttons(W, H);
+        ed.buttons_hit(btns[4].cx(), btns[4].y + btns[4].h / 2.0, W, H);
+
+        assert_eq!(ed.instances().len(), 1, "the added widget is gone again");
+        assert!(same_spec(&rect_of(&ed, InstanceId::new(4)), &kept));
+        let b = place(&mut ed, w, 1000.0, 500.0);
+        assert_ne!(a, b, "an abandoned id is never handed out again");
     }
 }

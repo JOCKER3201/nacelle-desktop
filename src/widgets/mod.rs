@@ -17,3 +17,26 @@ pub use nacelle::{Action, DragPhase, Host, SelectOp, Sizing, Widget};
 
 // Geometry, the panel/layout model and text fitting come from the base.
 pub use nacelle::base::*;
+
+/// Serialises the tests that SELECT a theme against the ones that READ
+/// one.
+///
+/// The theme engine is process-wide and publishes lazily: the first
+/// reader that finds nothing loaded installs the master itself. Two
+/// tests running at once can therefore interleave so that the master
+/// lands on top of the theme the other one had just selected, and the
+/// colours it then asserts on are not the ones it asked for. The
+/// program never sees this — `config::resolve()` loads the theme before
+/// anything draws — so the lock belongs to the test binary and not to
+/// the interface.
+///
+/// A poisoned lock is taken anyway: the theme is a global either way,
+/// and one failing test must not turn into a cascade of failures that
+/// hide it.
+#[cfg(test)]
+pub(crate) fn theme_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}

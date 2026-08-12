@@ -7,7 +7,7 @@ mod clipboard;
 mod config;
 mod plugins;
 mod pty;
-mod sala;
+mod screen;
 mod screens;
 mod system;
 mod fullscreen;
@@ -21,6 +21,8 @@ mod wl_color;
 // naming the crate every time. This tree keeps only the Linux parts.
 pub use nacelle::{draw, flex, font, term, theme};
 
+use crate::screen::{draw_panel, Cube, Screen};
+use nacelle::layout::{BoardId, InstanceId};
 use nacelle::theme::{ThemeColor, TokenId};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -48,10 +50,6 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 fn tcol(c: ThemeColor) -> theme::Color {
     theme::Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
-
-
-
-
 
 /// One terminal session (tab): PTY + emulation + parser.
 struct Session {
@@ -164,15 +162,30 @@ impl Session {
     }
 }
 
+/// The user's say over the picture, gathered so one frame can be handed
+/// all of it. Per PROCESS and not per screen: a font scale is a
+/// preference about reading, not about a monitor.
+#[derive(Clone, Copy)]
+struct Prefs {
+    term_font_scale: f32,
+    ui_font_scale: f32,
+    /// The user's scale over the alpha of the theme's own glass wash.
+    frost_wash: f32,
+    /// The clock this frame is told it is (virtual while the pixel
+    /// guard is armed).
+    t: f64,
+}
+
 fn main() {
     // The two layout aids run and leave before any window exists —
     // they are for the user whose layout is broken enough that the
     // settings window may not be reachable (u1 §5.3).
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Desktop mode: this process IS the desktop (nacelle-session
-    // starts it so), which claims the primary screen for HOME and
-    // raises a hall on every other one. Without the flag the program
-    // is a guest on somebody's desktop and takes one window.
+    // starts it so), which puts a full desktop on EVERY screen —
+    // each with the layaut its connector is assigned. Without the flag
+    // the program is a guest on somebody's desktop and takes one
+    // window.
     let desktop_mode = args.iter().any(|a| a == "--desktop");
     if args.iter().any(|a| a == "--print-layaut") {
         // The effective layout — built-in or file — in .layaut syntax,
@@ -225,8 +238,7 @@ fn main() {
     // Configuration: the XDG cascade — the user's own file over the
     // system ones. Nothing is created here; the directory appears the
     // first time the user changes a setting.
-    let (cfg, startup_warning) = config::load();
-    let mut layout_spec = cfg.layout;
+    let (_cfg, startup_warning) = config::load();
     let mut fonts = font::FontSystem::new();
     // Font preferences (size scales + family/weight, terminal and UI).
     let (mut font_scale, tfam, twgt) = config::term_font_prefs();
@@ -294,64 +306,89 @@ fn main() {
         }
     }
 
-    // Which screen the main window opens on. Desktop mode claims the
-    // primary and raises a hall on every other screen below; without
-    // the flag the one special case is a CHASSIS screen — a panel of
-    // ten inches or less built into a computer case, which this
-    // program makes a fine face for. None keeps winit's own choice,
-    // the current monitor — exactly the old behaviour.
-    let screens = screens::survey(&event_loop);
-    let main_monitor = if desktop_mode {
-        screens.first().filter(|s| s.primary).map(|s| s.monitor.clone())
+    // ---- the screens ---------------------------------------------------
+    // ONE MONITOR IS ONE ROOM. Desktop mode gives every screen a window
+    // of its own and a full desktop behind it: its own layaut (chosen by
+    // the connector it hangs off), its own boards, its own widgets. The
+    // main screen is no longer a special case — it is simply the first
+    // element of this list, and everything below indexes into it.
+    //
+    // Without the flag the program is a guest and takes one window. The
+    // one special case there is a CHASSIS screen — a panel of ten inches
+    // or less built into a computer case, which this program makes a
+    // fine face for; None keeps winit's own choice, the current monitor.
+    let survey = screens::survey(&event_loop);
+    let mut screens: Vec<Screen> = if desktop_mode {
+        survey
+            .iter()
+            .filter_map(|s| {
+                Screen::new(
+                    &event_loop,
+                    Some(s.monitor.clone()),
+                    s.connector.clone(),
+                    s.primary,
+                )
+            })
+            .collect()
     } else {
-        screens::chassis(&screens).map(|s| {
+        let chassis = screens::chassis(&survey).map(|s| {
             eprintln!(
                 "nacelle-desktop: chassis screen '{}' ({:.1}\") \u{2014} opening there",
                 s.monitor.name().unwrap_or_else(|| "?".into()),
                 s.diagonal_in.unwrap_or(0.0)
             );
-            s.monitor.clone()
-        })
+            s
+        });
+        let (monitor, connector) = match chassis {
+            Some(s) => (Some(s.monitor.clone()), s.connector.clone()),
+            None => (None, None),
+        };
+        Screen::new(&event_loop, monitor, connector, true)
+            .into_iter()
+            .collect()
     };
+    if screens.is_empty() {
+        eprintln!("nacelle-desktop: no screen came up — nothing to draw on");
+        return;
+    }
+    for sc in screens.iter_mut() {
+        sc.pad = ui_padding;
+    }
+    for sc in screens.iter() {
+        let (w, h) = sc.size();
+        eprintln!(
+            "nacelle-desktop: screen '{}' {}x{} on layaut '{}', {} placements on its \
+             boards, {} of them running ({} widgets registered)",
+            sc.connector.as_deref().unwrap_or("?"),
+            w as u32,
+            h as u32,
+            sc.layaut,
+            sc.widgets.len(),
+            sc.widgets.running(),
+            widgets::panel_count()
+        );
+    }
 
-    let window = WindowBuilder::new()
-        .with_title("nacelle-desktop")
-        .with_decorations(false)
-        .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0))
-        // Start fullscreen right away, like eDEX-UI.
-        .with_fullscreen(Some(Fullscreen::Borderless(main_monitor)))
-        .build(&event_loop)
-        .expect("cannot create window");
-    // Minimum window size in landscape orientation.
-    window.set_min_inner_size(Some(winit::dpi::PhysicalSize::new(1280u32, 720u32)));
-
-    // The screen the window is on, as the layout sees it. Read when it
-    // can actually change — at startup and on a resize or a scale
-    // change — because asking costs a round trip to the display server.
-    let mut screen = screen_key(&window);
     // The theme engine bakes every u-derived length from the window
     // height (u = clamp(h × metric.unit_pct_h, …) — §2.2). config::load
     // ran before a window existed, so the engine is still on its
     // 1080-line default; on a 800-line window that is a 35 % oversize on
     // every metric token, which is how the control buttons left their
-    // panel. Told here and on every resize, never per frame. The second
-    // argument is `UIFontSize=`/100 the day it moves into u; today the
-    // font path applies it itself, so the bake takes 1.0.
-    nacelle::theme::set_viewport(window.inner_size().height as f32, 1.0);
-    // Per-screen layout override matching the current monitor
-    // (resolution + diagonal), refreshed on resize and config changes.
-    let mut active_ov = layout_spec.pick(screen).cloned();
-
-    let mut gfx = nacelle_renderer::Gfx::new(&window, window.inner_size().width, window.inner_size().height);
+    // panel. Told at the top of every frame, for the screen about to be
+    // drawn, and deduplicated inside on a height that lands on the same
+    // u — which is what lets two screens of two heights each get their
+    // own bake without either paying for the other's.
+    nacelle::theme::set_viewport(screens[0].size().1, 1.0);
 
     // The colour pipeline: only a native Wayland session has a
     // compositor to discuss colour with. Everywhere else this stays
     // None, the COLOR settings are greyed out and their stored values
-    // are never read.
+    // are never read. Discussed through the FIRST screen's surface:
+    // colour management is a property of the session, not of a monitor.
     let mut color_mgr = {
         use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
-        let dh = window.display_handle().ok().map(|h| h.as_raw());
-        let wh = window.window_handle().ok().map(|h| h.as_raw());
+        let dh = screens[0].window.display_handle().ok().map(|h| h.as_raw());
+        let wh = screens[0].window.window_handle().ok().map(|h| h.as_raw());
         // The clipboard backend follows whatever winit actually
         // connected to — the same handle, read once, never an env var.
         clipboard::install(dh);
@@ -363,12 +400,12 @@ fn main() {
             _ => None,
         }
     };
-    // Applied on start and after every change in the COLOR view.
+    // Applied on start and after every change in the COLOR view. Every
+    // screen shows the same picture, so every screen's renderer is told.
     macro_rules! apply_color {
         () => {{
             if let Some(mgr) = color_mgr.as_mut() {
                 let prefs = config::color_prefs();
-                gfx.set_color_depth(prefs.depth);
                 let lut = prefs
                     .lut
                     .as_deref()
@@ -378,7 +415,10 @@ fn main() {
                 if prefs.lut.is_some() && lut.is_none() {
                     eprintln!("nacelle-desktop: the chosen .cube did not parse — no grading");
                 }
-                gfx.set_lut(lut);
+                for sc in screens.iter_mut() {
+                    sc.set_color_depth(prefs.depth);
+                    sc.set_lut(lut.clone());
+                }
                 let icc = prefs
                     .icc
                     .as_deref()
@@ -393,35 +433,20 @@ fn main() {
     // that is the compositor's own model, and leaning into it replaced
     // a window manager's worth of frame machinery. Elsewhere a real
     // window manager owns the windows and this stays out of the way.
-    let mut fullscreen =
-        if gamescope { fullscreen::Fullscreen::start(&window) } else { None };
+    let mut fullscreen = if gamescope {
+        fullscreen::Fullscreen::start(&screens[0].window)
+    } else {
+        None
+    };
     if fullscreen.is_some() {
         eprintln!("nacelle-desktop: gamescope clients go fullscreen");
     }
 
-    // Desktop mode: every screen beyond the primary gets a hall — the
-    // board environment with, for now, nothing but empty boards on it.
-    // Which hall the settings window is being drawn on, and where the
-    // pointer is there. The window follows the hand from screen to
-    // screen; None means the main window has it, as it always did.
-    let mut settings_host: Option<usize> = None;
-    let mut sala_mouse = (0.0f32, 0.0f32);
-    // Whether the main window is still showing the boot log. Halls
-    // clone the main screen, and during the boot the main screen is not
-    // a board — so a hall stays at its plates until the first frame
-    // that draws one. True until the main window says otherwise: a hall
-    // may well be asked to redraw before the main window has drawn at
-    // all.
-    let mut booting = true;
-    let mut salas: Vec<sala::Sala> = if desktop_mode && screens.len() > 1 {
-        screens
-            .iter()
-            .filter(|s| !s.primary)
-            .filter_map(|s| sala::Sala::new(&event_loop, s.monitor.clone()))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Which screen the application's own interface is on — the settings
+    // window, the popup, the context menu, the focus chain. It follows
+    // the hand from screen to screen; with one screen it is always 0,
+    // which is what it always was.
+    let mut ui_screen: usize = 0;
 
     // Sound. Optional by design: without a device the program simply
     // runs silent. The theme's meta file is what maps events to files.
@@ -442,59 +467,7 @@ fn main() {
             a.event_count()
         );
     }
-    let mut panel_scale: Vec<f32> = vec![1.0; widgets::panel_count()];
-    // The content box the host's container left each panel on its last
-    // draw (u2 §4.1): the rect a widget drew in is the ONE rect its
-    // clicks and wheel turns are answered in, so it is stored rather
-    // than recomputed — input arrives with no frame in flight.
-    let mut panel_content: Vec<Option<widgets::Rect>> = vec![None; widgets::panel_count()];
 
-    // ---- widget boards ------------------------------------------------
-    // Extra spaces for widgets around the central one, Android-style:
-    // hold the left button and drag sideways to turn to a neighbour.
-    // Only the boards turn — the settings window, the popup and the
-    // editor are the application's own and stay where they are.
-    // Boards live on a row centred on home — (x, 0) to the sides — plus
-    // the permanent top and bottom boards, which sit above and below
-    // EVERY board on the row (y grows downwards like the screen). The
-    // position remembers where on the row the hand came from, so the
-    // slide back down returns there; which board a position shows is
-    // config::board_key's answer.
-    #[allow(unused_assignments)]
-    // The board world — identity, topology and presence — lives in the
-    // toolkit now (u3 L5/D3): one object instead of three locals and
-    // five macro bodies. The macros below survive as thin shims so the
-    // 2000-line loop's call sites did not have to move in the same
-    // commit as the logic.
-    let mut world = nacelle::stage::BoardWorld::new(nacelle::layout::LayoutDef::default());
-    // The program always starts on the central board.
-    let mut cur_board: config::BoardId = (0, 0);
-    // A held click, not delivered yet: it becomes a board drag if the
-    // pointer travels, and the widget's click on release if it does
-    // not. Delivering on release is what lets one gesture be both.
-    let mut press_at: Option<(f32, f32)> = None;
-    // A drag in progress, locked to the axis it started on. Sideways
-    // the world turns like a cube and the number is degrees; up and
-    // down it slides flat and the number is the fraction of the window
-    // already travelled. Positive goes right, or down.
-    let mut pan: Option<(bool, f32)> = None;
-    /// The move finishing (or undoing) itself after release.
-    struct Cube {
-        horizontal: bool,
-        a0: f32,
-        a1: f32,
-        t0: Instant,
-        /// Board the move lands on when it completes.
-        to: config::BoardId,
-        /// Board shown coming in while it moves.
-        face_b: config::BoardId,
-    }
-    let mut cube: Option<Cube> = None;
-    // Steps still to walk after the current move lands, last first.
-    // Going to a distant board from the BOARDS view is a chain of
-    // single-neighbour moves, so the animation passes through whatever
-    // lies between.
-    let mut go_queue: Vec<config::BoardId> = Vec::new();
     let mut sfx: Vec<nacelle::sound::Event> = Vec::new();
     nacelle::sound::emit(nacelle::sound::Event::Boot);
 
@@ -520,27 +493,24 @@ fn main() {
     }
     let mut active: usize = 0;
 
-    // Widget instances, one slot per registry entry — all empty until
-    // a board actually places the widget (sync_widgets!). A clock costs
-    // nothing to hold, but the registry is open-ended and a future
-    // widget may be a whole browser engine: what is not on any board
-    // must not be running, and that has to hold from the start.
-    let mut widget_inst: Vec<Option<Box<dyn widgets::Widget>>> =
-        (0..widgets::panel_count()).map(|_| None).collect();
-
     let mut settings = widgets::settings::Settings::new();
     settings.color_enabled = color_mgr.is_some();
     // Frosted-glass preferences: the radius goes to the renderer, the
     // opacity into the tint of every glass quad drawn this frame.
     let (blur_radius, blur_opacity) = config::blur_prefs();
-    gfx.set_blur_radius(blur_radius);
+    for sc in screens.iter_mut() {
+        sc.set_blur_radius(blur_radius);
+    }
     // The theme's lens: glyph-coverage exponent and the blur pyramid's clear.
     // Re-applied on every configuration change beside the rest of the theme.
     macro_rules! apply_lens {
         () => {{
             let t = nacelle::theme::resolved();
             if let Some(id) = nacelle::theme::id("render.text_gamma") {
-                gfx.set_text_gamma(t.px(id));
+                let g = t.px(id);
+                for sc in screens.iter_mut() {
+                    sc.set_text_gamma(g);
+                }
             }
         }};
     }
@@ -550,7 +520,6 @@ fn main() {
     // alpha of the theme's own wash (elev.fixture.glass.wash): nothing
     // at 0 %, the wash exactly as the theme wrote it at 100 %.
     let mut frost_wash = blur_opacity as f32 / 100.0;
-    let mut editor = widgets::editor::Editor::new();
     let mut popup = widgets::popup::Popup::new();
     if let Some(w) = startup_warning {
         nacelle::sound::emit(nacelle::sound::Event::Alert);
@@ -564,51 +533,23 @@ fn main() {
     // rewritten behind the user's back (u1 §5.3): it is told, once,
     // with the way out named. The same line goes to stderr so it
     // survives a headless start.
-    if let Some((pinned, placed)) = config::stale_screen_section(&layout_spec, screen) {
-        let lname = config::current_layaut_name()
-            .unwrap_or_else(|| "default".to_string());
+    if let Some((pinned, placed)) =
+        config::stale_screen_section(screens[0].spec(), screens[0].key)
+    {
+        let key = screens[0].key;
+        let lname = screens[0].layaut.clone();
         let msg = format!(
             "Layaut '{lname}' pins {pinned} of {placed} panels for {}x{}@{}. \
              The default arrangement changed; this screen still shows the saved \
              one. Settings \u{2192} Themes \u{2192} Layauts \u{2192} RESET THIS SCREEN.",
-            screen.0, screen.1, screen.2
+            key.0, key.1, key.2
         );
         eprintln!("nacelle-desktop: {msg}");
         nacelle::sound::emit(nacelle::sound::Event::Alert);
         popup.show(msg);
     }
 
-    // The panel holding the terminal view, refreshed from every frame:
-    // it is whichever widget reports a CHARACTER GRID, a capability the
-    // widget interface declares and nothing else answers. The
-    // application resizes the PTY to it, pastes the primary selection
-    // into it and opens the terminal menu over it — all without a
-    // widget's name, so an installation with a different terminal
-    // addon, or none, needs no line of this program changed.
-    let mut term_panel: Option<widgets::Panel> = None;
-
-    let mut dl = draw::DrawList::new();
-
-    // ---- the decoration plates (theme::plate, r1 §8 / DECISION M10) ----
-    // The theme's static decoration, CPU-baked into TWO screen-sized
-    // RGBA images: the BACKDROP plate (traces, grid, starfield, bottom
-    // vignette) drawn as one quad under everything else, inside the
-    // glass snapshot, and the OVERLAY plate (scanlines, grain, top
-    // vignette) drawn as one quad over everything themed — z 70.
-    // Registered through the renderer's ordinary image path; rebaked on
-    // a WORKER thread when the theme epoch or the surface size changes
-    // (measured 5.2 ms at 2560x1440 with aurora's traces, release),
-    // never per frame. `None` — the theme turned every layer of that
-    // plate off, and the raw run draws no quad for it at all.
-    let mut plate_tex: Option<(draw::ImageId, u32, u32)> = None; // backdrop
-    let mut overlay_tex: Option<(draw::ImageId, u32, u32)> = None; // overlay
-    let mut plate_key: Option<(u32, u32, u32)> = None; // (epoch, w, h) last kicked
-    type PlatePair = (Option<nacelle::theme::Plate>, Option<nacelle::theme::Plate>);
-    let mut plate_rx: Option<Receiver<PlatePair>> = None;
-
-    let start = Instant::now();
     let mut mods = ModifiersState::empty();
-    let mut mouse = (0.0f32, 0.0f32);
     // IME state (F1 §3.2): allowed strictly on TEXT-focus edges, and
     // the only text control wired in this slice is the SAVE AS field.
     // It starts OFF and the terminal KEEPS it off — the §3.2 red-team
@@ -625,11 +566,6 @@ fn main() {
     // The last IME cursor area sent, so the anchor is re-sent on
     // change, not sixty times a second.
     let mut ime_area: Option<(i32, i32, i32, i32)> = None;
-    // The single pointer-capture path (F1 §5.1): a left press the shell
-    // widget's drag(Begin) ACCEPTED routes every CursorMoved to
-    // drag(Move) and the release to drag(End). Declined presses fall
-    // through to the click/board machinery untouched.
-    let mut drag_capture: Option<widgets::Panel> = None;
     // Double/triple click, tracked HERE because a widget cannot see
     // click counts: the count picks the selection kind on Begin.
     let mut click_streak: u32 = 0;
@@ -681,251 +617,94 @@ fn main() {
     // actually settled on, after it has settled long enough.
     let mut tips = nacelle::object::tooltip::Tooltips::new();
     // The desktop's one focus chain (F1 §1.2), rebuilt every frame
-    // from whatever registers while drawing. This slice wires the
-    // settings window's controls — the modal layer, so Tab cannot be
-    // stolen from the shell: while settings is closed nothing
-    // registers, the chain is empty, and every key keeps today's
-    // route to the terminal. The focus-visible bit inside keeps the
-    // boot frame pixel-identical (no ring until keyboard navigation).
+    // from whatever registers while drawing — on the screen hosting the
+    // interface, which is the only screen anything registers on.
     let mut focus_ctl = nacelle::focus::FocusCtl::new();
 
+    let start = Instant::now();
+
+    // Every screen re-reads the layaut its connector is assigned and
+    // brings its widgets into line with it. One call, so no path that
+    // changes a layout can quietly forget a screen.
+    macro_rules! reload_layauts {
+        () => {{
+            for sc in screens.iter_mut() {
+                sc.pad = ui_padding;
+                sc.reload_layaut();
+            }
+        }};
+    }
+
     // Re-reads the configuration and applies everything it can change:
-    // the theme, the layout with its panel sizes, the sound clips and
-    // the two fonts. Every path that alters a setting ends here, so none
-    // of them can quietly skip a step — which is exactly what happened
-    // while this was written out twice: only one copy reloaded the sound
-    // theme, so choosing a new one did nothing until the next restart.
+    // the theme, the layouts with their panel sizes, the sound clips
+    // and the two fonts. Every path that alters a setting ends here, so
+    // none of them can quietly skip a step — which is exactly what
+    // happened while this was written out twice: only one copy reloaded
+    // the sound theme, so choosing a new one did nothing until the next
+    // restart.
     //
     // A macro rather than a function because all of these are locals of
-    // the event loop, and threading eleven &mut through a call would be
-    // longer than the body.
-    // The boards are the selected layout's: whenever layout_spec is
-    // read anew, this derives the in-memory board definitions from it.
-    // Boards share the layout's size table — one layout, one table.
-    // Widgets live where the boards put them. This walks every board
-    // of the selected layout and matches instances to placement:
-    // placed but not built — build; built but no longer placed — drop
-    // (a plugin's Drop crosses the ABI and frees its instance). This
-    // is what makes "not on any board" mean "not running", which a
-    // clock never cares about and a future browser widget will.
-    macro_rules! sync_widgets {
-        () => {{
-            let size = window.inner_size();
-            let (sw, sh) = (size.width as f32, size.height as f32);
-            let present =
-                world.present(sw, sh, ui_padding, screen, &nacelle::base::size_table());
-            for p in widgets::Panel::all() {
-                let i = p.idx();
-                if present[i] && widget_inst[i].is_none() {
-                    widget_inst[i] = make_widget(p);
-                } else if !present[i] && widget_inst[i].is_some() {
-                    widget_inst[i] = None;
-                }
-            }
-        }};
-    }
-    macro_rules! refresh_boards {
-        () => {{
-            go_queue.clear();
-            // The world rebuilds from the layout wholesale: the row's
-            // extents, the per-board size tables, the two fixtures that
-            // exist whether or not the file names them.
-            world.rebuild(layout_spec.clone());
-            // A layout with fewer boards than where the user stood:
-            // home is the one place that always exists.
-            if !(has_board!(cur_board)) {
-                cur_board = (0, 0);
-            }
-            world.set_current(cur_board);
-            sync_widgets!();
-        }};
-    }
-    // The definition a position shows — the vertical positions all
-    // share the top or bottom board's.
-    macro_rules! def_of {
-        ($k:expr) => {
-            world.def($k)
-        };
-    }
-    macro_rules! cur_def {
-        () => {
-            def_of!(cur_board)
-        };
-    }
-    macro_rules! has_board {
-        ($k:expr) => {
-            world.has_board($k)
-        };
-    }
-    // Starts the one-neighbour move to `$t` — the cube sideways, the
-    // flat slide up and down.
-    macro_rules! step_to {
-        ($t:expr) => {{
-            let t: config::BoardId = $t;
-            let horizontal = t.0 != cur_board.0;
-            let sign: i32 = if horizontal {
-                if t.0 > cur_board.0 { 1 } else { -1 }
-            } else if t.1 > cur_board.1 {
-                1
-            } else {
-                -1
-            };
-            let full: f32 = if horizontal { 90.0 } else { 1.0 };
-            nacelle::sound::emit(nacelle::sound::Event::Snap);
-            cube = Some(Cube {
-                horizontal,
-                a0: 0.0,
-                a1: full * sign as f32,
-                t0: Instant::now(),
-                to: t,
-                face_b: t,
-            });
-        }};
-    }
-    // Every board that exists, home first.
-    macro_rules! all_boards {
-        () => {
-            world.ids()
-        };
-    }
-    // Every board as it would look at the given size, the current one
-    // marked — what the BOARDS view draws. Taken at the size of the
-    // screen the settings window is being drawn on, which is why this
-    // is a macro over (w, h) rather than the main window's numbers.
-    macro_rules! board_thumbs {
-        ($w:expr, $h:expr) => {{
-            let mut thumbs = Vec::new();
-            for k in all_boards!() {
-                let def = def_of!(k);
-                let lay = outer_layout(def, def.pick(screen), $w, $h, ui_padding);
-                let panels = widgets::Panel::all()
-                    .into_iter()
-                    .filter_map(|pnl| {
-                        let r = lay.p(pnl);
-                        (r.x < $w).then_some(widgets::PanelSpec {
-                            x: r.x / $w * 100.0,
-                            y: r.y / $h * 100.0,
-                            w: r.w / $w * 100.0,
-                            h: r.h / $h * 100.0,
-                        })
-                    })
-                    .collect();
-                thumbs.push(widgets::settings::BoardThumb {
-                    id: k,
-                    current: k == config::board_key(cur_board),
-                    panels,
-                });
-            }
-            thumbs
-        }};
-    }
-    // SAVE while standing on a board: the board's panels go into the
-    // selected layout's file, and the world is re-read from it.
-    macro_rules! save_board_cur {
-        () => {{
-            let name = config::current_layaut_name()
-                .unwrap_or_else(|| "default".to_string());
-            match config::set_board_in_layaut(
-                &name,
-                config::board_key(cur_board),
-                &editor.spec(),
-            ) {
-                Ok(()) => {
-                    nacelle::sound::emit(nacelle::sound::Event::Save);
-                    apply_config!(
-                        layout_spec, active_ov, popup, audio, fonts,
-                        font_scale, ui_font_scale, last_term_key, last_ui_key,
-                        window
-                    );
-                    // A finished save leaves the editor, on every board
-                    // — the same ending HOME's own save has. Only the
-                    // board differed, and the difference was invisible
-                    // and therefore wrong: the user pressed SAVE and
-                    // stayed in a mode they thought they had left.
-                    editor.stop();
-                }
-                Err(e) => {
-                    // A save that failed keeps the editor open: the
-                    // arrangement is still the user's to retry, and
-                    // dropping them out of the mode would throw it away.
-                    nacelle::sound::emit(nacelle::sound::Event::Error);
-                    popup.show(format!("Cannot save the board: {e}"));
-                }
-            }
-        }};
-    }
+    // the event loop, and threading a dozen &mut through a call would
+    // be longer than the body.
     macro_rules! apply_config {
-        ($layout_spec:ident, $active_ov:ident, $popup:ident,
-         $audio:ident, $fonts:ident, $font_scale:ident, $ui_font_scale:ident,
-         $last_term_key:ident, $last_ui_key:ident, $window:ident) => {{
+        () => {{
             let (new_cfg, warn) = config::resolve();
             // Sizes travel with the layout, so a new layout brings its own.
             nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
-            $layout_spec = new_cfg.layout;
-            $active_ov = $layout_spec.pick(screen).cloned();
             // A new look or sound set means new clips.
-            if let (Some(a), Some(dir)) = ($audio.as_mut(), config::active_sounds_dir()) {
+            if let (Some(a), Some(dir)) = (audio.as_mut(), config::active_sounds_dir()) {
                 a.load_theme(&dir);
             }
             if let Some(w) = warn {
-                $popup.show(w);
+                popup.show(w);
             }
             let (tscale, tfam, twgt) = config::term_font_prefs();
             let (uscale, ufam, uwgt) = config::ui_font_prefs();
-            $font_scale = tscale;
-            $ui_font_scale = uscale;
+            font_scale = tscale;
+            ui_font_scale = uscale;
             let tkey = (
                 tfam.clone().unwrap_or_default(),
                 twgt.clone().unwrap_or_default(),
             );
-            if tkey != $last_term_key {
-                $last_term_key = tkey;
+            if tkey != last_term_key {
+                last_term_key = tkey;
                 if tfam.is_none() && twgt.is_none() {
-                    $fonts.set_mono(font::load_default_mono());
+                    fonts.set_mono(font::load_default_mono());
                 } else if let Some(f) =
                     font::load_variant_for(tfam.as_deref(), twgt.as_deref(), false)
                 {
-                    $fonts.set_mono(f);
+                    fonts.set_mono(f);
                 }
             }
             let ukey = (
                 ufam.clone().unwrap_or_default(),
                 uwgt.clone().unwrap_or_default(),
             );
-            if ukey != $last_ui_key {
-                $last_ui_key = ukey;
+            if ukey != last_ui_key {
+                last_ui_key = ukey;
                 if ufam.is_none() && uwgt.is_none() {
-                    $fonts.set_ui(font::load_default_ui());
+                    fonts.set_ui(font::load_default_ui());
                 } else if let Some(f) =
                     font::load_variant_for(ufam.as_deref(), uwgt.as_deref(), true)
                 {
-                    $fonts.set_ui(f);
+                    fonts.set_ui(f);
                 }
             }
             apply_lens!();
-            refresh_boards!();
+            reload_layauts!();
         }};
     }
 
-    // Routes one drag phase to a panel's widget, in the content box its
-    // last draw used — the same rect discipline as click and wheel.
+    // Routes one drag phase to a placement's widget, in the content box
+    // its last draw used — the same rect discipline as click and wheel.
     macro_rules! widget_drag {
-        ($panel:expr, $phase:expr, $x:expr, $y:expr) => {{
-            let panel = $panel;
-            let size = window.inner_size();
-            let layout = outer_layout(
-                cur_def!(),
-                cur_def!().pick(screen),
-                size.width as f32,
-                size.height as f32,
-                ui_padding,
-            )
-            .padded(ui_padding);
-            let r = panel_content
-                .get(panel.idx())
-                .copied()
-                .flatten()
-                .unwrap_or(layout.p(panel));
+        ($si:expr, $id:expr, $phase:expr, $x:expr, $y:expr) => {{
+            let si: usize = $si;
+            let id: InstanceId = $id;
+            let sc = &mut screens[si];
+            let (w, h) = sc.size();
+            let fallback = sc.content_layout().of(id);
+            let r = sc.widgets.content(id).unwrap_or(fallback);
             let occupied: Vec<bool> =
                 (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
             let snap = sys.lock().unwrap().clone();
@@ -936,12 +715,11 @@ fn main() {
                 tab_active: active,
                 shell_cwd: None,
                 t: start.elapsed().as_secs_f64(),
-                window: (size.width as f32, size.height as f32),
+                window: (w, h),
             };
-            widget_inst
-                .get_mut(panel.idx())
-                .and_then(|w| w.as_mut())
-                .map(|w| w.drag($phase, $x, $y, r, &host))
+            sc.widgets
+                .get_mut(id)
+                .map(|wg| wg.drag($phase, $x, $y, r, &host))
                 .unwrap_or(widgets::Action::None)
         }};
     }
@@ -1006,8 +784,9 @@ fn main() {
     // through: mid-ride the boards are nowhere in particular, so a menu
     // over moving rects must be impossible (F1 §4.6's cube rule).
     macro_rules! open_menu_at {
-        ($entries:expr, $x:expr, $y:expr) => {{
-            if cube.is_none() {
+        ($si:expr, $entries:expr, $x:expr, $y:expr) => {{
+            if screens[$si].cube.is_none() {
+                ui_screen = $si;
                 menu = Some(nacelle::object::menu::MenuState::open_at(
                     $entries,
                     $x,
@@ -1056,13 +835,14 @@ fn main() {
         }};
     }
     macro_rules! panel_menu_entries {
-        () => {{
+        ($si:expr) => {{
             use nacelle::object::menu::{MenuEntry, MenuItem};
+            let sc = &screens[$si];
             // Sideways only along the row — exactly the pan gesture's
             // reach; the vertical fixtures are not "left or right".
-            let on_arm = cur_board.1 == 0;
-            let left_ok = on_arm && has_board!((cur_board.0 - 1, cur_board.1));
-            let right_ok = on_arm && has_board!((cur_board.0 + 1, cur_board.1));
+            let on_arm = sc.board.1 == 0;
+            let left_ok = on_arm && sc.has_board((sc.board.0 - 1, sc.board.1));
+            let right_ok = on_arm && sc.has_board((sc.board.0 + 1, sc.board.1));
             vec![
                 MenuEntry::Item(
                     MenuItem::new("EDIT LAYOUT", CMD_EDIT_LAYOUT)
@@ -1087,9 +867,10 @@ fn main() {
         }};
     }
     macro_rules! input_menu_entries {
-        () => {{
+        ($si:expr) => {{
             use nacelle::object::menu::{MenuEntry, MenuItem};
-            let (has_sel, has_text) = editor
+            let (has_sel, has_text) = screens[$si]
+                .editor
                 .naming
                 .as_ref()
                 .map_or((false, false), |m| {
@@ -1119,71 +900,45 @@ fn main() {
             ]
         }};
     }
-    // Enters the layout editor with the current panel rectangles — the
-    // EDIT GRID button's body, shared with the panel context menu so
-    // the two ways in cannot drift apart.
-    macro_rules! enter_editor {
-        () => {{
-            let size = window.inner_size();
-            let (snap, cols, rows, pad) = config::grid_prefs();
-            // The editor edits the OUTER panel rects.
-            let outer = outer_layout(
-                cur_def!(),
-                cur_def!().pick(screen),
-                size.width as f32,
-                size.height as f32,
-                ui_padding,
-            );
-            // Widgets living on other boards are not offered here: a
-            // widget exists once, somewhere. Neither are widgets of
-            // another category — the board being edited decides which
-            // kind it takes (ordinary boards, APPGRID, or SEARCH AND
-            // AI).
-            let mut blocked = vec![false; widgets::panel_count()];
-            let here = match config::board_key(cur_board) {
-                (0, y) if y < 0 => nacelle::base::WidgetCategory::SearchAi,
-                (0, y) if y > 0 => nacelle::base::WidgetCategory::Appgrid,
-                _ => nacelle::base::WidgetCategory::Board,
-            };
-            for pnl in widgets::Panel::all() {
-                if pnl.category() != here {
-                    blocked[pnl.idx()] = true;
+    // SAVE while standing on a board: the board's panels go into that
+    // screen's layaut file, and every screen showing it is re-read.
+    macro_rules! save_board_on {
+        ($si:expr) => {{
+            let si: usize = $si;
+            let name = screens[si].layaut.clone();
+            let board = screens[si].editor.board();
+            // The store takes the board's placements by identity and
+            // drops whatever is no longer among them: a widget dragged
+            // off the board leaves the file with it.
+            let rects = screens[si].editor.rects();
+            match config::set_board_in_layaut(&name, board, &rects) {
+                Ok(()) => {
+                    nacelle::sound::emit(nacelle::sound::Event::Save);
+                    apply_config!();
+                    // A finished save leaves the editor, on every board
+                    // — the same ending HOME's own save has. Only the
+                    // board differed, and the difference was invisible
+                    // and therefore wrong: the user pressed SAVE and
+                    // stayed in a mode they thought they had left.
+                    screens[si].stop_editor();
+                }
+                Err(e) => {
+                    // A save that failed keeps the editor open: the
+                    // arrangement is still the user's to retry, and
+                    // dropping them out of the mode would throw it away.
+                    nacelle::sound::emit(nacelle::sound::Event::Error);
+                    popup.show(format!("Cannot save the board: {e}"));
                 }
             }
-            for k in all_boards!() {
-                if k == config::board_key(cur_board) {
-                    continue;
-                }
-                let def = def_of!(k);
-                let lay = outer_layout(
-                    def,
-                    def.pick(screen),
-                    size.width as f32,
-                    size.height as f32,
-                    ui_padding,
-                );
-                for pnl in widgets::Panel::all() {
-                    if lay.p(pnl).x < size.width as f32 {
-                        blocked[pnl.idx()] = true;
-                    }
-                }
-            }
-            editor.start(
-                &outer,
-                size.width as f32,
-                size.height as f32,
-                snap,
-                cols,
-                rows,
-                pad as f32,
-                blocked,
-            );
         }};
     }
     // What a picked row runs — the same commands the shortcut registry
-    // names, so a chord and a menu row cannot drift apart.
+    // names, so a chord and a menu row cannot drift apart. `$si` is the
+    // screen the gesture came from: BOARD LEFT turns the monitor the
+    // hand is on, not the first one in the list.
     macro_rules! run_menu_cmd {
-        ($cmd:expr) => {{
+        ($si:expr, $cmd:expr) => {{
+            let si: usize = $si;
             match $cmd {
                 CMD_COPY => {
                     let text = sessions[active]
@@ -1229,19 +984,23 @@ fn main() {
                     }
                 }
                 CMD_EDIT_LAYOUT => {
-                    if !editor.active {
-                        enter_editor!();
+                    if !screens[si].editor.active {
+                        screens[si].enter_editor();
                     }
                 }
                 CMD_OPEN_SETTINGS => settings.show(),
                 CMD_BOARD_LEFT | CMD_BOARD_RIGHT => {
+                    let here = screens[si].board;
                     let target = if $cmd == CMD_BOARD_LEFT {
-                        (cur_board.0 - 1, cur_board.1)
+                        (here.0 - 1, here.1)
                     } else {
-                        (cur_board.0 + 1, cur_board.1)
+                        (here.0 + 1, here.1)
                     };
-                    if cur_board.1 == 0 && cube.is_none() && has_board!(target) {
-                        step_to!(target);
+                    if here.1 == 0
+                        && screens[si].cube.is_none()
+                        && screens[si].has_board(target)
+                    {
+                        screens[si].step_to(target);
                     }
                 }
                 CMD_INPUT_CUT | CMD_INPUT_COPY | CMD_INPUT_PASTE | CMD_INPUT_SELECT_ALL => {
@@ -1252,7 +1011,8 @@ fn main() {
                         CMD_INPUT_PASTE => InputMsg::Paste,
                         _ => InputMsg::SelectAll,
                     };
-                    let out = editor
+                    let out = screens[si]
+                        .editor
                         .naming
                         .as_mut()
                         .map(|m| m.apply(msg))
@@ -1277,7 +1037,7 @@ fn main() {
                                         widgets::editor::Editor::layaut_name_char(c)
                                     })
                                     .collect();
-                                if let Some(m) = editor.naming.as_mut() {
+                                if let Some(m) = screens[si].editor.naming.as_mut() {
                                     m.apply(InputMsg::Insert(text));
                                 }
                             }
@@ -1292,22 +1052,26 @@ fn main() {
     // Everything a settings interaction may have ASKED the application
     // for — one body behind both ways of pressing a control (mouse
     // click and the F1 §1.5 Enter/Space), so the keyboard cannot reach
-    // a control whose consequences only the mouse path knows.
+    // a control whose consequences only the mouse path knows. It acts
+    // on the screen the window is being shown on: RESET THIS SCREEN
+    // means THIS one, and going to a board turns the monitor in front
+    // of the user.
     macro_rules! settings_after {
         () => {{
+            let si = ui_screen.min(screens.len() - 1);
             // RESET THIS SCREEN (the LAYAUTS view): the window cannot
             // clear the section itself — only the application knows
             // which screen this is — so it asks, like the boards do.
             if settings.reset_screen {
                 settings.reset_screen = false;
-                let name = config::current_layaut_name()
-                    .unwrap_or_else(|| "default".to_string());
-                match config::clear_screen_section(&name, screen) {
+                let name = screens[si].layaut.clone();
+                let key = screens[si].key;
+                match config::clear_screen_section(&name, key) {
                     Ok(()) => {
                         nacelle::sound::emit(nacelle::sound::Event::Save);
                         popup.show(format!(
                             "Cleared the {}x{}@{} section of layaut '{}'",
-                            screen.0, screen.1, screen.2, name
+                            key.0, key.1, key.2, name
                         ));
                     }
                     Err(e) => {
@@ -1315,40 +1079,32 @@ fn main() {
                         popup.show(format!("Cannot reset this screen: {e}"));
                     }
                 }
-                apply_config!(
-                    layout_spec, active_ov, popup, audio, fonts,
-                    font_scale, ui_font_scale, last_term_key, last_ui_key,
-                    window
-                );
+                apply_config!();
             }
-            // The BOARDS view asks; the boards are the
-            // application's, so the answers live here.
+            // The BOARDS view asks; the boards are the screen's, so the
+            // answers live here.
             if let Some(act) = settings.board_action.take() {
                 use widgets::settings::BoardAction;
                 match act {
                     BoardAction::Go(k) => {
-                        // The whole point of going from
-                        // here: the window stays open, so
-                        // no board needs its own control
-                        // panel to come back.
-                        if !editor.active
-                            && cube.is_none()
-                            && k != config::board_key(cur_board)
-                            && has_board!(k)
+                        // The whole point of going from here: the
+                        // window stays open, so no board needs its own
+                        // control panel to come back.
+                        if !screens[si].editor.active
+                            && screens[si].cube.is_none()
+                            && k != nacelle::layout::board_key(screens[si].board)
+                            && screens[si].has_board(k)
                         {
-                            // A distant board is walked one
-                            // neighbour at a time, so the
-                            // move animates through every
-                            // board between — the cube
-                            // sideways, the slide up and
-                            // down.
-                            let mut steps: Vec<config::BoardId> = Vec::new();
-                            let mut at = cur_board;
+                            // A distant board is walked one neighbour
+                            // at a time, so the move animates through
+                            // every board between — the cube sideways,
+                            // the slide up and down.
+                            let mut steps: Vec<BoardId> = Vec::new();
+                            let mut at = screens[si].board;
                             if k.1 != 0 {
-                                // Top or bottom: y is the
-                                // whole journey, through
-                                // the row if coming from
-                                // the other one.
+                                // Top or bottom: y is the whole
+                                // journey, through the row if coming
+                                // from the other one.
                                 if at.1 == -k.1 {
                                     at = (at.0, 0);
                                     steps.push(at);
@@ -1366,88 +1122,68 @@ fn main() {
                             }
                             steps.reverse();
                             if let Some(first) = steps.pop() {
-                                step_to!(first);
-                                go_queue = steps;
+                                screens[si].step_to(first);
+                                screens[si].go_queue = steps;
                             }
                         }
                     }
                     BoardAction::Add(side) => {
-                        let name = config::current_layaut_name()
-                            .unwrap_or_else(|| "default".to_string());
+                        let name = screens[si].layaut.clone();
                         if let Err(e) = config::add_board_in_layaut(&name, side) {
                             popup.show(format!("Cannot add a board: {e}"));
                         }
-                        apply_config!(
-                            layout_spec, active_ov, popup,
-                            audio, fonts, font_scale, ui_font_scale,
-                            last_term_key, last_ui_key, window
-                        );
+                        apply_config!();
                     }
                     BoardAction::Del(k) => {
-                        // Only the row shrinks; home and
-                        // the top and bottom boards are
-                        // fixtures.
-                        if k != (0, 0) && k.1 == 0 && cube.is_none() {
-                            let name = config::current_layaut_name()
-                                .unwrap_or_else(|| "default".to_string());
+                        // Only the row shrinks; home and the top and
+                        // bottom boards are fixtures.
+                        if k != (0, 0) && k.1 == 0 && screens[si].cube.is_none() {
+                            let name = screens[si].layaut.clone();
                             if let Err(e) = config::remove_board_in_layaut(&name, k) {
                                 popup.show(format!("Cannot remove the board: {e}"));
                             }
-                            // Whoever stood on a moved board
-                            // follows it; whoever stood on
-                            // the removed one — or came up
-                            // or down from it — lands over
-                            // home.
-                            if cur_board.0 == k.0 {
-                                cur_board.0 = 0;
-                            } else if k.0 > 0 && cur_board.0 > k.0 {
-                                cur_board.0 -= 1;
-                            } else if k.0 < 0 && cur_board.0 < k.0 {
-                                cur_board.0 += 1;
+                            // Whoever stood on a moved board follows it;
+                            // whoever stood on the removed one — or came
+                            // up or down from it — lands over home. Every
+                            // screen showing this layaut is walked, not
+                            // just the one that asked.
+                            for sc in screens.iter_mut() {
+                                if sc.layaut != name {
+                                    continue;
+                                }
+                                if sc.board.0 == k.0 {
+                                    sc.board.0 = 0;
+                                } else if k.0 > 0 && sc.board.0 > k.0 {
+                                    sc.board.0 -= 1;
+                                } else if k.0 < 0 && sc.board.0 < k.0 {
+                                    sc.board.0 += 1;
+                                }
                             }
-                            apply_config!(
-                                layout_spec, active_ov,
-                                popup, audio, fonts, font_scale,
-                                ui_font_scale, last_term_key,
-                                last_ui_key, window
-                            );
+                            apply_config!();
                         }
                     }
                 }
             }
-            // EDIT GRID: hide settings, enter the editor
-            // with the current panel rectangles — the
-            // body is shared with the panel context
-            // menu's EDIT LAYOUT row.
+            // EDIT GRID: hide settings, enter the editor with the
+            // current panel rectangles — the body is shared with the
+            // panel context menu's EDIT LAYOUT row.
             if settings.edit_requested {
                 settings.edit_requested = false;
-                if !editor.active {
-                    enter_editor!();
+                if !screens[si].editor.active {
+                    screens[si].enter_editor();
                 }
-                // With the editor already running the window
-                // simply hides — back to the grid.
+                // With the editor already running the window simply
+                // hides — back to the grid.
             }
-            if editor.active {
-                let size = window.inner_size();
-                let (snap, cols, rows, pad) = config::grid_prefs();
-                editor.sync_prefs(
-                    snap,
-                    cols,
-                    rows,
-                    pad as f32,
-                    size.width as f32,
-                    size.height as f32,
-                );
+            let (snap, cols, rows, pad) = config::grid_prefs();
+            for sc in screens.iter_mut() {
+                if sc.editor.active {
+                    let (w, h) = sc.size();
+                    sc.editor.sync_prefs(snap, cols, rows, pad as f32, w, h);
+                }
             }
         }};
     }
-
-    refresh_boards!();
-    eprintln!(
-        "nacelle-desktop: {} of {} registered widgets placed on boards",
-        widget_inst.iter().filter(|w| w.is_some()).count(),
-        widgets::panel_count()
-    );
 
     // How often the world is redrawn. Nothing here is a game: the
     // clock ticks once a second, telemetry once a second, the terminal
@@ -1458,234 +1194,54 @@ fn main() {
     // of that.
     const FRAME: std::time::Duration = std::time::Duration::from_nanos(1_000_000_000 / 60);
     let mut next_frame = Instant::now();
-    // When the last frame actually went out. The pace cannot be kept by
-    // only asking politely: the display server asks for a redraw of its
-    // own whenever it exposes the window, and dragging a framed window
-    // over the desktop exposes it hundreds of times a second. Each of
-    // those was rebuilding the entire world — the loop ran at eight
-    // times its cap while a window was being waved about.
-    let mut last_render = Instant::now() - FRAME;
 
     event_loop
         .run(move |event, elwt| {
             match event {
-                // A hall's window first: its whole event surface is a
-                // resize, a redraw and a close it politely declines —
-                // the main window's machinery below never sees it.
-                // The KEYS are the exception, and deliberately so: a
-                // click in a hall gives that window the compositor's
-                // keyboard focus, so every keystroke would arrive here
-                // and be swallowed — the settings window could be
-                // clicked but not typed at or walked with Tab. Keyboard
-                // events fall through to the main window's arm below
-                // and are handled exactly as they always were, because
-                // the state they act on is one and the same wherever it
-                // is drawn.
-                Event::WindowEvent { window_id, event }
-                    if window_id != window.id()
-                        && !matches!(
-                            event,
-                            WindowEvent::KeyboardInput { .. }
-                                | WindowEvent::ModifiersChanged(_)
-                                | WindowEvent::Ime(_)
-                        ) =>
-                {
-                    if let Some(i) =
-                        salas.iter().position(|s| s.window.id() == window_id)
-                    {
-                        match event {
-                            WindowEvent::Resized(_)
-                            | WindowEvent::ScaleFactorChanged { .. } => {
-                                salas[i].resize()
-                            }
-                            // The pointer arriving here is what moves the
-                            // settings window to this screen: it follows
-                            // the hand, and only the hand — the keyboard
-                            // keeps talking to the main window, because
-                            // the window's STATE is one and the same
-                            // wherever it is drawn.
-                            //
-                            // The layout editor is the deliberate
-                            // exception, and this is NOT an oversight:
-                            // a hall SHOWS edit mode (the grid and the
-                            // rectangles, drawn for its own geometry)
-                            // but never receives it. Dragging a panel is
-                            // done on the main screen; a hall is a
-                            // preview of the desktop, and routing the
-                            // pointer into the editor from a second
-                            // screen would let one editor be dragged
-                            // from two places at once against two
-                            // different pixel geometries.
-                            WindowEvent::CursorMoved { position, .. } => {
-                                sala_mouse = (position.x as f32, position.y as f32);
-                                settings_host = Some(i);
-                                if settings.open {
-                                    settings.drag(sala_mouse.0);
-                                    let pointer =
-                                        settings.hover(sala_mouse.0, sala_mouse.1);
-                                    salas[i].window.set_cursor_icon(if pointer {
-                                        CursorIcon::Pointer
-                                    } else {
-                                        CursorIcon::Default
-                                    });
-                                }
-                            }
-                            WindowEvent::MouseInput {
-                                state: ElementState::Pressed,
-                                button: MouseButton::Left,
-                                ..
-                            } if settings.open => {
-                                let size = salas[i].window.inner_size();
-                                if settings.click(
-                                    sala_mouse.0,
-                                    sala_mouse.1,
-                                    size.width as f32,
-                                    size.height as f32,
-                                    Some(&mut focus_ctl),
-                                ) {
-                                    apply_config!(
-                                        layout_spec, active_ov, popup, audio, fonts,
-                                        font_scale, ui_font_scale, last_term_key,
-                                        last_ui_key, window
-                                    );
-                                }
-                            }
-                            WindowEvent::MouseInput {
-                                state: ElementState::Released,
-                                button: MouseButton::Left,
-                                ..
-                            } if settings.open => {
-                                if settings.release() {
-                                    apply_config!(
-                                        layout_spec, active_ov, popup, audio, fonts,
-                                        font_scale, ui_font_scale, last_term_key,
-                                        last_ui_key, window
-                                    );
-                                }
-                            }
-                            WindowEvent::RedrawRequested => {
-                                let size = salas[i].window.inner_size();
-                                let (sw, sh) =
-                                    (size.width as f32, size.height as f32);
-                                // A hall is a CLONE of the main screen,
-                                // empty: the board being stood on, its
-                                // rectangles solved for the HALL's size
-                                // and the hall's own screen key, and an
-                                // empty container where the main screen
-                                // has a widget. Same source as the main
-                                // frame — the editor's rectangles while
-                                // it is open, the board's otherwise —
-                                // so the two never disagree. A
-                                // content-sized panel is solved against
-                                // the intrinsic sizes the MAIN screen
-                                // measured, which is the only measure
-                                // there is: the widgets that answer for
-                                // them run there.
-                                let hall = salas[i].screen;
-                                let layout = (!booting).then(|| {
-                                    if editor.active {
-                                        editor.layout(sw, sh)
-                                    } else {
-                                        let def = cur_def!();
-                                        outer_layout(
-                                            def,
-                                            def.pick(hall),
-                                            sw,
-                                            sh,
-                                            ui_padding,
-                                        )
-                                    }
-                                    .padded(ui_padding)
-                                });
-                                let hosting =
-                                    settings_host == Some(i) && settings.open;
-                                if hosting {
-                                    settings.boards = board_thumbs!(sw, sh);
-                                }
-                                let t = start.elapsed().as_secs_f64();
-                                let (m, tfs, ufs) =
-                                    (sala_mouse, font_scale, ui_font_scale);
-                                // Read-only here: a hall never edits.
-                                let ed = editor.active.then_some(&editor);
-                                let (settings_ref, focus_ref) =
-                                    (&mut settings, &mut focus_ctl);
-                                salas[i].draw_hosted(&mut fonts, |dl, w, h, fonts| {
-                                    let mut ctx = widgets::Ctx {
-                                        dl,
-                                        fonts,
-                                        w,
-                                        h,
-                                        t,
-                                        mouse: m,
-                                        term_font_scale: tfs,
-                                        ui_font_scale: ufs,
-                                        panel_scale: 1.0,
-                                        // Only the hosted settings
-                                        // window has controls to focus;
-                                        // the empty frames and the
-                                        // editor's preview register
-                                        // nothing, so a hall without it
-                                        // leaves the chain alone.
-                                        focus: hosting.then_some(focus_ref),
-                                        // A hall draws its own list, and
-                                        // one manager cannot answer to
-                                        // two windows at once: nothing
-                                        // drawn here files requests.
-                                        tips: None,
-                                    };
-                                    if let Some(layout) = &layout {
-                                        sala::draw_empty_board(&mut ctx, layout);
-                                        // Edit mode is visible on every
-                                        // screen; it is operated on one.
-                                        if let Some(ed) = ed {
-                                            ed.draw_preview(&mut ctx);
-                                        }
-                                    }
-                                    if hosting {
-                                        settings_ref.draw(&mut ctx);
-                                    }
-                                });
-                            }
-                            // A hall is part of the desktop: closing it
-                            // closes nothing.
-                            WindowEvent::CloseRequested => eprintln!(
-                                "nacelle-desktop: sala close request ignored"
-                            ),
-                            _ => {}
+                // Every window event is answered by the SCREEN whose
+                // window received it. That is the whole of "input goes
+                // where it was aimed": a drag on the second monitor
+                // turns the second monitor's boards, and the layout
+                // editor is operated against the pixels it is drawn on.
+                Event::WindowEvent { window_id, event } => {
+                    let Some(si) = screens.iter().position(|s| s.window.id() == window_id)
+                    else {
+                        return;
+                    };
+                    match event {
+                    WindowEvent::CloseRequested => {
+                        // A screen of the desktop is not a document
+                        // window: closing one closes nothing. The
+                        // FIRST screen is the program, and the
+                        // compositor asking it to go is obeyed.
+                        if si == 0 {
+                            eprintln!("nacelle-desktop: compositor requested window close");
+                            elwt.exit();
+                        } else {
+                            eprintln!("nacelle-desktop: close request on a second screen ignored");
                         }
                     }
-                }
-                Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => {
-                        eprintln!("nacelle-desktop: compositor requested window close");
-                        elwt.exit();
-                    }
                     WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                        gfx.resize();
-                        screen = screen_key(&window);
-                        active_ov = layout_spec.pick(screen).cloned();
-                        // Re-bake the u-derived lengths for the new
-                        // height (§2.2 step 4: on resize, never per
-                        // frame). A height that lands on the same u is
-                        // deduplicated inside.
-                        nacelle::theme::set_viewport(
-                            window.inner_size().height as f32,
-                            1.0,
-                        );
+                        screens[si].resized();
                     }
                     WindowEvent::ModifiersChanged(m) => mods = m.state(),
                     WindowEvent::CursorMoved { position, .. } => {
-                        mouse = (position.x as f32, position.y as f32);
-                        // The hand came back to the main screen, and the
-                        // settings window comes with it.
-                        settings_host = None;
+                        screens[si].mouse = (position.x as f32, position.y as f32);
+                        let mouse = screens[si].mouse;
+                        // The application's own interface follows the
+                        // hand from screen to screen: the settings
+                        // window, the popup and the menu are drawn
+                        // wherever the pointer is. The KEYBOARD does
+                        // not follow — the state they act on is one and
+                        // the same wherever it is drawn.
+                        ui_screen = si;
                         // An accepted drag capture owns the pointer:
                         // every motion goes to the widget as drag(Move)
                         // and nothing below (board pan, editor hover)
                         // sees it — the single capture path.
-                        if let Some(panel) = drag_capture {
+                        if let Some(id) = screens[si].drag_capture {
                             if let widgets::Action::TermSelect { op, col, row, base } =
-                                widget_drag!(panel, widgets::DragPhase::Move, mouse.0, mouse.1)
+                                widget_drag!(si, id, widgets::DragPhase::Move, mouse.0, mouse.1)
                             {
                                 apply_term_select!(op, col, row, base);
                             }
@@ -1694,24 +1250,23 @@ fn main() {
                         // A held button that travels sideways becomes a
                         // board drag; the click it started as is then
                         // never delivered.
-                        if let Some((px0, py0)) = press_at {
-                            if pan.is_none() && cube.is_none() {
-                                let size = window.inner_size();
+                        if let Some((px0, py0)) = screens[si].press_at {
+                            if screens[si].pan.is_none() && screens[si].cube.is_none() {
+                                let (w, _) = screens[si].size();
                                 let (dx, dy) = (mouse.0 - px0, mouse.1 - py0);
-                                let th = (size.width as f32 * 0.02).max(20.0);
+                                let th = (w * 0.02).max(20.0);
                                 // The axis is decided once, by whichever
                                 // way the hand went first, and the drag
                                 // stays on it.
                                 if dx.abs() > th && dx.abs() > dy.abs() {
-                                    pan = Some((true, 0.0));
+                                    screens[si].pan = Some((true, 0.0));
                                 } else if dy.abs() > th && dy.abs() > dx.abs() {
-                                    pan = Some((false, 0.0));
+                                    screens[si].pan = Some((false, 0.0));
                                 }
                             }
-                            if let Some((horizontal, _)) = pan {
-                                let size = window.inner_size();
-                                let (w, h) =
-                                    (size.width as f32, size.height as f32);
+                            if let Some((horizontal, _)) = screens[si].pan {
+                                let (w, h) = screens[si].size();
+                                let here = screens[si].board;
                                 // How far the hand travels for a full move,
                                 // and how rubbery the row's ends answer it
                                 // — material properties, so the theme's.
@@ -1731,11 +1286,9 @@ fn main() {
                                     // is a full quarter turn. Sideways only
                                     // from the horizontal arm.
                                     let raw = -(mouse.0 - px0) / (w * gest) * 90.0;
-                                    let target = (
-                                        cur_board.0 + if raw > 0.0 { 1 } else { -1 },
-                                        cur_board.1,
-                                    );
-                                    let a = if cur_board.1 == 0 && has_board!(target)
+                                    let target =
+                                        (here.0 + if raw > 0.0 { 1 } else { -1 }, here.1);
+                                    let a = if here.1 == 0 && screens[si].has_board(target)
                                     {
                                         raw.clamp(-90.0, 90.0)
                                     } else {
@@ -1745,7 +1298,7 @@ fn main() {
                                         // pretending to go anywhere.
                                         (raw * gain).clamp(-90.0 * rmax, 90.0 * rmax)
                                     };
-                                    pan = Some((true, a));
+                                    screens[si].pan = Some((true, a));
                                 } else {
                                     // Up and down the world slides flat;
                                     // dragging up goes to the board below.
@@ -1753,51 +1306,40 @@ fn main() {
                                     // and below every board on the row,
                                     // so this works from anywhere.
                                     let raw = -(mouse.1 - py0) / (h * gest);
-                                    let target = (
-                                        cur_board.0,
-                                        cur_board.1 + if raw > 0.0 { 1 } else { -1 },
-                                    );
-                                    let f = if has_board!(target) {
+                                    let target =
+                                        (here.0, here.1 + if raw > 0.0 { 1 } else { -1 });
+                                    let f = if screens[si].has_board(target) {
                                         raw.clamp(-1.0, 1.0)
                                     } else {
                                         (raw * gain).clamp(-rmax, rmax)
                                     };
-                                    pan = Some((false, f));
+                                    screens[si].pan = Some((false, f));
                                 }
                                 return;
                             }
                         }
-                        if editor.active && !settings.open {
-                            let size = window.inner_size();
-                            let (fw, fh) = (size.width as f32, size.height as f32);
-                            editor.mouse_move(mouse.0, mouse.1, fw, fh);
+                        if screens[si].editor.active && !settings.open {
+                            let (fw, fh) = screens[si].size();
+                            screens[si].editor.mouse_move(mouse.0, mouse.1, fw, fh);
                             // Move/resize cursors over the panels.
                             use widgets::editor::CursorKind;
-                            window.set_cursor_icon(
-                                match editor.cursor_at(mouse.0, mouse.1, fw, fh) {
-                                    CursorKind::Move => CursorIcon::Grab,
-                                    CursorKind::Ew => CursorIcon::EwResize,
-                                    CursorKind::Ns => CursorIcon::NsResize,
-                                    CursorKind::Nwse => CursorIcon::NwseResize,
-                                    CursorKind::Nesw => CursorIcon::NeswResize,
-                                    CursorKind::Normal => CursorIcon::Default,
-                                },
-                            );
+                            let kind = screens[si].editor.cursor_at(mouse.0, mouse.1, fw, fh);
+                            screens[si].window.set_cursor_icon(match kind {
+                                CursorKind::Move => CursorIcon::Grab,
+                                CursorKind::Ew => CursorIcon::EwResize,
+                                CursorKind::Ns => CursorIcon::NsResize,
+                                CursorKind::Nwse => CursorIcon::NwseResize,
+                                CursorKind::Nesw => CursorIcon::NeswResize,
+                                CursorKind::Normal => CursorIcon::Default,
+                            });
                             return;
                         }
                         if settings.open {
                             settings.drag(mouse.0);
                         }
                         // Pointer cursor over a widget's own controls.
-                        let size = window.inner_size();
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
+                        let (w, h) = screens[si].size();
+                        let layout = screens[si].content_layout();
                         let pointer = if settings.open {
                             settings.hover(mouse.0, mouse.1)
                         } else {
@@ -1807,25 +1349,23 @@ fn main() {
                             // drew in and will be clicked in. The
                             // application holds no copy of anybody's
                             // geometry and needs no widget's name.
-                            let win = (size.width as f32, size.height as f32);
-                            widgets::Panel::all()
-                                .into_iter()
-                                .find(|p| layout.p(*p).contains(mouse.0, mouse.1))
-                                .is_some_and(|p| {
-                                    let r = panel_content
-                                        .get(p.idx())
-                                        .copied()
-                                        .flatten()
-                                        .unwrap_or(layout.p(p));
-                                    widget_inst
-                                        .get_mut(p.idx())
-                                        .and_then(|w| w.as_mut())
-                                        .is_some_and(|w| {
-                                            w.pointer(mouse.0, mouse.1, r, win)
+                            match layout.hit(mouse.0, mouse.1) {
+                                Some(pl) => {
+                                    let r = screens[si]
+                                        .widgets
+                                        .content(pl.id)
+                                        .unwrap_or(pl.rect);
+                                    screens[si]
+                                        .widgets
+                                        .get_mut(pl.id)
+                                        .is_some_and(|wg| {
+                                            wg.pointer(mouse.0, mouse.1, r, (w, h))
                                         })
-                                })
+                                }
+                                None => false,
+                            }
                         };
-                        window.set_cursor_icon(if pointer {
+                        screens[si].window.set_cursor_icon(if pointer {
                             CursorIcon::Pointer
                         } else {
                             CursorIcon::Default
@@ -1837,58 +1377,44 @@ fn main() {
                         if menu.is_some() {
                             return;
                         }
-                        if editor.active {
+                        if screens[si].editor.active {
                             return;
                         }
                         let dy = match delta {
                             MouseScrollDelta::LineDelta(_, y) => y,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32 / 20.0,
                         };
-                        let size = window.inner_size();
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
-                        let hit = widgets::Panel::all()
-                            .into_iter()
-                            .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
-                        if let Some(panel) = hit {
-                            // The rect the widget is answered in is the
-                            // CONTENT BOX its last draw used (u2 §4.1),
-                            // never the panel rect — the container's
-                            // band and padding are the host's, not the
-                            // widget's.
-                            let r = panel_content
-                                .get(panel.idx())
-                                .copied()
-                                .flatten()
-                                .unwrap_or(layout.p(panel));
-                            let occupied: Vec<bool> =
-                                (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
-                            let action = {
-                                let host = widgets::Host {
-                                    snap: &sys.lock().unwrap().clone(),
-                                    term: sessions[active].as_ref().map(|s| &s.term),
-                                    tabs: &occupied,
-                                    tab_active: active,
-                                    shell_cwd: None,
-                                    t: start.elapsed().as_secs_f64(),
-                                    window: (size.width as f32, size.height as f32),
-                                };
-                                widget_inst
-                                    .get_mut(panel.idx())
-                                    .and_then(|w| w.as_mut())
-                                    .map(|w| w.wheel(dy, r, &host))
-                                    .unwrap_or(widgets::Action::None)
+                        let mouse = screens[si].mouse;
+                        let (w, h) = screens[si].size();
+                        let layout = screens[si].content_layout();
+                        let Some(pl) = layout.hit(mouse.0, mouse.1) else { return };
+                        // The rect the widget is answered in is the
+                        // CONTENT BOX its last draw used (u2 §4.1),
+                        // never the panel rect — the container's
+                        // band and padding are the host's, not the
+                        // widget's.
+                        let r = screens[si].widgets.content(pl.id).unwrap_or(pl.rect);
+                        let occupied: Vec<bool> =
+                            (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
+                        let action = {
+                            let host = widgets::Host {
+                                snap: &sys.lock().unwrap().clone(),
+                                term: sessions[active].as_ref().map(|s| &s.term),
+                                tabs: &occupied,
+                                tab_active: active,
+                                shell_cwd: None,
+                                t: start.elapsed().as_secs_f64(),
+                                window: (w, h),
                             };
-                            if let widgets::Action::ScrollTerminal(n) = action {
-                                if let Some(s) = sessions[active].as_mut() {
-                                    s.term.scroll_view(n);
-                                }
+                            screens[si]
+                                .widgets
+                                .get_mut(pl.id)
+                                .map(|wg| wg.wheel(dy, r, &host))
+                                .unwrap_or(widgets::Action::None)
+                        };
+                        if let widgets::Action::ScrollTerminal(n) = action {
+                            if let Some(s) = sessions[active].as_mut() {
+                                s.term.scroll_view(n);
                             }
                         }
                     }
@@ -1897,65 +1423,61 @@ fn main() {
                         button: MouseButton::Left,
                         ..
                     } => {
+                        let mouse = screens[si].mouse;
                         // A captured drag ends here, and the release is
                         // the widget's drag(End) — copy-on-select fires
                         // in the TermSelect handler, on End only. The
                         // capture never coexists with the editor or the
                         // settings window: it only ever starts when
                         // neither had the press.
-                        if let Some(panel) = drag_capture.take() {
+                        if let Some(id) = screens[si].drag_capture.take() {
                             if let widgets::Action::TermSelect { op, col, row, base } =
-                                widget_drag!(panel, widgets::DragPhase::End, mouse.0, mouse.1)
+                                widget_drag!(si, id, widgets::DragPhase::End, mouse.0, mouse.1)
                             {
                                 apply_term_select!(op, col, row, base);
                             }
                             return;
                         }
-                        if editor.active && !settings.open {
-                            editor.mouse_up();
+                        if screens[si].editor.active && !settings.open {
+                            screens[si].editor.mouse_up();
                             return;
                         }
-                        if editor.active && settings.open {
+                        if screens[si].editor.active && settings.open {
                             settings.release();
                             let (snap, cols, rows, pad) = config::grid_prefs();
-                            let size = window.inner_size();
-                            editor.sync_prefs(
-                                snap,
-                                cols,
-                                rows,
-                                pad as f32,
-                                size.width as f32,
-                                size.height as f32,
-                            );
+                            let (w, h) = screens[si].size();
+                            screens[si]
+                                .editor
+                                .sync_prefs(snap, cols, rows, pad as f32, w, h);
                             ui_padding = pad as f32;
+                            for sc in screens.iter_mut() {
+                                sc.pad = ui_padding;
+                            }
                             return;
                         }
                         if settings.open && settings.release() {
-                                apply_config!(
-                                    layout_spec, active_ov, popup, audio, fonts,
-                                    font_scale, ui_font_scale, last_term_key, last_ui_key,
-                                    window
-                                );
-                            }
+                            apply_config!();
+                        }
                         // A drag ends: past the point of no return the
                         // turn completes to the neighbour, short of it
                         // the world settles back.
-                        if let Some((horizontal, a)) = pan.take() {
-                            press_at = None;
+                        if let Some((horizontal, a)) = screens[si].pan.take() {
+                            screens[si].press_at = None;
+                            let here = screens[si].board;
                             let sign: i32 = if a > 0.0 { 1 } else { -1 };
                             let target = if horizontal {
-                                (cur_board.0 + sign, cur_board.1)
+                                (here.0 + sign, here.1)
                             } else {
-                                (cur_board.0, cur_board.1 + sign)
+                                (here.0, here.1 + sign)
                             };
                             // Sideways only along the row; up and down
                             // reach the top and bottom from anywhere.
-                            let on_arm = if horizontal { cur_board.1 == 0 } else { true };
+                            let on_arm = if horizontal { here.1 == 0 } else { true };
                             let full: f32 = if horizontal { 90.0 } else { 1.0 };
                             let past = a.abs() >= full / 3.0;
-                            if past && on_arm && has_board!(target) {
+                            if past && on_arm && screens[si].has_board(target) {
                                 nacelle::sound::emit(nacelle::sound::Event::Snap);
-                                cube = Some(Cube {
+                                screens[si].cube = Some(Cube {
                                     horizontal,
                                     a0: a,
                                     a1: full * sign as f32,
@@ -1964,42 +1486,28 @@ fn main() {
                                     face_b: target,
                                 });
                             } else if a.abs() > full * 0.001 {
-                                cube = Some(Cube {
+                                screens[si].cube = Some(Cube {
                                     horizontal,
                                     a0: a,
                                     a1: 0.0,
                                     t0: Instant::now(),
-                                    to: cur_board,
+                                    to: here,
                                     face_b: target,
                                 });
                             }
                             return;
                         }
-                        let Some((cx, cy)) = press_at.take() else { return };
+                        let Some((cx, cy)) = screens[si].press_at.take() else { return };
                         // A click held in place: delivered now, to the
                         // widget it went down on. One route for every
                         // widget — the application does not know which
                         // one it is talking to.
-                        let size = window.inner_size();
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
-                        let hit = widgets::Panel::all()
-                            .into_iter()
-                            .find(|p| layout.p(*p).contains(cx, cy));
-                        let Some(panel) = hit else { return };
+                        let (w, h) = screens[si].size();
+                        let layout = screens[si].content_layout();
+                        let Some(pl) = layout.hit(cx, cy) else { return };
                         // The content box the widget drew in — the same
                         // rect its draw received (u2 §4.1).
-                        let r = panel_content
-                            .get(panel.idx())
-                            .copied()
-                            .flatten()
-                            .unwrap_or(layout.p(panel));
+                        let r = screens[si].widgets.content(pl.id).unwrap_or(pl.rect);
                         let occupied: Vec<bool> =
                             (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
                         // Asked before the widget borrows the session:
@@ -2015,12 +1523,12 @@ fn main() {
                                 tab_active: active,
                                 shell_cwd: clicked_cwd,
                                 t: start.elapsed().as_secs_f64(),
-                                window: (size.width as f32, size.height as f32),
+                                window: (w, h),
                             };
-                            widget_inst
-                                .get_mut(panel.idx())
-                                .and_then(|w| w.as_mut())
-                                .map(|w| w.click(cx, cy, r, &host))
+                            screens[si]
+                                .widgets
+                                .get_mut(pl.id)
+                                .map(|wg| wg.click(cx, cy, r, &host))
                                 .unwrap_or(widgets::Action::None)
                         };
                         // The on-screen keyboard sounds its own keys, so a
@@ -2124,6 +1632,8 @@ fn main() {
                         button: MouseButton::Left,
                         ..
                     } => {
+                        let mouse = screens[si].mouse;
+                        ui_screen = si;
                         // Any pointer press hides the focus ring (the
                         // focus-visible rule, F1 §1.2) — focus itself
                         // stays wherever it was.
@@ -2131,7 +1641,7 @@ fn main() {
                         focus_ctl.focus(f);
                         // Mid-turn the boards are nowhere in particular;
                         // the press waits for the world to settle.
-                        if cube.is_some() {
+                        if screens[si].cube.is_some() {
                             return;
                         }
                         // The open context menu is the top layer: the
@@ -2146,13 +1656,13 @@ fn main() {
                                 MenuOut::Pick(cmd) => {
                                     menu = None;
                                     nacelle::sound::emit(nacelle::sound::Event::Click);
-                                    run_menu_cmd!(cmd);
+                                    run_menu_cmd!(si, cmd);
                                 }
                                 MenuOut::None => {}
                             }
                             return;
                         }
-                        let size = window.inner_size();
+                        let (w, h) = screens[si].size();
                         // A click on the warning popup dismisses it. The
                         // toaster answers against the box it drew, so it
                         // needs the point and nothing else.
@@ -2161,46 +1671,32 @@ fn main() {
                         }
                         // The layout editor captures all clicks while active
                         // (unless the settings window is open over it).
-                        if editor.active && !settings.open {
-                            match editor.mouse_down(
-                                mouse.0,
-                                mouse.1,
-                                size.width as f32,
-                                size.height as f32,
-                            ) {
+                        if screens[si].editor.active && !settings.open {
+                            match screens[si].editor.mouse_down(mouse.0, mouse.1, w, h) {
                                 widgets::editor::EditorHit::Save => {
-                                    if cur_board != (0, 0) {
-                                        save_board_cur!();
+                                    if screens[si].board != (0, 0) {
+                                        save_board_on!(si);
                                         return;
                                     }
-                                    // Overwrite the currently selected layout —
+                                    // Overwrite this screen's layaut —
                                     // only the changes, for this screen.
-                                    let name = config::current_layaut_name()
-                                        .unwrap_or_else(|| "default".to_string());
-                                    editor_save(
-                                        &mut editor,
-                                        &name,
-                                        false,
-                                        &mut layout_spec,
-                                        &mut active_ov,
-                                        &mut popup,
-                                        screen,
-                                    );
-                                    refresh_boards!();
+                                    let name = screens[si].layaut.clone();
+                                    editor_save(&mut screens[si], &name, false, &mut popup);
+                                    reload_layauts!();
                                 }
                                 widgets::editor::EditorHit::SaveAs => {
                                     // A board is a place, not a style: it
                                     // has no name to save as, so the same
                                     // save answers both buttons there.
-                                    if cur_board != (0, 0) {
-                                        save_board_cur!();
+                                    if screens[si].board != (0, 0) {
+                                        save_board_on!(si);
                                         return;
                                     }
-                                    editor.begin_naming(&mut focus_ctl);
+                                    screens[si].editor.begin_naming(&mut focus_ctl);
                                 }
                                 widgets::editor::EditorHit::Exit => {
                                     // Back to the settings window, GRID view.
-                                    editor.stop();
+                                    screens[si].stop_editor();
                                     settings.show_grid();
                                 }
                                 widgets::editor::EditorHit::Settings => {
@@ -2213,45 +1709,41 @@ fn main() {
                         // An open settings window captures all clicks —
                         // except the editor buttons, which share its plane.
                         if settings.open {
-                            if editor.active {
-                                if let Some(hit) = editor.buttons_hit(
-                                    mouse.0,
-                                    mouse.1,
-                                    size.width as f32,
-                                    size.height as f32,
-                                ) {
+                            if screens[si].editor.active {
+                                let hit =
+                                    screens[si].editor.buttons_hit(mouse.0, mouse.1, w, h);
+                                if let Some(hit) = hit {
                                     match hit {
                                         widgets::editor::EditorHit::Settings => {
                                             // Toggle: hide the window.
                                             settings.close();
                                         }
                                         widgets::editor::EditorHit::Save => {
-                                            if cur_board != (0, 0) {
-                                                save_board_cur!();
+                                            if screens[si].board != (0, 0) {
+                                                save_board_on!(si);
                                                 return;
                                             }
-                                            let name = config::current_layaut_name()
-                                                .unwrap_or_else(|| "default".to_string());
+                                            let name = screens[si].layaut.clone();
                                             editor_save(
-                                                &mut editor,
+                                                &mut screens[si],
                                                 &name,
                                                 false,
-                                                &mut layout_spec,
-                                                &mut active_ov,
                                                 &mut popup,
-                                                screen,
                                             );
+                                            reload_layauts!();
                                         }
                                         widgets::editor::EditorHit::SaveAs => {
-                                            if cur_board != (0, 0) {
-                                                save_board_cur!();
+                                            if screens[si].board != (0, 0) {
+                                                save_board_on!(si);
                                                 return;
                                             }
                                             settings.close();
-                                            editor.begin_naming(&mut focus_ctl);
+                                            screens[si]
+                                                .editor
+                                                .begin_naming(&mut focus_ctl);
                                         }
                                         widgets::editor::EditorHit::Exit => {
-                                            editor.stop();
+                                            screens[si].stop_editor();
                                             settings.show_grid();
                                         }
                                         widgets::editor::EditorHit::Handled => {}
@@ -2262,15 +1754,11 @@ fn main() {
                             if settings.click(
                                 mouse.0,
                                 mouse.1,
-                                size.width as f32,
-                                size.height as f32,
+                                w,
+                                h,
                                 Some(&mut focus_ctl),
                             ) {
-                                apply_config!(
-                                    layout_spec, active_ov, popup, audio, fonts,
-                                    font_scale, ui_font_scale, last_term_key, last_ui_key,
-                                    window
-                                );
+                                apply_config!();
                             }
                             // Whatever the press asked the application
                             // for — the body shared with the keyboard
@@ -2296,18 +1784,8 @@ fn main() {
                             _ => 1,
                         };
                         click_last = Some((Instant::now(), mouse.0, mouse.1));
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
-                        let hit = widgets::Panel::all()
-                            .into_iter()
-                            .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
-                        if let Some(panel) = hit {
+                        let layout = screens[si].content_layout();
+                        if let Some(pl) = layout.hit(mouse.0, mouse.1) {
                             // The widget's own answer decides who owns
                             // the hand: anything but None takes the
                             // capture (the contract `Widget::drag`
@@ -2316,7 +1794,8 @@ fn main() {
                             // while it captures; a scroll thumb asks
                             // for nothing and says so with Capture.
                             match widget_drag!(
-                                panel,
+                                si,
+                                pl.id,
                                 widgets::DragPhase::Begin,
                                 mouse.0,
                                 mouse.1
@@ -2324,11 +1803,11 @@ fn main() {
                                 widgets::Action::None => {}
                                 widgets::Action::TermSelect { op, col, row, base } => {
                                     apply_term_select!(op, col, row, base);
-                                    drag_capture = Some(panel);
+                                    screens[si].drag_capture = Some(pl.id);
                                     return;
                                 }
                                 _ => {
-                                    drag_capture = Some(panel);
+                                    screens[si].drag_capture = Some(pl.id);
                                     return;
                                 }
                             }
@@ -2336,8 +1815,7 @@ fn main() {
                         // The click is not delivered yet. Held and
                         // moved, it becomes a board drag; released where
                         // it went down, the widget under it gets it then.
-                        press_at = Some((mouse.0, mouse.1));
-                        let _ = size;
+                        screens[si].press_at = Some((mouse.0, mouse.1));
                     }
                     WindowEvent::MouseInput {
                         state: ElementState::Pressed,
@@ -2350,6 +1828,8 @@ fn main() {
                         // Action::PastePrimary. Primary may simply not
                         // exist (gamescope): then this is a quiet no-op.
                         // A pointer press hides the focus ring (F1 §1.2).
+                        let mouse = screens[si].mouse;
+                        ui_screen = si;
                         let f = focus_ctl.focused();
                         focus_ctl.focus(f);
                         // An open menu is a grab: the press only closes
@@ -2358,20 +1838,16 @@ fn main() {
                             menu = None;
                             return;
                         }
-                        if cube.is_some() || editor.active || settings.open {
+                        if screens[si].cube.is_some()
+                            || screens[si].editor.active
+                            || settings.open
+                        {
                             return;
                         }
-                        let size = window.inner_size();
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
-                        if term_panel
-                            .is_some_and(|p| layout.p(p).contains(mouse.0, mouse.1))
+                        let layout = screens[si].content_layout();
+                        if screens[si]
+                            .term_inst
+                            .is_some_and(|id| layout.of(id).contains(mouse.0, mouse.1))
                         {
                             paste_into_active!(nacelle::clipboard::Board::Primary);
                         }
@@ -2387,22 +1863,25 @@ fn main() {
                         // toolkit behaviour for a moved right-click.
                         // Like every pointer press it hides the focus
                         // ring first (F1 §1.2).
+                        let mouse = screens[si].mouse;
+                        ui_screen = si;
                         let f = focus_ctl.focused();
                         focus_ctl.focus(f);
                         menu = None;
-                        if cube.is_some() {
+                        if screens[si].cube.is_some() {
                             return;
                         }
                         // The SAVE AS field: the input object's menu.
                         // The editor is otherwise pointer-first and
                         // claims no other right-click in F1.
-                        if editor.active && !settings.open {
-                            if editor.naming.is_some()
-                                && editor
+                        if screens[si].editor.active && !settings.open {
+                            let over_field = screens[si].editor.naming.is_some()
+                                && screens[si]
+                                    .editor
                                     .naming_field
-                                    .map_or(false, |r| r.contains(mouse.0, mouse.1))
-                            {
-                                open_menu_at!(input_menu_entries!(), mouse.0, mouse.1);
+                                    .map_or(false, |r| r.contains(mouse.0, mouse.1));
+                            if over_field {
+                                open_menu_at!(si, input_menu_entries!(si), mouse.0, mouse.1);
                             }
                             return;
                         }
@@ -2411,37 +1890,23 @@ fn main() {
                         if settings.open {
                             return;
                         }
-                        let size = window.inner_size();
-                        let layout = outer_layout(
-                            cur_def!(),
-                            cur_def!().pick(screen),
-                            size.width as f32,
-                            size.height as f32,
-                            ui_padding,
-                        )
-                        .padded(ui_padding);
-                        let hit = widgets::Panel::all()
-                            .into_iter()
-                            .find(|p| layout.p(*p).contains(mouse.0, mouse.1));
-                        let Some(panel) = hit else { return };
+                        let layout = screens[si].content_layout();
+                        let Some(pl) = layout.hit(mouse.0, mouse.1) else { return };
                         // The content box the widget drew in (u2 §4.1);
                         // everything above it is the host's chrome —
                         // the title band and its padding.
-                        let content = panel_content
-                            .get(panel.idx())
-                            .copied()
-                            .flatten()
-                            .unwrap_or(layout.p(panel));
-                        if term_panel == Some(panel)
+                        let content =
+                            screens[si].widgets.content(pl.id).unwrap_or(pl.rect);
+                        if screens[si].term_inst == Some(pl.id)
                             && content.contains(mouse.0, mouse.1)
                         {
                             // Terminal panel: copy/paste/scrollback/tabs.
-                            open_menu_at!(terminal_menu_entries!(), mouse.0, mouse.1);
+                            open_menu_at!(si, terminal_menu_entries!(), mouse.0, mouse.1);
                         } else if mouse.1 < content.y {
                             // The title band: the existing Actions,
                             // menu-shaped (edit layout, settings, the
                             // neighbour boards).
-                            open_menu_at!(panel_menu_entries!(), mouse.0, mouse.1);
+                            open_menu_at!(si, panel_menu_entries!(si), mouse.0, mouse.1);
                         }
                         // A right-click no desktop rule claims does
                         // what it does today: nothing (widgets and
@@ -2460,7 +1925,7 @@ fn main() {
                     // prompt still types.
                     WindowEvent::Ime(ime) => {
                         use nacelle::object::text_input::InputMsg;
-                        if let Some(model) = editor.naming.as_mut() {
+                        if let Some(model) = screens[si].editor.naming.as_mut() {
                             match ime {
                                 Ime::Preedit(text, range) => {
                                     model.apply(InputMsg::Preedit(text, range));
@@ -2505,7 +1970,7 @@ fn main() {
                                         nacelle::sound::emit(
                                             nacelle::sound::Event::Click,
                                         );
-                                        run_menu_cmd!(cmd);
+                                        run_menu_cmd!(si, cmd);
                                     }
                                     MenuOut::None => {}
                                 }
@@ -2515,8 +1980,8 @@ fn main() {
                         // Layout editor: the SAVE AS prompt takes typing;
                         // otherwise ESC exits without saving. Nothing
                         // reaches the terminal.
-                        if editor.active && !settings.open {
-                            if editor.naming.is_some() {
+                        if screens[si].editor.active && !settings.open {
+                            if screens[si].editor.naming.is_some() {
                                 use nacelle::object::text_input::{
                                     self, InputEdited, InputMsg,
                                 };
@@ -2540,9 +2005,10 @@ fn main() {
                                         .lookup_over_greedy(&[Scope::Global], &kev)
                                         == Some(CMD_OPEN_MENU)
                                     {
-                                        if let Some(r) = editor.naming_field {
+                                        if let Some(r) = screens[si].editor.naming_field {
                                             open_menu_at!(
-                                                input_menu_entries!(),
+                                                si,
+                                                input_menu_entries!(si),
                                                 r.x,
                                                 r.bottom()
                                             );
@@ -2560,7 +2026,8 @@ fn main() {
                                 // committed text arrives as Ime::Commit
                                 // — a KeyboardInput insert alongside it
                                 // would double characters, so it drops.
-                                let composing = editor
+                                let composing = screens[si]
+                                    .editor
                                     .naming
                                     .as_ref()
                                     .map_or(false, |m| m.has_preedit());
@@ -2576,31 +2043,33 @@ fn main() {
                                     }
                                     m => m,
                                 };
-                                let out = editor
+                                let out = screens[si]
+                                    .editor
                                     .naming
                                     .as_mut()
                                     .map(|m| m.apply(msg))
                                     .unwrap_or(InputEdited::None);
                                 match out {
                                     InputEdited::Submit => {
-                                        let name = editor
+                                        let name = screens[si]
+                                            .editor
                                             .naming
                                             .as_ref()
                                             .map(|m| m.value().to_string())
                                             .unwrap_or_default();
                                         if !name.is_empty() {
                                             editor_save(
-                                                &mut editor,
+                                                &mut screens[si],
                                                 &name,
                                                 true,
-                                                &mut layout_spec,
-                                                &mut active_ov,
                                                 &mut popup,
-                                                screen,
                                             );
+                                            reload_layauts!();
                                         }
                                     }
-                                    InputEdited::Cancel => editor.close_naming(),
+                                    InputEdited::Cancel => {
+                                        screens[si].editor.close_naming()
+                                    }
                                     // The model answers with INTENTS;
                                     // the clipboard seam is the app's.
                                     InputEdited::CopyRequest { text, .. } => {
@@ -2624,7 +2093,9 @@ fn main() {
                                                     widgets::editor::Editor::layaut_name_char(c)
                                                 })
                                                 .collect();
-                                            if let Some(m) = editor.naming.as_mut() {
+                                            if let Some(m) =
+                                                screens[si].editor.naming.as_mut()
+                                            {
                                                 m.apply(InputMsg::Insert(text));
                                             }
                                         }
@@ -2634,7 +2105,7 @@ fn main() {
                             } else if let Key::Named(NamedKey::Escape) =
                                 key_event.logical_key
                             {
-                                editor.stop();
+                                screens[si].stop_editor();
                             }
                             return;
                         }
@@ -2653,11 +2124,7 @@ fn main() {
                                 use widgets::settings::KeyOut;
                                 match settings.key(&kev, &mut focus_ctl) {
                                     KeyOut::Changed => {
-                                        apply_config!(
-                                            layout_spec, active_ov, popup, audio,
-                                            fonts, font_scale, ui_font_scale,
-                                            last_term_key, last_ui_key, window
-                                        );
+                                        apply_config!();
                                         settings_after!();
                                     }
                                     KeyOut::Consumed => settings_after!(),
@@ -2672,8 +2139,8 @@ fn main() {
                         }
                         // Application shortcuts.
                         if let Key::Named(NamedKey::F11) = key_event.logical_key {
-                            let fs = window.fullscreen();
-                            window.set_fullscreen(if fs.is_some() {
+                            let fs = screens[si].window.fullscreen();
+                            screens[si].window.set_fullscreen(if fs.is_some() {
                                 None
                             } else {
                                 Some(Fullscreen::Borderless(None))
@@ -2718,7 +2185,7 @@ fn main() {
                                 Some(CMD_OPEN_MENU) => {
                                     // The focused control's menu at its
                                     // rect corner (F1 §4.2). No focus
-                                    // chain is wired in the desktop yet
+                                    // chain is wired into the boards yet
                                     // and the terminal owns the keyboard
                                     // at boot, so the focused control
                                     // IS the terminal view; its content
@@ -2726,12 +2193,18 @@ fn main() {
                                     // the §1 desktop router lands.
                                     // Fallback to the pointer when no
                                     // widget on this board holds one.
-                                    let r = term_panel
-                                        .and_then(|p| panel_content.get(p.idx()).copied())
-                                        .flatten();
-                                    let (ax, ay) =
-                                        r.map(|r| (r.x, r.y)).unwrap_or(mouse);
-                                    open_menu_at!(terminal_menu_entries!(), ax, ay);
+                                    let r = screens[si]
+                                        .term_inst
+                                        .and_then(|id| screens[si].widgets.content(id));
+                                    let (ax, ay) = r
+                                        .map(|r| (r.x, r.y))
+                                        .unwrap_or(screens[si].mouse);
+                                    open_menu_at!(
+                                        si,
+                                        terminal_menu_entries!(),
+                                        ax,
+                                        ay
+                                    );
                                     return;
                                 }
                                 _ => {}
@@ -2754,13 +2227,15 @@ fn main() {
                                 Key::Named(NamedKey::Escape) => (None, Some("ESC")),
                                 _ => (None, None),
                             };
-                            // Announced to every widget: which of them
-                            // draws an on-screen keyboard is not this
-                            // program's business, and the ones that
-                            // draw none ignore it (the interface's
-                            // default is to do nothing).
-                            for wg in widget_inst.iter_mut().flatten() {
-                                wg.key_feedback(ch, label);
+                            // Announced to every widget of every screen:
+                            // which of them draws an on-screen keyboard
+                            // is not this program's business, and the
+                            // ones that draw none ignore it (the
+                            // interface's default is to do nothing).
+                            for sc in screens.iter_mut() {
+                                for wg in sc.widgets.each_mut() {
+                                    wg.key_feedback(ch, label);
+                                }
                             }
                             // Typing: Enter and Backspace have their own
                             // sounds, every other key shares the rotating
@@ -2781,12 +2256,14 @@ fn main() {
                         }
                     }
                     WindowEvent::RedrawRequested => {
-                        if last_render.elapsed() < FRAME {
+                        if screens[si].last_render.elapsed() < FRAME {
                             return;
                         }
-                        last_render = Instant::now();
-                        if let Some(f) = fullscreen.as_mut() {
-                            f.poll();
+                        screens[si].last_render = Instant::now();
+                        if si == 0 {
+                            if let Some(f) = fullscreen.as_mut() {
+                                f.poll();
+                            }
                         }
                         // Live preview of the size sliders while dragging.
                         if let Some((tscale, uscale)) = settings.live_scales() {
@@ -2796,6 +2273,9 @@ fn main() {
                         // Live widget padding while the GRID view is open.
                         if let Some(p) = settings.live_padding() {
                             ui_padding = p as f32;
+                            for sc in screens.iter_mut() {
+                                sc.pad = ui_padding;
+                            }
                         }
                         // The layout is recomputed from the window size every
                         // frame (nacelle::flex), so moving the window to another
@@ -2824,98 +2304,9 @@ fn main() {
                             (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
                         let shell_cwd = sessions[active].as_mut().and_then(|s| s.cwd());
 
-                        // 3. Build the draw list.
-                        let size = window.inner_size();
-                        let (w, h) = (size.width as f32, size.height as f32);
+                        let (w, h) = screens[si].size();
                         if w < 8.0 || h < 8.0 {
                             return;
-                        }
-                        // The decoration plate follows the theme and the
-                        // surface, never the frame: kick a rebake when
-                        // either changes, collect it whenever it lands.
-                        let plate_want = (theme::epoch(), size.width, size.height);
-                        if plate_key != Some(plate_want) {
-                            plate_key = Some(plate_want);
-                            let (pw, ph) = (size.width, size.height);
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            plate_rx = Some(rx);
-                            // The bake reads the resolved theme once at
-                            // entry; a swap mid-bake re-kicks on the next
-                            // frame's epoch check. A stale worker's send
-                            // fails into a dropped receiver, silently.
-                            std::thread::spawn(move || {
-                                let _ = tx.send((
-                                    theme::plate::bake_backdrop(pw, ph),
-                                    theme::plate::bake_overlay(pw, ph),
-                                ));
-                            });
-                        }
-                        if let Some((back, over)) =
-                            plate_rx.as_ref().and_then(|rx| rx.try_recv().ok())
-                        {
-                            plate_rx = None;
-                            let mut install =
-                                |tex: &mut Option<(draw::ImageId, u32, u32)>,
-                                 baked: Option<nacelle::theme::Plate>,
-                                 which: &str| {
-                                    match baked {
-                                        Some(p) => {
-                                            let stale = match *tex {
-                                                Some((_, tw, th)) => (tw, th) != (p.w, p.h),
-                                                None => true,
-                                            };
-                                            if stale {
-                                                // destroy_texture waits for
-                                                // the device — theme swap and
-                                                // resize only, never a steady
-                                                // frame.
-                                                if let Some((old, _, _)) = tex.take() {
-                                                    gfx.destroy_texture(old);
-                                                }
-                                                *tex = Some((
-                                                    gfx.create_texture(p.w, p.h),
-                                                    p.w,
-                                                    p.h,
-                                                ));
-                                            }
-                                            if let Some((id, _, _)) = *tex {
-                                                gfx.update_texture(id, &p.rgba);
-                                            }
-                                            eprintln!(
-                                                "nacelle-desktop: {which} plate {}x{} baked in {:.1} ms",
-                                                p.w, p.h, p.bake_ms
-                                            );
-                                        }
-                                        // Every layer off: no plate, no quad.
-                                        None => {
-                                            if let Some((old, _, _)) = tex.take() {
-                                                gfx.destroy_texture(old);
-                                            }
-                                        }
-                                    }
-                                };
-                            install(&mut plate_tex, back, "backdrop");
-                            install(&mut overlay_tex, over, "overlay");
-                        }
-                        // Perform any deferred glyph-atlas reset at the frame
-                        // boundary, never mid-frame (see font.rs).
-                        fonts.begin_frame();
-                        dl.clear();
-                        // The backdrop plate is the first thing in the
-                        // list — z 0, under every panel, inside the glass
-                        // snapshot. White tint is the multiplicative
-                        // identity: the plate's pixels ARE the theme's
-                        // baked colours. Mid-resize it stretches for the
-                        // frame or two until the fresh bake lands.
-                        if let Some((id, _, _)) = plate_tex {
-                            dl.image(
-                                0.0,
-                                0.0,
-                                w,
-                                h,
-                                id,
-                                theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
-                            );
                         }
                         // Read in place, not copied. The snapshot carries
                         // the process table and every string in it, and
@@ -2924,687 +2315,72 @@ fn main() {
                         // the few milliseconds a frame takes. Nothing
                         // below locks it again — that would deadlock.
                         let snap_held = sys.lock().unwrap();
-                        let snap: &nacelle::telemetry::Snapshot = &snap_held;
-                        // Rings are withheld while board rects are
-                        // mid-flight (the cube ride) — set before any
-                        // registration is answered this frame.
-                        focus_ctl.set_ring_suppressed(cube.is_some());
-                        let mut ctx = widgets::Ctx {
-                            dl: &mut dl,
-                            fonts: &mut fonts,
-                            w,
-                            h,
-                            t: hashframe::clock(start.elapsed().as_secs_f64()),
-                            mouse,
+                        let clock = hashframe::clock(start.elapsed().as_secs_f64());
+                        let host = widgets::Host {
+                            snap: &snap_held,
+                            term: sessions[active].as_ref().map(|s| &s.term),
+                            tabs: &occupied,
+                            tab_active: active,
+                            shell_cwd: shell_cwd.clone(),
+                            // The SAME clock the draw context is given: a
+                            // widget animating off `host.t` while the
+                            // context ran on a virtual clock would put the
+                            // machine's speed back into a frame the pixel
+                            // guard is trying to compare.
+                            t: clock,
+                            window: (w, h),
+                        };
+                        let prefs = Prefs {
                             term_font_scale: font_scale,
                             ui_font_scale,
-                            panel_scale: 1.0,
-                            // The desktop's chain (F1 §1.2). Only the
-                            // settings window registers in this slice;
-                            // with it closed the chain stays empty and
-                            // the boot frame keeps its pixels (the ring
-                            // needs keyboard navigation to exist).
-                            focus: Some(&mut focus_ctl),
-                            // Requests are collected all through the
-                            // frame and answered at the end of it, below
-                            // — a tooltip is drawn over what it explains,
-                            // so it cannot be drawn while that is still
-                            // being drawn.
-                            tips: Some(&mut tips),
+                            frost_wash,
+                            t: clock,
                         };
+                        // The application's own interface is drawn on
+                        // ONE screen — the one the hand is on.
+                        let hosts_ui = si == ui_screen;
+                        let (grid_now, drained) = draw_screen(
+                            &mut screens[si],
+                            &mut fonts,
+                            &host,
+                            &mut settings,
+                            &mut popup,
+                            &mut menu,
+                            &mut tips,
+                            &mut focus_ctl,
+                            prefs,
+                            hosts_ui,
+                            // The pixel guard watches the first screen:
+                            // an armed run is a measurement of one
+                            // picture, and the first screen is the one
+                            // that always exists.
+                            si == 0,
+                        );
+                        drop(snap_held);
+                        // Every other screen's renderer holds its own
+                        // copy of the glyph atlas; whatever this frame
+                        // drained belongs to them too, or the next
+                        // window to draw text would arrive with holes
+                        // where this one took the rows.
+                        if let Some((y0, rows)) = drained {
+                            for (j, sc) in screens.iter_mut().enumerate() {
+                                if j != si {
+                                    sc.note_atlas_rows(y0, rows);
+                                }
+                            }
+                        }
+                        // The focus frame boundary (F1 §1.2): the chain
+                        // this frame's draws registered becomes the one
+                        // navigation walks — after the world has drawn,
+                        // before the next frame's events, so Tab never
+                        // sees a half-built chain. Only the screen that
+                        // hosts the interface registers anything.
+                        if hosts_ui {
+                            focus_ctl.begin_frame();
+                        }
 
-                        booting = widgets::boot::draw(&mut ctx);
-                        if !booting {
-                            // A finished turn lands first, so this frame
-                            // measures and draws the board it arrived at —
-                            // or starts the next leg of a longer journey.
-                            let ride_s = nacelle::deco::ride_secs();
-                            if let Some(c) = &cube {
-                                if c.t0.elapsed().as_secs_f32() >= ride_s {
-                                    let landed = c.a1 != 0.0;
-                                    if landed {
-                                        cur_board = c.to;
-                                        // The world's notion of "here"
-                                        // must land with us, or the next
-                                        // rebuild would send us home.
-                                        world.set_current(cur_board);
-                                        nacelle::base::set_panel_sizes(&cur_def!().sizes);
-                                    }
-                                    cube = None;
-                                    if landed {
-                                        if let Some(next) = go_queue.pop() {
-                                            step_to!(next);
-                                        }
-                                    } else {
-                                        go_queue.clear();
-                                    }
-                                }
-                            }
-                            let trans: Option<(bool, f32)> = pan.or_else(|| {
-                                cube.as_ref().map(|c| {
-                                    let t = if ride_s <= 0.0 {
-                                        1.0
-                                    } else {
-                                        (c.t0.elapsed().as_secs_f32() / ride_s)
-                                            .clamp(0.0, 1.0)
-                                    };
-                                    let e = nacelle::deco::ride_ease(t);
-                                    (c.horizontal, c.a0 + (c.a1 - c.a0) * e)
-                                })
-                            });
-                            let host = widgets::Host {
-                                snap: &snap,
-                                term: sessions[active].as_ref().map(|s| &s.term),
-                                tabs: &occupied,
-                                tab_active: active,
-                                shell_cwd: shell_cwd.clone(),
-                                // The SAME clock the draw context above
-                                // was given: a widget animating off
-                                // `host.t` while the context ran on a
-                                // virtual clock would put the machine's
-                                // speed back into a frame the pixel
-                                // guard is trying to compare.
-                                t: hashframe::clock(start.elapsed().as_secs_f64()),
-                                window: (w, h),
-                            };
-                            // Two passes, because a widget's height comes
-                            // from its content and its content is sized by
-                            // the width it is given. The first pass settles
-                            // the columns — their widths do not depend on
-                            // any of this — the widgets measure themselves
-                            // against those widths, and the second pass
-                            // hands each the height it asked for. A widget
-                            // that grows into whatever it gets measures as
-                            // None and shares what the others left.
-                            {
-                                // The probe must not see last frame's
-                                // answers, or each measurement would feed
-                                // the next and the panels would creep
-                                // frame by frame.
-                                nacelle::base::set_panel_intrinsic(&[]);
-                                let probe = if editor.active {
-                                    editor.layout(w, h)
-                                } else {
-                                    outer_layout(
-                                        cur_def!(),
-                                        cur_def!().pick(screen),
-                                        w,
-                                        h,
-                                        ui_padding,
-                                    )
-                                }
-                                .padded(ui_padding);
-                                // Standing on a fixture, the main-row
-                                // board rides along underneath, sharp and
-                                // in place, showing through the glass —
-                                // but intrinsic sizing is a GLOBAL table
-                                // keyed by panel, and without this its
-                                // widgets would only ever be measured
-                                // while home itself is the current board.
-                                // A widget lives on one board only, so
-                                // the two probes' panels never collide.
-                                let under_probe = if !editor.active && cur_board.1 != 0 {
-                                    let udef = def_of!((cur_board.0, 0));
-                                    Some(
-                                        outer_layout(udef, udef.pick(screen), w, h, ui_padding)
-                                            .padded(ui_padding),
-                                    )
-                                } else {
-                                    None
-                                };
-                                let mut wants: Vec<Option<f32>> = Vec::new();
-                                // What the container adds around each
-                                // panel, published beside the wants: the
-                                // layout engine adds it to the content
-                                // minimums, so a panel held at its
-                                // minimum keeps its last content row
-                                // BELOW the title band instead of losing
-                                // a band's worth of content to it.
-                                let mut chrome_px: Vec<f32> = Vec::new();
-                                for p in widgets::Panel::all() {
-                                    let here = probe.p(p);
-                                    let r = if here.x < w {
-                                        Some(here)
-                                    } else {
-                                        under_probe.as_ref().map(|u| u.p(p)).filter(|r| r.x < w)
-                                    };
-                                    // A panel no board placed sits at the
-                                    // off-screen rectangle; measuring it
-                                    // would run absent widgets for a
-                                    // height nobody will use.
-                                    let Some(r) = r else {
-                                        panel_scale[p.idx()] = 1.0;
-                                        wants.push(None);
-                                        chrome_px.push(0.0);
-                                        continue;
-                                    };
-                                    // Measured at scale 1, so the answer is
-                                    // the content's own size and not a
-                                    // reflection of the box it happens to
-                                    // be in this frame.
-                                    ctx.panel_scale = 1.0;
-                                    let (sizing, titled, scales) = widget_inst
-                                        .get_mut(p.idx())
-                                        .and_then(|w| w.as_mut())
-                                        .map(|wg| {
-                                            let s = wg.sizing(&mut ctx, &host);
-                                            let c = wg.chrome(&mut ctx, &host);
-                                            (
-                                                s,
-                                                c.title.is_some() || c.right.is_some(),
-                                                wg.scales_with_panel(),
-                                            )
-                                        })
-                                        .unwrap_or((widgets::Sizing::Reference, false, true));
-                                    // What the container will draw around
-                                    // the content: border, padding, and
-                                    // the title band when the widget
-                                    // declares one. A Content panel is
-                                    // made tall enough for BOTH, and the
-                                    // widget's scale is computed against
-                                    // the room the chrome leaves (u2 §4.2).
-                                    let chrome_extra =
-                                        nacelle::object::panel::chrome_extra(titled);
-                                    chrome_px.push(chrome_extra);
-                                    // Which edge of the panel changes the
-                                    // size of what is inside is the
-                                    // widget's answer, not one rule for
-                                    // all of them: a table of rows must
-                                    // not magnify when it is stretched
-                                    // downwards, and a clock must keep its
-                                    // proportions whichever way it is
-                                    // pulled.
-                                    let ws = {
-                                        static REF: OnceLock<TokenId> = OnceLock::new();
-                                        static LO: OnceLock<TokenId> = OnceLock::new();
-                                        static HI: OnceLock<TokenId> = OnceLock::new();
-                                        let t = nacelle::theme::resolved();
-                                        let rf = t.px(tok(&REF, "responsive.panel_ref_frac")).max(0.01);
-                                        let lo = t.px(tok(&LO, "responsive.scale_min")).max(0.05);
-                                        let hi = t.px(tok(&HI, "responsive.scale_max")).max(lo);
-                                        (r.w / (h * rf)).clamp(lo, hi)
-                                    };
-                                    let scale = match sizing {
-                                        widgets::Sizing::Rows => ws,
-                                        // A widget that does not follow
-                                        // panel_scale draws its measured
-                                        // content at scale 1 in any box, so
-                                        // its want must be published whole:
-                                        // shrinking the want without
-                                        // shrinking the drawing is how the
-                                        // control buttons left their panel
-                                        // at 1280x800.
-                                        widgets::Sizing::Content(_) if !scales => 1.0,
-                                        widgets::Sizing::Content(natural) => {
-                                            {
-                                            static LO2: OnceLock<TokenId> = OnceLock::new();
-                                            static HI2: OnceLock<TokenId> = OnceLock::new();
-                                            let t = nacelle::theme::resolved();
-                                            let lo = t.px(tok(&LO2, "responsive.scale_min")).max(0.05);
-                                            let hi = t.px(tok(&HI2, "responsive.scale_max")).max(lo);
-                                            ws.min(
-                                                (r.h - chrome_extra).max(1.0)
-                                                    / natural.max(1.0),
-                                            )
-                                            .clamp(lo, hi)
-                                        }
-                                        }
-                                        widgets::Sizing::Reference => {
-                                            ctx.panel_font_scale(&r, p)
-                                        }
-                                    };
-                                    panel_scale[p.idx()] = scale;
-                                    // The height a measured widget is given
-                                    // is its content at the scale it will
-                                    // be drawn with, PLUS the container
-                                    // around it — so the box hugs content
-                                    // and chrome together, and the band
-                                    // never overlaps the first row.
-                                    wants.push(match sizing {
-                                        widgets::Sizing::Content(natural) => {
-                                            Some(natural * scale + chrome_extra)
-                                        }
-                                        _ => None,
-                                    });
-                                    ctx.panel_scale = 1.0;
-                                }
-                                if !editor.active {
-                                    nacelle::base::set_panel_intrinsic(&wants);
-                                    nacelle::base::set_panel_chrome(&chrome_px);
-                                }
-                            }
-                            // The editor shows its edited rectangles (WYSIWYG).
-                            // Widgets draw inside the padded (content) rects;
-                            // the editor overlay shows the outer edges.
-                            let layout = if editor.active {
-                                editor.layout(w, h)
-                            } else {
-                                outer_layout(
-                                    cur_def!(),
-                                    cur_def!().pick(screen),
-                                    w,
-                                    h,
-                                    ui_padding,
-                                )
-                            }
-                            .padded(ui_padding);
-                            // What the terminal reported this frame, read
-                            // before the editor redraws it as a thumbnail.
-                            let grid_now: Option<(usize, usize)>;
-                            // Every widget drawn through the one contract:
-                            // the application no longer knows which is
-                            // which, only what the registry lists.
-                            {
-                                // Below this the ride is not drawn at all.
-                                // The guard is authored in the cube's
-                                // degrees; the flat slide, whose full
-                                // travel is 1.0 rather than 90, scales it
-                                // down by the same ratio.
-                                static EPSILON: OnceLock<TokenId> = OnceLock::new();
-                                let eps = nacelle::theme::resolved()
-                                    .px(tok(&EPSILON, "motion.board_ride.epsilon"));
-                                let active_trans = trans.filter(|(hz, a)| {
-                                    a.abs() > if *hz { eps } else { eps / 90.0 }
-                                });
-                                if let Some((horizontal, a)) = active_trans {
-                                    // Two boards in motion. Sideways they
-                                    // are the faces of a cube — a yaw and
-                                    // a perspective divide applied to the
-                                    // vertices the widgets have already
-                                    // emitted; up and down they slide
-                                    // flat. No widget knows either way.
-                                    let sign: i32 = if a > 0.0 { 1 } else { -1 };
-                                    let face_b =
-                                        cube.as_ref().map(|c| c.face_b).unwrap_or(
-                                            if horizontal {
-                                                (cur_board.0 + sign, cur_board.1)
-                                            } else {
-                                                (cur_board.0, cur_board.1 + sign)
-                                            },
-                                        );
-                                    // Per-face motion parameter: yaw for
-                                    // the cube, y-offset for the ride-in.
-                                    // Up and down nothing drags HOME along
-                                    // any more: the ordinary board (y == 0)
-                                    // holds perfectly still, and APPGRID or
-                                    // SEARCH AND AI rides in over it — the
-                                    // same picture their overlay layer will
-                                    // give under the project's own
-                                    // compositor.
-                                    let (ma, mb) = if horizontal {
-                                        (-a, 90.0 * sign as f32 - a)
-                                    } else {
-                                        (
-                                            if cur_board.1 == 0 { 0.0 } else { -a * h },
-                                            if face_b.1 == 0 {
-                                                0.0
-                                            } else {
-                                                (sign as f32 - a) * h
-                                            },
-                                        )
-                                    };
-                                    let mut faces = [(cur_board, ma), (face_b, mb)];
-                                    if horizontal && faces[0].1.abs() < faces[1].1.abs()
-                                    {
-                                        faces.swap(0, 1);
-                                    }
-                                    // The rider draws over the still board,
-                                    // so leaving a fixture the still board
-                                    // must be painted first.
-                                    if !horizontal && cur_board.1 != 0 {
-                                        faces.swap(0, 1);
-                                    }
-                                    // The space the cube turns in, one
-                                    // flat colour under the whole turn.
-                                    // It is emitted BEFORE the first face
-                                    // and therefore before any face's
-                                    // `start`, so no yaw ever touches it:
-                                    // the walls move, the void does not.
-                                    if horizontal {
-                                        let void = nacelle::deco::ride_void();
-                                        ctx.dl.rect(0.0, 0.0, w, h, void);
-                                    }
-                                    for (b, m) in faces {
-                                        if !has_board!(b) {
-                                            continue;
-                                        }
-                                        let start = ctx.dl.verts.len();
-                                        // Sideways each face is a WALL of a
-                                        // solid and carries its own ground
-                                        // — what the theme puts behind a
-                                        // board, the board's own field and
-                                        // the decoration plate on it —
-                                        // emitted before the panels so the
-                                        // yaw and the perspective divide
-                                        // below take ground and panels
-                                        // together.
-                                        // Standing still, and riding up or
-                                        // down, a board paints no ground at
-                                        // all: the frame's own clear and
-                                        // plate are already there and must
-                                        // stay visible under the fixture
-                                        // that rides in over them.
-                                        // Fixtures carry a face material on
-                                        // top — frosted glass: whatever is
-                                        // beneath shows through it blurred.
-                                        // The glass is sampled by screen
-                                        // position, so the ride may carry
-                                        // the quad and the frost stays put.
-                                        if horizontal {
-                                            nacelle::deco::board_ground(
-                                                ctx.dl,
-                                                w,
-                                                h,
-                                                plate_tex.map(|(id, _, _)| id),
-                                            );
-                                        }
-                                        let thm = nacelle::theme::resolved();
-                                        if b.1 != 0 {
-                                            nacelle::deco::fixture_glass(
-                                                ctx.dl, w, h, frost_wash,
-                                            );
-                                        }
-                                        let bdef = def_of!(b);
-                                        let blay = outer_layout(
-                                            bdef,
-                                            bdef.pick(screen),
-                                            w,
-                                            h,
-                                            ui_padding,
-                                        )
-                                        .padded(ui_padding);
-                                        for panel in widgets::Panel::all() {
-                                            let r = blay.p(panel);
-                                            if r.x >= w {
-                                                continue;
-                                            }
-                                            ctx.panel_scale = if b == cur_board {
-                                                panel_scale[panel.idx()]
-                                            } else {
-                                                ctx.panel_font_scale(&r, panel)
-                                            };
-                                            if let Some(wg) = widget_inst
-                                                .get_mut(panel.idx())
-                                                .and_then(|w| w.as_mut())
-                                            {
-                                                let content = draw_panel(
-                                                    &mut ctx,
-                                                    wg.as_mut(),
-                                                    r,
-                                                    &host,
-                                                    panel,
-                                                );
-                                                // Input belongs to the
-                                                // board being stood on,
-                                                // not the one riding by.
-                                                if b == cur_board {
-                                                    panel_content[panel.idx()] =
-                                                        Some(content);
-                                                }
-                                            }
-                                            ctx.panel_scale = 1.0;
-                                        }
-                                        if horizontal {
-                                            static PERSP: OnceLock<TokenId> =
-                                                OnceLock::new();
-                                            static SHADE_MIN: OnceLock<TokenId> =
-                                                OnceLock::new();
-                                            let rad = m.to_radians();
-                                            let (sinp, cosp) = rad.sin_cos();
-                                            let rr = w / 2.0;
-                                            let fl = w * thm.px(tok(
-                                                &PERSP,
-                                                "motion.board_ride.perspective",
-                                            ));
-                                            let smin = thm.px(tok(
-                                                &SHADE_MIN,
-                                                "boardswitch.shade_min",
-                                            ));
-                                            let shade =
-                                                smin + (1.0 - smin) * cosp.max(0.0);
-                                            // The turned-away wall settles
-                                            // toward the very colour painted
-                                            // behind the cube, not toward
-                                            // #000000: edge-on it melts into
-                                            // the space it turns in, and a
-                                            // light theme rides through its
-                                            // own dark, never through grey.
-                                            let void = nacelle::deco::ride_void();
-                                            for v in &mut ctx.dl.verts[start..] {
-                                                let u = v.pos[0] - rr;
-                                                let x3 = u * cosp + rr * sinp;
-                                                let depth =
-                                                    rr - (rr * cosp - u * sinp);
-                                                let sc = fl / (fl + depth);
-                                                v.pos[0] = rr + x3 * sc;
-                                                v.pos[1] =
-                                                    h / 2.0 + (v.pos[1] - h / 2.0) * sc;
-                                                v.color[0] = void.r
-                                                    + (v.color[0] - void.r) * shade;
-                                                v.color[1] = void.g
-                                                    + (v.color[1] - void.g) * shade;
-                                                v.color[2] = void.b
-                                                    + (v.color[2] - void.b) * shade;
-                                            }
-                                        } else {
-                                            for v in &mut ctx.dl.verts[start..] {
-                                                v.pos[1] += m;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    if cur_board.1 != 0 {
-                                        // Standing on APPGRID or SEARCH
-                                        // AND AI: the main-row board
-                                        // stays exactly where it was,
-                                        // showing through the frosted
-                                        // glass the fixture's panels
-                                        // sit on.
-                                        let under = (cur_board.0, 0);
-                                        let udef = def_of!(under);
-                                        let ulay = outer_layout(
-                                            udef,
-                                            udef.pick(screen),
-                                            w,
-                                            h,
-                                            ui_padding,
-                                        )
-                                        .padded(ui_padding);
-                                        for panel in widgets::Panel::all() {
-                                            let r = ulay.p(panel);
-                                            if r.x >= w {
-                                                continue;
-                                            }
-                                            ctx.panel_scale = panel_scale[panel.idx()];
-                                            if let Some(wg) = widget_inst
-                                                .get_mut(panel.idx())
-                                                .and_then(|w| w.as_mut())
-                                            {
-                                                // A widget lives on one
-                                                // board only, so the ride-
-                                                // under board's boxes and
-                                                // the fixture's never
-                                                // collide in this table.
-                                                panel_content[panel.idx()] =
-                                                    Some(draw_panel(
-                                                        &mut ctx,
-                                                        wg.as_mut(),
-                                                        r,
-                                                        &host,
-                                                        panel,
-                                                    ));
-                                            }
-                                            ctx.panel_scale = 1.0;
-                                        }
-                                        static GLASS_TINT: OnceLock<TokenId> =
-                                            OnceLock::new();
-                                        static GLASS_WASH: OnceLock<TokenId> =
-                                            OnceLock::new();
-                                        let thm = nacelle::theme::resolved();
-                                        ctx.dl.blur(
-                                            0.0,
-                                            0.0,
-                                            w,
-                                            h,
-                                            tcol(thm.color(tok(
-                                                &GLASS_TINT,
-                                                "elev.fixture.glass.tint",
-                                            ))),
-                                        );
-                                        // The theme's own wash; the user's
-                                        // BlurOpacity scales its alpha.
-                                        let wash = thm.color(tok(
-                                            &GLASS_WASH,
-                                            "elev.fixture.glass.wash",
-                                        ));
-                                        if wash.a * frost_wash > 0.0 {
-                                            ctx.dl.rect(
-                                                0.0,
-                                                0.0,
-                                                w,
-                                                h,
-                                                tcol(wash).alpha(wash.a * frost_wash),
-                                            );
-                                        }
-                                    }
-                                    for panel in widgets::Panel::all() {
-                                        let r = layout.p(panel);
-                                        // Hidden here or living on another
-                                        // board: not drawn, so a terminal
-                                        // elsewhere keeps its PTY size.
-                                        if r.x >= w {
-                                            continue;
-                                        }
-                                        ctx.panel_scale = panel_scale[panel.idx()];
-                                        if let Some(wg) = widget_inst
-                                            .get_mut(panel.idx())
-                                            .and_then(|w| w.as_mut())
-                                        {
-                                            panel_content[panel.idx()] =
-                                                Some(draw_panel(
-                                                    &mut ctx,
-                                                    wg.as_mut(),
-                                                    r,
-                                                    &host,
-                                                    panel,
-                                                ));
-                                        }
-                                        ctx.panel_scale = 1.0;
-                                    }
-                                }
-                                // Read the grid BEFORE the editor runs the
-                                // same widgets again at miniature rects:
-                                // the terminal reports whatever it drew
-                                // last, and opening ADD WIDGET would
-                                // otherwise resize it to a thumbnail.
-                                // The widget that reports one IS the
-                                // terminal view — the capability is the
-                                // whole of what this program knows
-                                // about it.
-                                let held = widget_inst.iter().enumerate().find_map(
-                                    |(i, w)| {
-                                        w.as_ref()
-                                            .and_then(|w| w.grid())
-                                            .map(|g| (widgets::Panel(i as u16), g))
-                                    },
-                                );
-                                term_panel = held.map(|(p, _)| p);
-                                grid_now = held.map(|(_, g)| g);
-                                // Grid overlay + editor controls on top of
-                                // the live panels; the closure draws live
-                                // miniatures in the ADD WIDGET window.
-                                if editor.active {
-                                    editor.draw(&mut ctx, |ctx, panel, r| {
-                                        let p = widgets::Panel(panel as u16);
-                                        // ADD WIDGET previews widgets from
-                                        // outside the boards; they are
-                                        // built here on first sight and
-                                        // dropped again at the next sync
-                                        // unless they get placed.
-                                        if widget_inst[p.idx()].is_none() {
-                                            widget_inst[p.idx()] = make_widget(p);
-                                        }
-                                        ctx.panel_scale = ctx.panel_font_scale(&r, p);
-                                        if let Some(wg) =
-                                            widget_inst.get_mut(p.idx()).and_then(|w| w.as_mut())
-                                        {
-                                            // A live miniature with its
-                                            // container, exactly as it
-                                            // will look placed; the
-                                            // input table is NOT touched
-                                            // — these rects are the ADD
-                                            // WIDGET window's.
-                                            draw_panel(ctx, wg.as_mut(), r, &host, p);
-                                        }
-                                        ctx.panel_scale = 1.0;
-                                    });
-                                }
-                            }
-                            let (cols, rows) = grid_now.unwrap_or(grid);
-                            // The BOARDS view draws whatever this hands
-                            // it: every board as it would look here and
-                            // now, the current one marked.
-                            // Drawn HERE only while no hall is hosting it
-                            // — the window is one, and it is drawn once.
-                            if settings.open && settings_host.is_none() {
-                                settings.boards = board_thumbs!(w, h);
-                            }
-                            if settings_host.is_none() {
-                                settings.draw(&mut ctx);
-                            }
-                            // With the settings window open over the editor
-                            // its buttons share the window's plane.
-                            if editor.active && settings.open {
-                                editor.draw_buttons(&mut ctx);
-                            }
-                            // Warning popup on the very top.
-                            popup.draw(&mut ctx);
-                            // The open context menu draws after
-                            // EVERYTHING interactive (F1 §4.3): the
-                            // draw list is immediate, draw order is
-                            // z-order, and the menu is the top layer —
-                            // anything drawn later would sit on it.
-                            // Only the theme's overlay plate follows:
-                            // it covers panels, popovers and content
-                            // alike by design.
-                            if let Some(m) = menu.as_mut() {
-                                m.draw(&mut ctx);
-                            }
-                            // Then the tooltip, over the menu as over
-                            // everything else — taken OUT of the context
-                            // first, because the manager cannot be lent
-                            // to the frame and drawn into the same frame
-                            // at once, and because nothing drawn after
-                            // this point may file a request it would be
-                            // too late to answer.
-                            if let Some(t) = ctx.tips.take() {
-                                // A menu covers what is under it, and
-                                // explaining something the user cannot
-                                // see is noise: requests filed under an
-                                // open menu go down with it (F2 §8.1).
-                                if menu.is_some() {
-                                    t.clear();
-                                }
-                                t.draw(&mut ctx);
-                            }
-                            // The overlay plate is the LAST themed thing
-                            // in the list — z 70, one quad over panels,
-                            // popovers and content alike: scanlines,
-                            // grain, the top vignette. White tint, same
-                            // as the backdrop: the plate's pixels ARE
-                            // the theme's baked colours.
-                            if let Some((id, _, _)) = overlay_tex {
-                                ctx.dl.image(
-                                    0.0,
-                                    0.0,
-                                    w,
-                                    h,
-                                    id,
-                                    theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
-                                );
-                            }
-
-                            // Fit all session grids to the panel size.
+                        // Fit all session grids to the panel size.
+                        if let Some((cols, rows)) = grid_now {
                             if (cols, rows) != grid {
                                 grid = (cols, rows);
                                 for s in sessions.iter_mut().flatten() {
@@ -3613,13 +2389,6 @@ fn main() {
                                 }
                             }
                         }
-
-                        // The focus frame boundary (F1 §1.2): the chain
-                        // this frame's draws registered becomes the one
-                        // navigation walks — after the world has drawn,
-                        // before the next frame's events, so Tab never
-                        // sees a half-built chain.
-                        focus_ctl.begin_frame();
 
                         // 4. Sound preferences changed in the SOUND view
                         // apply immediately, so dragging the volume
@@ -3631,7 +2400,9 @@ fn main() {
                         if settings.blur_dirty {
                             settings.blur_dirty = false;
                             let (radius, opacity) = settings.blur_settings();
-                            gfx.set_blur_radius(radius);
+                            for sc in screens.iter_mut() {
+                                sc.set_blur_radius(radius);
+                            }
                             frost_wash = opacity as f32 / 100.0;
                         }
                         if settings.sound_dirty {
@@ -3655,12 +2426,12 @@ fn main() {
                         // itself by the window's scale factor (§3.7's
                         // logical-px trap, handled by the type).
                         {
-                            let want_ime = editor.naming.is_some();
+                            let want_ime = screens[si].editor.naming.is_some();
                             if want_ime != ime_allowed {
                                 ime_allowed = want_ime;
-                                window.set_ime_allowed(want_ime);
+                                screens[si].window.set_ime_allowed(want_ime);
                                 if want_ime {
-                                    window.set_ime_purpose(
+                                    screens[si].window.set_ime_purpose(
                                         winit::window::ImePurpose::Normal,
                                     );
                                 } else {
@@ -3668,7 +2439,7 @@ fn main() {
                                 }
                             }
                             if want_ime {
-                                if let Some(cr) = editor.naming_caret {
+                                if let Some(cr) = screens[si].editor.naming_caret {
                                     let area = (
                                         cr.x as i32,
                                         cr.y as i32,
@@ -3677,7 +2448,7 @@ fn main() {
                                     );
                                     if ime_area != Some(area) {
                                         ime_area = Some(area);
-                                        window.set_ime_cursor_area(
+                                        screens[si].window.set_ime_cursor_area(
                                             winit::dpi::PhysicalPosition::new(
                                                 area.0, area.1,
                                             ),
@@ -3699,41 +2470,10 @@ fn main() {
                                 a.play(*e);
                             }
                         }
-
-                        // 6. Render.
-                        // Only the touched rows travel — a glyph-churn frame
-                        // re-uploads a shelf, not the whole four megabytes.
-                        let atlas_rows = fonts.take_dirty_rows();
-                        // A hall's renderer has its own copy of the glyph
-                        // atlas; whatever this frame drained belongs to it
-                        // too, or the settings window would arrive there
-                        // with holes where the main window took the rows.
-                        if let Some((y0, rows)) = atlas_rows {
-                            for s in salas.iter_mut() {
-                                s.note_atlas_rows(y0, rows);
-                            }
-                        }
-                        let fsize = window.inner_size();
-                        // The swapchain clear is the absolute bed — one
-                        // rung below the board's own fill; the master
-                        // forces its alpha to 1.0.
-                        static CLEAR: OnceLock<TokenId> = OnceLock::new();
-                        let clear = nacelle::theme::resolved()
-                            .bed(tok(&CLEAR, "surface.void"));
-                        // The pixel guard, before a triangle leaves for the
-                        // GPU: unarmed it is one atomic load.
-                        hashframe::observe(&dl);
-                        gfx.render(
-                            fsize.width,
-                            fsize.height,
-                            &dl.verts,
-                            &dl.runs,
-                            atlas_rows.map(|(y0, rows)| (fonts.atlas.as_slice(), y0, rows)),
-                            [clear.r, clear.g, clear.b, 1.0],
-                        );
                     }
                     _ => {}
-                },
+                    }
+                }
                 Event::AboutToWait => {
                     // The loop sleeps between frames instead of spinning:
                     // asking for a redraw the moment the last one landed
@@ -3744,11 +2484,8 @@ fn main() {
                         // burn through the backlog at full speed; the
                         // cadence simply restarts from now.
                         next_frame = now + FRAME;
-                        window.request_redraw();
-                        // The halls ride the same cadence; their frame
-                        // is two textured quads, so this costs nothing.
-                        for s in &salas {
-                            s.window.request_redraw();
+                        for sc in screens.iter() {
+                            sc.window.request_redraw();
                         }
                     }
                     elwt.set_control_flow(ControlFlow::WaitUntil(next_frame));
@@ -3768,112 +2505,576 @@ fn main() {
         .expect("event loop ended with an error");
 }
 
-/// Draws one panel through the one contract (u2 §4.1): asks the widget
-/// for its chrome, has the host's container drawn — material, ring,
-/// title band — and hands the widget the CONTENT BOX the container
-/// left. Answers that box, because it is also the rect the panel's
-/// `click` and `wheel` must later receive: hit-testing against any
-/// other rectangle would land clicks on chrome the widget cannot see.
-fn draw_panel(
-    ctx: &mut nacelle::Ctx,
-    wg: &mut dyn widgets::Widget,
-    r: widgets::Rect,
-    host: &widgets::Host,
-    panel: widgets::Panel,
-) -> widgets::Rect {
-    let chrome = wg.chrome(ctx, host);
-    let content = nacelle::object::panel::draw(ctx, r, &chrome, panel.idx());
-    wg.draw(ctx, content, host);
-    content
-}
-
-/// Builds one widget instance by name. A widget is its file: the
-/// compiled library wins where there is one — it exists precisely
-/// because a script could not do that job — and the script otherwise.
-/// None when the file fails to load: the panel takes part in the
-/// layout and draws nothing.
-fn make_widget(p: widgets::Panel) -> Option<Box<dyn widgets::Widget>> {
-    // The toolkit's factory: linked-in first (disk is never asked
-    // about the four core widgets, so deleting files cannot take them
-    // away), then a compiled plugin, then the script.
-    config::widget_factory().make(p.name())
-}
-
-/// The current screen key: monitor resolution + diagonal in inches.
+/// ONE SCREEN'S FRAME.
 ///
-/// Asked once per screen change, never per frame: it queries the
-/// display server for the monitor list and then the monitor's physical
-/// size, and the layout code wants it in a dozen places. Doing that
-/// inside the frame put a round trip and a sysfs scan between the
-/// widgets and the picture.
-fn screen_key(window: &winit::window::Window) -> (u32, u32, u32) {
-    match window.current_monitor().or_else(|| window.primary_monitor()) {
-        Some(m) => {
-            let s = m.size();
-            let diag = m
-                .name()
-                .map(|n| config::monitor_diag_inches(&n))
-                .unwrap_or(0);
-            (s.width, s.height, diag)
-        }
-        None => (0, 0, 0),
+/// The whole picture a monitor shows: its board (or the two boards of a
+/// ride), the widgets standing on them, the layout editor over them,
+/// and — on the one screen hosting it — the application's own interface
+/// above everything. Every screen runs this; the first one is not a
+/// special case, it is simply the one the pixel guard watches.
+///
+/// Answers what the terminal view reported (so the PTYs can be resized)
+/// and which glyph-atlas rows this frame drained (so the other screens'
+/// renderers can catch their own copies up).
+#[allow(clippy::too_many_arguments)]
+fn draw_screen(
+    sc: &mut Screen,
+    fonts: &mut font::FontSystem,
+    host: &widgets::Host,
+    settings: &mut widgets::settings::Settings,
+    popup: &mut widgets::popup::Popup,
+    menu: &mut Option<nacelle::object::menu::MenuState>,
+    tips: &mut nacelle::object::tooltip::Tooltips,
+    focus_ctl: &mut nacelle::focus::FocusCtl,
+    prefs: Prefs,
+    hosts_ui: bool,
+    observe: bool,
+) -> (Option<(usize, usize)>, Option<(u32, u32)>) {
+    let (w, h) = sc.size();
+    // The theme engine bakes every u-derived length from the window
+    // height (§2.2). Told here, for the screen about to draw, because
+    // two monitors are two heights and one global bake cannot be both;
+    // a height that lands on the same u is deduplicated inside, so a
+    // one-screen desktop pays nothing for the call.
+    nacelle::theme::set_viewport(h, 1.0);
+    // The decoration plate follows the theme and the surface, never the
+    // frame: a rebake is kicked when either changes and collected
+    // whenever it lands.
+    sc.poll_plates();
+    // Perform any deferred glyph-atlas reset at the frame boundary,
+    // never mid-frame (see font.rs).
+    fonts.begin_frame();
+    // The list is taken OUT of the screen for the frame, so the drawing
+    // below may hold it and the screen's own state at the same time; it
+    // goes back with its capacity at the end, and a steady frame
+    // allocates nothing.
+    let mut dl = std::mem::replace(&mut sc.dl, draw::DrawList::new());
+    dl.clear();
+    let white = theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    // The backdrop plate is the first thing in the list — z 0, under
+    // every panel, inside the glass snapshot. White tint is the
+    // multiplicative identity: the plate's pixels ARE the theme's baked
+    // colours. Mid-resize it stretches for the frame or two until the
+    // fresh bake lands.
+    let backdrop = sc.backdrop_id();
+    if let Some(id) = backdrop {
+        dl.image(0.0, 0.0, w, h, id, white);
     }
-}
+    // Rings are withheld while board rects are mid-flight (the cube
+    // ride) — set before any registration is answered this frame.
+    focus_ctl.set_ring_suppressed(sc.cube.is_some());
+    let mut ctx = widgets::Ctx {
+        dl: &mut dl,
+        fonts,
+        w,
+        h,
+        t: prefs.t,
+        mouse: sc.mouse,
+        term_font_scale: prefs.term_font_scale,
+        ui_font_scale: prefs.ui_font_scale,
+        panel_scale: 1.0,
+        // The desktop's one chain (F1 §1.2) belongs to the screen the
+        // interface is on; the others register nothing, so a second
+        // monitor cannot put a second copy of every control into the
+        // Tab order.
+        focus: hosts_ui.then_some(&mut *focus_ctl),
+        // Requests are collected all through the frame and answered at
+        // the end of it, below — a tooltip is drawn over what it
+        // explains, so it cannot be drawn while that is still being
+        // drawn. One manager cannot answer to two windows at once.
+        tips: hosts_ui.then_some(&mut *tips),
+    };
 
-/// Outer layout for the current frame: the flex engine result plus the
-/// per-screen override panels (before padding).
-fn outer_layout(
-    def: &config::LayoutDef,
-    active: Option<&config::ResOverride>,
-    w: f32,
-    h: f32,
-    pad: f32,
-) -> widgets::Layout {
-    let mut l = flex::compute(w, h, &def.base, pad);
-    if let Some(ov) = active {
-        for (p, ps) in &ov.panels {
-            l.set(
-                *p,
-                widgets::Rect::new(
-                    ps.x / 100.0 * w,
-                    ps.y / 100.0 * h,
-                    ps.w / 100.0 * w,
-                    ps.h / 100.0 * h,
-                ),
-            );
+    let mut grid_now: Option<(usize, usize)> = None;
+    sc.booting = widgets::boot::draw(&mut ctx);
+    if !sc.booting {
+        // A finished turn lands first, so this frame measures and draws
+        // the board it arrived at — or starts the next leg of a longer
+        // journey.
+        let ride_s = nacelle::deco::ride_secs();
+        let landing = sc
+            .cube
+            .as_ref()
+            .filter(|c| c.t0.elapsed().as_secs_f32() >= ride_s)
+            .map(|c| (c.a1 != 0.0, c.to));
+        if let Some((landed, to)) = landing {
+            sc.cube = None;
+            if landed {
+                sc.board = to;
+                // The world's notion of "here" must land with us, or
+                // the next rebuild would send us home.
+                sc.world.set_current(to);
+                let sizes = sc.cur_def().sizes.clone();
+                nacelle::base::set_panel_sizes(&sizes);
+                if let Some(next) = sc.go_queue.pop() {
+                    sc.step_to(next);
+                }
+            } else {
+                sc.go_queue.clear();
+            }
+        }
+        let trans: Option<(bool, f32)> = sc.pan.or_else(|| {
+            sc.cube.as_ref().map(|c| {
+                let t = if ride_s <= 0.0 {
+                    1.0
+                } else {
+                    (c.t0.elapsed().as_secs_f32() / ride_s).clamp(0.0, 1.0)
+                };
+                let e = nacelle::deco::ride_ease(t);
+                (c.horizontal, c.a0 + (c.a1 - c.a0) * e)
+            })
+        });
+        // Two passes, because a widget's height comes from its content
+        // and its content is sized by the width it is given. The first
+        // pass settles the columns — their widths do not depend on any
+        // of this — the widgets measure themselves against those
+        // widths, and the second pass hands each the height it asked
+        // for. A widget that grows into whatever it gets measures as
+        // None and shares what the others left.
+        {
+            // The probe must not see last frame's answers, or each
+            // measurement would feed the next and the panels would
+            // creep frame by frame.
+            nacelle::base::set_panel_intrinsic(&[]);
+            let probe = sc.content_layout();
+            // Standing on a fixture, the main-row board rides along
+            // underneath, sharp and in place, showing through the glass
+            // — but intrinsic sizing is a GLOBAL table keyed by panel,
+            // and without this its widgets would only ever be measured
+            // while home itself is the current board. A widget lives on
+            // one board only, so the two probes' panels never collide.
+            let under_probe = if !sc.editor.active && sc.board.1 != 0 {
+                Some(sc.solve((sc.board.0, 0)).padded(sc.pad))
+            } else {
+                None
+            };
+            let mut wants: Vec<Option<f32>> = Vec::new();
+            // What the container adds around each panel, published
+            // beside the wants: the layout engine adds it to the
+            // content minimums, so a panel held at its minimum keeps
+            // its last content row BELOW the title band instead of
+            // losing a band's worth of content to it.
+            let mut chrome_px: Vec<f32> = Vec::new();
+            for p in widgets::Panel::all() {
+                // Every placement of this widget that is actually on
+                // screen — here first, and on the board riding along
+                // underneath otherwise.
+                let here: Vec<_> = probe
+                    .instances_of(p)
+                    .into_iter()
+                    .filter(|pl| pl.rect.x < w)
+                    .collect();
+                let placed = if here.is_empty() {
+                    under_probe
+                        .as_ref()
+                        .map(|u| {
+                            u.instances_of(p)
+                                .into_iter()
+                                .filter(|pl| pl.rect.x < w)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    here
+                };
+                // A panel no board placed sits at the off-screen
+                // rectangle; measuring it would run absent widgets for
+                // a height nobody will use.
+                let Some(first) = placed.first().copied() else {
+                    wants.push(None);
+                    chrome_px.push(0.0);
+                    continue;
+                };
+                // Measured at scale 1, so the answer is the content's
+                // own size and not a reflection of the box it happens
+                // to be in this frame.
+                ctx.panel_scale = 1.0;
+                let (sizing, titled, scales) = sc
+                    .widgets
+                    .get_mut(first.id)
+                    .map(|wg| {
+                        let s = wg.sizing(&mut ctx, host);
+                        let c = wg.chrome(&mut ctx, host);
+                        (s, c.title.is_some() || c.right.is_some(), wg.scales_with_panel())
+                    })
+                    .unwrap_or((widgets::Sizing::Reference, false, true));
+                // What the container will draw around the content:
+                // border, padding, and the title band when the widget
+                // declares one. A Content panel is made tall enough for
+                // BOTH, and the widget's scale is computed against the
+                // room the chrome leaves (u2 §4.2).
+                let chrome_extra = nacelle::object::panel::chrome_extra(titled);
+                chrome_px.push(chrome_extra);
+                // Which edge of the panel changes the size of what is
+                // inside is the widget's answer, not one rule for all
+                // of them: a table of rows must not magnify when it is
+                // stretched downwards, and a clock must keep its
+                // proportions whichever way it is pulled.
+                let scale_of = |rect: &widgets::Rect, ctx: &mut nacelle::Ctx| -> f32 {
+                    static REF: OnceLock<TokenId> = OnceLock::new();
+                    static LO: OnceLock<TokenId> = OnceLock::new();
+                    static HI: OnceLock<TokenId> = OnceLock::new();
+                    let t = nacelle::theme::resolved();
+                    let rf = t.px(tok(&REF, "responsive.panel_ref_frac")).max(0.01);
+                    let lo = t.px(tok(&LO, "responsive.scale_min")).max(0.05);
+                    let hi = t.px(tok(&HI, "responsive.scale_max")).max(lo);
+                    let ws = (rect.w / (h * rf)).clamp(lo, hi);
+                    match sizing {
+                        widgets::Sizing::Rows => ws,
+                        // A widget that does not follow panel_scale
+                        // draws its measured content at scale 1 in any
+                        // box, so its want must be published whole:
+                        // shrinking the want without shrinking the
+                        // drawing is how the control buttons left their
+                        // panel at 1280x800.
+                        widgets::Sizing::Content(_) if !scales => 1.0,
+                        widgets::Sizing::Content(natural) => ws
+                            .min((rect.h - chrome_extra).max(1.0) / natural.max(1.0))
+                            .clamp(lo, hi),
+                        widgets::Sizing::Reference => ctx.panel_font_scale(rect, p),
+                    }
+                };
+                // Every placement gets its own scale: two terminals in
+                // two boxes are two sizes of text.
+                for pl in placed.iter() {
+                    let s = scale_of(&pl.rect, &mut ctx);
+                    sc.widgets.set_scale(pl.id, s);
+                }
+                let scale = sc.widgets.scale(first.id);
+                // The height a measured widget is given is its content
+                // at the scale it will be drawn with, PLUS the
+                // container around it — so the box hugs content and
+                // chrome together, and the band never overlaps the
+                // first row.
+                wants.push(match sizing {
+                    widgets::Sizing::Content(natural) => {
+                        Some(natural * scale + chrome_extra)
+                    }
+                    _ => None,
+                });
+                ctx.panel_scale = 1.0;
+            }
+            if !sc.editor.active {
+                nacelle::base::set_panel_intrinsic(&wants);
+                nacelle::base::set_panel_chrome(&chrome_px);
+            }
+        }
+        // The editor shows its edited rectangles (WYSIWYG). Widgets
+        // draw inside the padded (content) rects; the editor overlay
+        // shows the outer edges.
+        let layout = sc.content_layout();
+        // Every widget drawn through the one contract: the application
+        // no longer knows which is which, only what the boards place.
+        {
+            // Below this the ride is not drawn at all. The guard is
+            // authored in the cube's degrees; the flat slide, whose
+            // full travel is 1.0 rather than 90, scales it down by the
+            // same ratio.
+            static EPSILON: OnceLock<TokenId> = OnceLock::new();
+            let eps =
+                nacelle::theme::resolved().px(tok(&EPSILON, "motion.board_ride.epsilon"));
+            let active_trans =
+                trans.filter(|(hz, a)| a.abs() > if *hz { eps } else { eps / 90.0 });
+            if let Some((horizontal, a)) = active_trans {
+                // Two boards in motion. Sideways they are the faces of
+                // a cube — a yaw and a perspective divide applied to
+                // the vertices the widgets have already emitted; up and
+                // down they slide flat. No widget knows either way.
+                let cur = sc.board;
+                let sign: i32 = if a > 0.0 { 1 } else { -1 };
+                let face_b = sc.cube.as_ref().map(|c| c.face_b).unwrap_or(if horizontal {
+                    (cur.0 + sign, cur.1)
+                } else {
+                    (cur.0, cur.1 + sign)
+                });
+                // Per-face motion parameter: yaw for the cube, y-offset
+                // for the ride-in. Up and down nothing drags HOME along
+                // any more: the ordinary board (y == 0) holds perfectly
+                // still, and APPGRID or SEARCH AND AI rides in over it
+                // — the same picture their overlay layer will give
+                // under the project's own compositor.
+                let (ma, mb) = if horizontal {
+                    (-a, 90.0 * sign as f32 - a)
+                } else {
+                    (
+                        if cur.1 == 0 { 0.0 } else { -a * h },
+                        if face_b.1 == 0 { 0.0 } else { (sign as f32 - a) * h },
+                    )
+                };
+                let mut faces = [(cur, ma), (face_b, mb)];
+                if horizontal && faces[0].1.abs() < faces[1].1.abs() {
+                    faces.swap(0, 1);
+                }
+                // The rider draws over the still board, so leaving a
+                // fixture the still board must be painted first.
+                if !horizontal && cur.1 != 0 {
+                    faces.swap(0, 1);
+                }
+                // The space the cube turns in, one flat colour under
+                // the whole turn. It is emitted BEFORE the first face
+                // and therefore before any face's `start`, so no yaw
+                // ever touches it: the walls move, the void does not.
+                if horizontal {
+                    let void = nacelle::deco::ride_void();
+                    ctx.dl.rect(0.0, 0.0, w, h, void);
+                }
+                for (b, m) in faces {
+                    if !sc.has_board(b) {
+                        continue;
+                    }
+                    let start = ctx.dl.verts.len();
+                    // Sideways each face is a WALL of a solid and
+                    // carries its own ground — what the theme puts
+                    // behind a board, the board's own field and the
+                    // decoration plate on it — emitted before the
+                    // panels so the yaw and the perspective divide
+                    // below take ground and panels together.
+                    // Standing still, and riding up or down, a board
+                    // paints no ground at all: the frame's own clear
+                    // and plate are already there and must stay visible
+                    // under the fixture that rides in over them.
+                    // Fixtures carry a face material on top — frosted
+                    // glass: whatever is beneath shows through it
+                    // blurred. The glass is sampled by screen position,
+                    // so the ride may carry the quad and the frost
+                    // stays put.
+                    if horizontal {
+                        nacelle::deco::board_ground(ctx.dl, w, h, backdrop);
+                    }
+                    let thm = nacelle::theme::resolved();
+                    if b.1 != 0 {
+                        nacelle::deco::fixture_glass(ctx.dl, w, h, prefs.frost_wash);
+                    }
+                    let blay = sc.solve(b).padded(sc.pad);
+                    for panel in widgets::Panel::all() {
+                        for pl in blay.instances_of(panel) {
+                            if pl.rect.x >= w {
+                                continue;
+                            }
+                            ctx.panel_scale = if b == cur {
+                                sc.widgets.scale(pl.id)
+                            } else {
+                                ctx.panel_font_scale(&pl.rect, panel)
+                            };
+                            if let Some(wg) = sc.widgets.get_mut(pl.id) {
+                                let content =
+                                    draw_panel(&mut ctx, wg, pl.rect, host, panel);
+                                // Input belongs to the board being
+                                // stood on, not the one riding by.
+                                if b == cur {
+                                    sc.widgets.set_content(pl.id, content);
+                                }
+                            }
+                            ctx.panel_scale = 1.0;
+                        }
+                    }
+                    if horizontal {
+                        static PERSP: OnceLock<TokenId> = OnceLock::new();
+                        static SHADE_MIN: OnceLock<TokenId> = OnceLock::new();
+                        let rad = m.to_radians();
+                        let (sinp, cosp) = rad.sin_cos();
+                        let rr = w / 2.0;
+                        let fl =
+                            w * thm.px(tok(&PERSP, "motion.board_ride.perspective"));
+                        let smin = thm.px(tok(&SHADE_MIN, "boardswitch.shade_min"));
+                        let shade = smin + (1.0 - smin) * cosp.max(0.0);
+                        // The turned-away wall settles toward the very
+                        // colour painted behind the cube, not toward
+                        // #000000: edge-on it melts into the space it
+                        // turns in, and a light theme rides through its
+                        // own dark, never through grey.
+                        let void = nacelle::deco::ride_void();
+                        for v in &mut ctx.dl.verts[start..] {
+                            let u = v.pos[0] - rr;
+                            let x3 = u * cosp + rr * sinp;
+                            let depth = rr - (rr * cosp - u * sinp);
+                            let sc_p = fl / (fl + depth);
+                            v.pos[0] = rr + x3 * sc_p;
+                            v.pos[1] = h / 2.0 + (v.pos[1] - h / 2.0) * sc_p;
+                            v.color[0] = void.r + (v.color[0] - void.r) * shade;
+                            v.color[1] = void.g + (v.color[1] - void.g) * shade;
+                            v.color[2] = void.b + (v.color[2] - void.b) * shade;
+                        }
+                    } else {
+                        for v in &mut ctx.dl.verts[start..] {
+                            v.pos[1] += m;
+                        }
+                    }
+                }
+            } else {
+                if sc.board.1 != 0 {
+                    // Standing on APPGRID or SEARCH AND AI: the
+                    // main-row board stays exactly where it was,
+                    // showing through the frosted glass the fixture's
+                    // panels sit on.
+                    let ulay = sc.solve((sc.board.0, 0)).padded(sc.pad);
+                    for panel in widgets::Panel::all() {
+                        for pl in ulay.instances_of(panel) {
+                            if pl.rect.x >= w {
+                                continue;
+                            }
+                            ctx.panel_scale = sc.widgets.scale(pl.id);
+                            if let Some(wg) = sc.widgets.get_mut(pl.id) {
+                                // A widget lives on one board only, so
+                                // the ride-under board's boxes and the
+                                // fixture's never collide.
+                                let content =
+                                    draw_panel(&mut ctx, wg, pl.rect, host, panel);
+                                sc.widgets.set_content(pl.id, content);
+                            }
+                            ctx.panel_scale = 1.0;
+                        }
+                    }
+                    static GLASS_TINT: OnceLock<TokenId> = OnceLock::new();
+                    static GLASS_WASH: OnceLock<TokenId> = OnceLock::new();
+                    let thm = nacelle::theme::resolved();
+                    ctx.dl.blur(
+                        0.0,
+                        0.0,
+                        w,
+                        h,
+                        tcol(thm.color(tok(&GLASS_TINT, "elev.fixture.glass.tint"))),
+                    );
+                    // The theme's own wash; the user's BlurOpacity
+                    // scales its alpha.
+                    let wash = thm.color(tok(&GLASS_WASH, "elev.fixture.glass.wash"));
+                    if wash.a * prefs.frost_wash > 0.0 {
+                        ctx.dl.rect(
+                            0.0,
+                            0.0,
+                            w,
+                            h,
+                            tcol(wash).alpha(wash.a * prefs.frost_wash),
+                        );
+                    }
+                }
+                for panel in widgets::Panel::all() {
+                    for pl in layout.instances_of(panel) {
+                        // Hidden here or living on another board: not
+                        // drawn, so a terminal elsewhere keeps its PTY
+                        // size.
+                        if pl.rect.x >= w {
+                            continue;
+                        }
+                        ctx.panel_scale = sc.widgets.scale(pl.id);
+                        if let Some(wg) = sc.widgets.get_mut(pl.id) {
+                            let content = draw_panel(&mut ctx, wg, pl.rect, host, panel);
+                            sc.widgets.set_content(pl.id, content);
+                        }
+                        ctx.panel_scale = 1.0;
+                    }
+                }
+            }
+            // What the terminal reported this frame. The widget that
+            // reports a CHARACTER GRID IS the terminal view — the
+            // capability is the whole of what this program knows about
+            // it. Read before the editor draws, which is where it had
+            // to be while the ADD WIDGET miniatures WERE the running
+            // widgets; they are their own now, and cannot resize a
+            // shell to a thumbnail whatever the order.
+            let held = sc.widgets.grid_holder();
+            sc.term_inst = held.map(|(id, _)| id);
+            grid_now = held.map(|(_, g)| g);
+            // Grid overlay + editor controls on top of the live panels;
+            // the closure draws live miniatures in the ADD WIDGET
+            // window.
+            if sc.editor.active {
+                sc.draw_editor(&mut ctx, host);
+            }
+        }
+        // The BOARDS view draws whatever this hands it: every board of
+        // THIS screen as it would look here and now, the current one
+        // marked. Only the screen showing the window computes them —
+        // the window is one, and it is drawn once.
+        if hosts_ui {
+            if settings.open {
+                settings.boards = sc.board_thumbs(w, h);
+            }
+            settings.draw(&mut ctx);
+            // With the settings window open over the editor its buttons
+            // share the window's plane.
+            if sc.editor.active && settings.open {
+                sc.editor.draw_buttons(&mut ctx);
+            }
+            // Warning popup on the very top.
+            popup.draw(&mut ctx);
+            // The open context menu draws after EVERYTHING interactive
+            // (F1 §4.3): the draw list is immediate, draw order is
+            // z-order, and the menu is the top layer — anything drawn
+            // later would sit on it. Only the theme's overlay plate
+            // follows: it covers panels, popovers and content alike by
+            // design.
+            if let Some(m) = menu.as_mut() {
+                m.draw(&mut ctx);
+            }
+            // Then the tooltip, over the menu as over everything else —
+            // taken OUT of the context first, because the manager
+            // cannot be lent to the frame and drawn into the same frame
+            // at once, and because nothing drawn after this point may
+            // file a request it would be too late to answer.
+            if let Some(t) = ctx.tips.take() {
+                // A menu covers what is under it, and explaining
+                // something the user cannot see is noise: requests
+                // filed under an open menu go down with it (F2 §8.1).
+                if menu.is_some() {
+                    t.clear();
+                }
+                t.draw(&mut ctx);
+            }
+        }
+        // The overlay plate is the LAST themed thing in the list — z
+        // 70, one quad over panels, popovers and content alike:
+        // scanlines, grain, the top vignette. White tint, same as the
+        // backdrop: the plate's pixels ARE the theme's baked colours.
+        if let Some(id) = sc.overlay_id() {
+            ctx.dl.image(0.0, 0.0, w, h, id, white);
         }
     }
-    l
+    drop(ctx);
+
+    // The pixel guard, before a triangle leaves for the GPU: unarmed it
+    // is one atomic load.
+    if observe {
+        hashframe::observe(&dl);
+    }
+    // Only the touched rows travel — a glyph-churn frame re-uploads a
+    // shelf, not the whole four megabytes.
+    let drained = fonts.take_dirty_rows();
+    sc.dl = dl;
+    sc.present_frame(fonts, drained);
+    (grid_now, drained)
 }
 
 /// Saves the layout edited in the grid editor and applies it live.
 /// `select` = also make it the selected layout (SAVE AS); a plain SAVE
 /// keeps the current selection. Only the CHANGED panels are written,
-/// into the section of the current screen (resolution + diagonal).
-#[allow(clippy::too_many_arguments)]
+/// into the section of THIS screen (resolution + diagonal) — a second
+/// monitor arranges itself against its own pixels, and says so in its
+/// own section.
 fn editor_save(
-    editor: &mut widgets::editor::Editor,
+    sc: &mut Screen,
     name: &str,
     select: bool,
-    layout_spec: &mut config::LayoutDef,
-    active_ov: &mut Option<config::ResOverride>,
     popup: &mut widgets::popup::Popup,
-    key: (u32, u32, u32),
 ) {
     if name.is_empty() {
         return;
     }
-    // SAVE AS writes ALL panels as the base of the (new) file; SAVE
+    let key = sc.key;
+    // The layaut with the edited board folded back in — placements
+    // added, moved and dropped — which is what both save paths write.
+    let mut def = sc.edited_spec();
+    // SAVE AS writes ALL placements as the base of the (new) file; SAVE
     // rewrites the base on its own screen or stores only the changes in
     // the section of the current screen.
     let result = if select {
-        config::save_layaut_full(name, &editor.spec(), key)
+        config::save_layaut_full(name, &mut def, key)
     } else {
         config::save_layaut_overrides(
             name,
             key,
-            &editor.changes_since_start(),
-            &editor.spec(),
+            &sc.editor.changes_since_start(),
+            &mut def,
         )
     };
     if let Err(e) = result {
@@ -3887,15 +3088,13 @@ fn editor_save(
     let (new_cfg, warn) = config::resolve();
     // Sizes travel with the layout, so a new layout brings its own.
     nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
-    *layout_spec = new_cfg.layout;
-    *active_ov = layout_spec.pick(key).cloned();
     if let Some(wmsg) = warn {
         nacelle::sound::emit(nacelle::sound::Event::Alert);
         popup.show(wmsg);
     } else {
         nacelle::sound::emit(nacelle::sound::Event::Save);
     }
-    editor.stop();
+    sc.stop_editor();
 }
 
 /// A small dialog window shown INSTEAD of the program when the monitor
@@ -3980,11 +3179,9 @@ fn run_resolution_dialog(
                         // re-uploads a shelf, not the whole four megabytes.
                         let atlas_rows = fonts.take_dirty_rows();
                         let fsize = window.inner_size();
-                        // Same bed as the main loop's clear (surface.void,
+                        // Same bed as a screen's clear (surface.void,
                         // alpha forced to 1.0 by the master).
-                        static CLEAR: OnceLock<TokenId> = OnceLock::new();
-                        let clear = nacelle::theme::resolved()
-                            .bed(tok(&CLEAR, "surface.void"));
+                        let clear = nacelle::deco::clear_color();
                         gfx.render(
                             fsize.width,
                             fsize.height,
@@ -4137,5 +3334,3 @@ fn key_to_bytes(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec
         _ => None,
     }
 }
-
-
