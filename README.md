@@ -77,6 +77,18 @@ hatch, not the default.
 `NACELLE_SAFE=1` starts the program with every plugin skipped, which is
 the way back in when one of them prevents startup.
 
+`NACELLE_MOOD=lockdown` starts in one of the theme's moods and holds it
+there. A mood is the same interface re-skinned — the theme's alarm or
+lockdown colours — and the theme's own rules normally raise it from the
+telemetry; naming one here is the host taking that decision by hand, and
+nothing the machine reports puts it down again.
+
+**Ctrl+Shift+M** does the same while the program is running: each press
+takes the next mood the theme declares, and one more press hands the
+screen back to the theme's own rules. A mood change announces itself with
+a single full-screen tint that fades over a quarter of a second — without
+it a re-skin looks like a drawing fault rather than an alarm.
+
 ## Installation
 
 Requirements: Linux, a Vulkan driver, Rust (cargo), GNU make.

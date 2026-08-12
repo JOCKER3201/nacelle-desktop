@@ -59,6 +59,13 @@
 //! (without an extension) and a directory from sounds/. Empty values or
 //! missing options = defaults built into the code.
 //!
+//! Variant= is the second half of the colour axis: it names one of the
+//! theme's contrast variants — hc, the high-contrast one, is the variant
+//! the engine's master ships — and an empty or missing value is the plain
+//! theme. It is a key of its own rather than part of Theme= because the
+//! two are independent: a variant is an accessibility setting, and liking
+//! a colour is not a reason to give one up.
+//!
 //! A machine with several screens gives each of them a desktop of its
 //! own, so Layaut= is only the DEFAULT arrangement. A screen takes a
 //! layaut of its own when the file names it by connector:
@@ -342,6 +349,33 @@ pub fn current_engine_theme() -> Option<String> {
 
 pub fn set_engine_theme(name: &str) {
     set_conf_kv("Theme", name);
+}
+
+/// The contrast variant to select on top of the theme: `Variant=` in
+/// nacelle-desktop.conf. `None` — the ordinary case — is the plain theme.
+///
+/// `hc` is the one the engine's master declares, and every theme resolves it:
+/// a theme that declares no `[variant.*]` of its own inherits the master's,
+/// so high contrast does not disappear as a side effect of choosing a colour.
+pub fn current_engine_variant() -> Option<String> {
+    conf_kv()
+        .get("Variant")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Writes `Variant=`. `None` writes it EMPTY rather than dropping the line,
+/// because an empty value is an explicit off that outranks a system file
+/// naming one, while a missing key would inherit it (see [`cascade_kv`]).
+///
+/// Read here and written elsewhere: the settings screen's contrast switch
+/// calls this and then re-applies the configuration, exactly as its theme
+/// list already calls [`set_engine_theme`]. Until that switch exists the
+/// user writes the line by hand — `allow(dead_code)` says only that, and
+/// comes off the day it is called.
+#[allow(dead_code)]
+pub fn set_engine_variant(name: Option<&str>) {
+    set_conf_kv("Variant", name.unwrap_or(""));
 }
 
 /// The layout half of the configuration: `Layaut=` names one, and
@@ -710,16 +744,70 @@ pub fn resolve() -> (Config, Option<String>) {
 /// had to say about it. Always succeeds — a missing or broken theme degrades
 /// to the master.
 pub fn load_engine_theme() -> std::sync::Arc<nacelle::theme::ThemeDiagnostics> {
-    nacelle::theme::load_with(nacelle::theme::LoadRequest {
+    let diags = nacelle::theme::load_with(nacelle::theme::LoadRequest {
         name: current_engine_theme(),
         ..Default::default()
-    })
+    });
+    // Here, on the far side of EVERY load, rather than once at startup: a
+    // load rebuilds every sibling and lands on the plain one, so a `Theme=`
+    // change would otherwise take high contrast off the screen without
+    // anybody asking for it — and a setting that quietly turns itself off is
+    // worse than one that was never offered.
+    apply_engine_variant();
+    diags
+}
+
+/// The variant name last refused, so a name that stays wrong costs one line
+/// and not one line per settings click: [`resolve`] reloads the engine on
+/// every configuration change, and the answer cannot change in between.
+static REFUSED_VARIANT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Selects the configured variant on the theme just loaded.
+///
+/// A name this theme has no sibling for is a sentence in the log and nothing
+/// more. Falling back to the plain theme costs the user contrast; refusing to
+/// start costs them the desktop, and a typo in a text file may not be the
+/// reason a machine does not come up.
+fn apply_engine_variant() {
+    let want = current_engine_variant();
+    // An unset key has nothing to undo: the load already landed on plain.
+    let refused = match &want {
+        Some(name) if !nacelle::theme::set_variant(Some(name)) => Some(name.clone()),
+        _ => None,
+    };
+    let Ok(mut said) = REFUSED_VARIANT.lock() else { return };
+    if *said == refused {
+        return;
+    }
+    if let Some(name) = &refused {
+        let declared = list_engine_variants();
+        eprintln!(
+            "nacelle-desktop: no variant \"{name}\" in this theme (it declares {}) \u{2014} \
+             running without one",
+            if declared.is_empty() { "none".to_string() } else { declared.join(", ") }
+        );
+    }
+    *said = refused;
 }
 
 /// The themes the settings panel offers: the eight compiled into the toolkit
 /// plus anything installed on the search path, `default` first.
 pub fn list_engine_themes() -> Vec<String> {
     nacelle::theme::available_themes()
+}
+
+/// The contrast variants the LOADED theme offers, `hc` being the master's.
+///
+/// Read off the resolved siblings rather than the file: a sibling is a mood,
+/// a variant, or one of each, so what is left after the plain theme, the
+/// moods and the combinations is exactly the variants. This is the list a
+/// contrast switch offers and the list a refused name is measured against.
+pub fn list_engine_variants() -> Vec<String> {
+    let moods = nacelle::theme::mood_rules();
+    nacelle::theme::siblings()
+        .into_iter()
+        .filter(|s| s != "plain" && !s.contains('+') && !moods.iter().any(|m| m.name == *s))
+        .collect()
 }
 
 /// Path of the bash startup file nacelle-desktop hands to the shell:
@@ -1492,6 +1580,122 @@ mod tests {
         assert!(crimson.r != azure.r, "the accent did not change at all");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A configuration directory this test alone writes into, empty to
+    /// start with — the program creates it on the first setting written.
+    fn variant_conf_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nacelle-variant-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Hands the process-wide engine back the way it was found. These tests
+    /// SELECT a sibling in it, and a test running later that reads a colour
+    /// must not be reading this one's high-contrast answer.
+    fn restore_plain(dir: &Path) {
+        nacelle::theme::set_variant(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The global edge weight, which `[variant.hc]` raises from
+    /// `stroke.hair` to `stroke.regular` — one number that says which
+    /// sibling the program is actually drawing from.
+    fn edge_width() -> f32 {
+        nacelle::theme::resolved().px(
+            nacelle::theme::id("border.edge.width")
+                .expect("the master declares border.edge.width"),
+        )
+    }
+
+    /// `Variant=hc` in the configuration and the engine draws the
+    /// high-contrast sibling. It has been resolved, baked and selectable
+    /// since the engine was written; nothing in this program ever asked for
+    /// it, so the headline accessibility feature could not be turned on.
+    #[test]
+    fn the_variant_the_configuration_names_is_the_one_the_engine_draws() {
+        // Selects in a process-wide engine; nothing that reads one may run
+        // beside it (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        fixture_registry();
+        let _env = env_lock();
+        let dir = variant_conf_dir("named");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        set_engine_theme("default");
+        let (_cfg, _) = resolve();
+        assert_eq!(nacelle::theme::current_variant(), None, "nothing asked for one yet");
+        let plain = edge_width();
+
+        set_engine_variant(Some("hc"));
+        let (_cfg, _) = resolve();
+        assert_eq!(nacelle::theme::current_variant().as_deref(), Some("hc"));
+        // …and it is the SIBLING being drawn from, not a name held somewhere:
+        // the high-contrast edge is a whole stroke rung heavier.
+        assert!(
+            edge_width() > plain,
+            "the high-contrast edge is not heavier: {} vs {plain}",
+            edge_width()
+        );
+
+        restore_plain(&dir);
+    }
+
+    /// A variant no theme declares is a typo in a text file, and a typo in a
+    /// text file may not be the reason the desktop does not come up: the
+    /// plain theme keeps drawing and the log carries the sentence.
+    #[test]
+    fn a_variant_no_theme_declares_leaves_the_plain_one_running() {
+        let _theme = crate::widgets::theme_test_lock();
+        fixture_registry();
+        let _env = env_lock();
+        let dir = variant_conf_dir("unknown");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        set_engine_theme("default");
+        set_engine_variant(Some("dinner"));
+        // Reaching this at all is half the assertion: `resolve()` is what
+        // startup runs, and it returned.
+        let (_cfg, _) = resolve();
+        assert_eq!(nacelle::theme::current_variant(), None, "an invented variant was selected");
+        assert!(!nacelle::theme::resolved().is_empty(), "the theme did not load at all");
+        assert!(edge_width() > 0.0, "the plain theme is not drawing");
+        // And the sentence in the log can name the one that would have
+        // worked: the master declares exactly one variant, and the moods it
+        // declares beside it are not variants.
+        assert_eq!(list_engine_variants(), vec!["hc".to_string()]);
+
+        restore_plain(&dir);
+    }
+
+    /// High contrast is an ACCESSIBILITY setting, not a decoration, so
+    /// changing the theme may not take it away. It only survives because the
+    /// variant is re-selected on the far side of every load: a load rebuilds
+    /// every sibling and lands on the plain one.
+    #[test]
+    fn switching_the_theme_keeps_the_high_contrast_variant() {
+        let _theme = crate::widgets::theme_test_lock();
+        fixture_registry();
+        let _env = env_lock();
+        let dir = variant_conf_dir("kept");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        set_engine_variant(Some("hc"));
+        // None of the shipped themes declares a `[variant.*]` of its own, so
+        // each one inherits the master's — which is the property that makes
+        // "keep the variant" answerable rather than a coin toss.
+        for name in ["crimson", "azure", "default"] {
+            set_engine_theme(name);
+            let (_cfg, _) = resolve();
+            assert_eq!(
+                nacelle::theme::current_variant().as_deref(),
+                Some("hc"),
+                "theme '{name}' dropped the high-contrast variant"
+            );
+        }
+
+        restore_plain(&dir);
     }
 
     /// SAVE AS writes the full base recording its screen; SAVE on the
