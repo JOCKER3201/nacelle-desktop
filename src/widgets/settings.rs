@@ -15,12 +15,32 @@
 //! that does not fit is a scroll away rather than a row drawn on the
 //! desktop behind the window, and a list is as long as it likes.
 //!
-//! What the pages hold: THEMES is a submenu with LOOK (the theme
-//! engine's themes), LAYAUTS (layouts) and SOUNDS (sound themes). A
-//! theme comes from the toolkit — the eight compiled in plus anything
-//! installed on the search path — and is written as Theme=; layouts and
-//! sound sets are read from the data directories and written as
-//! Layaut= / Sounds=. Everything applies live.
+//! What the pages hold: LOOK AND FEEL is one page carrying the three
+//! choices that say which installed set is in use — THEMES (the theme
+//! engine's themes, written as Theme=), LAYAUTS (Layaut=) and SOUNDS
+//! (Sounds=) — plus the door to the font page. Each of the three is a
+//! DROP-DOWN and not a page of its own, so the page at rest is five
+//! rows and only ever one list is unfolded. A theme comes from the
+//! toolkit (the eight compiled in plus anything on the search path);
+//! layouts and sound sets are read from the data directories.
+//! Everything applies live.
+//!
+//! An anchor wears its LIST'S NAME and not the choice standing in it
+//! (decision §2b) — THEMES, LAYAUTS, SOUNDS — against the convention
+//! of the font page, whose anchors read "FAMILY: TERMINUS".
+//!
+//! The THEMES list carries one row in front of its names — the door to
+//! the theme editor — which is a door and not a choice: it writes no
+//! Theme= and moves no selection. [`ListId::head`] is the one place
+//! that count is stated, so a row can never pick the name above it.
+//!
+//! LOOK AND FEEL pins one more row: LOOK AND FEEL RESET, which clears
+//! everything the page and its doors write (decision §2a) and is
+//! therefore the one destructive control in this window. It spends six
+//! settings and a pinned arrangement with nothing to undo them, so it
+//! opens a confirmation ([`View::LookFeelReset`]) that names what is
+//! about to go, and the press that does the work stands on that page
+//! and nowhere else.
 
 use super::{Ctx, PanelSpec, Rect};
 use std::borrow::Cow;
@@ -38,10 +58,12 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Menu,
-    Themes,
-    Look,
-    Layauts,
-    Sounds,
+    LookFeel,
+    /// The confirmation LOOK AND FEEL RESET stands behind (decision
+    /// §2a): what the reset clears, named, and the one control that
+    /// does it.
+    LookFeelReset,
+    ThemeEditor,
     Font,
     Grid,
     Sound,
@@ -50,27 +72,56 @@ enum View {
     Blur,
 }
 
+/// The view one layer out, or `None` at the outermost one.
+///
+/// The Escape ladder and the BACK button read the SAME answer, which is
+/// what stops the two ways out of a page from disagreeing. The window's
+/// own last layer — closing it — is not here: that is the application's
+/// Escape ([`KeyOut::Ignored`]), and this window peels one layer per
+/// press until there is none left to peel.
+fn parent_view(v: View) -> Option<View> {
+    match v {
+        View::Menu => None,
+        // All three of LOOK AND FEEL's doors lead back to it: the
+        // editor is opened from a row of its THEMES list, the font page
+        // is what its FONTS button opens, and the reset confirmation is
+        // what its footer opens. That the way back out of the
+        // confirmation is the ordinary one is the point — a destructive
+        // control the user changed their mind about must be left the
+        // same way as anything else, by BACK or by Escape.
+        View::ThemeEditor | View::Font | View::LookFeelReset => Some(View::LookFeel),
+        _ => Some(View::Menu),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
     Close,
     Back,
-    OpenThemes,
-    OpenLook,
-    OpenLayauts,
-    OpenSounds,
-    Look(usize),
-    Layaut(usize),
-    Sounds(usize),
+    OpenLookFeel,
+    /// The anchor of one of LOOK AND FEEL's three lists: a press
+    /// unfolds it, a second press folds it back.
+    ListBtn(ListId),
+    /// A NAME of one of those lists — an index into the names and never
+    /// into the drawn rows, so what a list carries in front of its
+    /// names ([`ListId::head`]) is one place's business alone.
+    Pick(ListId, usize),
+    /// The first row of the THEMES list, which is not a theme: the door
+    /// to the theme editor (decision §3).
+    ThemesEditor,
     OpenFont,
     OpenGrid,
     OpenSound,
     OpenBoards,
     OpenColor,
     OpenBlur,
-    /// LAYAUTS view: clear the pinned per-screen section of the
-    /// selected layout for the screen the window is on (u1 §5.3's way
-    /// out of a stale pinned arrangement).
-    ResetScreen,
+    /// LOOK AND FEEL's pinned footer: opens the confirmation, and does
+    /// nothing else. A press that could clear six settings is a press
+    /// the pointer must not be able to make by accident.
+    LookFeelReset,
+    /// The one control on that confirmation: everything the LOOK AND
+    /// FEEL page and its doors write goes at once (decision §2a).
+    LookFeelResetConfirm,
     BlurRadiusTrack,
     BlurOpacityTrack,
     ColorDepth(u32),
@@ -106,6 +157,22 @@ enum Sect {
 enum Dropdown {
     Family(Sect),
     Weight(Sect),
+    /// One of LOOK AND FEEL's three lists. The same mechanism the two
+    /// font lists have always used, which is the whole reason a page of
+    /// choices could become a page of drop-downs at all.
+    List(ListId),
+}
+
+/// The button an open list hangs from. Asked in two places — the
+/// drawing, which needs the rect the anchor was last drawn at, and the
+/// anchor itself, which wears the ladder's Selected rung while its list
+/// is unfolded — so it is answered once.
+fn anchor_act(d: Dropdown) -> Act {
+    match d {
+        Dropdown::Family(s) => Act::FamilyBtn(s),
+        Dropdown::Weight(s) => Act::WeightBtn(s),
+        Dropdown::List(l) => Act::ListBtn(l),
+    }
 }
 
 /// What a key did to the window — the settings layer's answer to the
@@ -142,20 +209,25 @@ fn focus_id(act: Act) -> FocusId {
     match act {
         Close => FocusId::of("settings.close"),
         Back => FocusId::of("settings.back"),
-        OpenThemes => FocusId::of("settings.menu.themes"),
-        OpenFont => FocusId::of("settings.menu.font"),
+        OpenLookFeel => FocusId::of("settings.menu.lookfeel"),
+        OpenFont => FocusId::of("settings.lookfeel.fonts"),
         OpenSound => FocusId::of("settings.menu.sound"),
         OpenGrid => FocusId::of("settings.menu.grid"),
         OpenBoards => FocusId::of("settings.menu.boards"),
         OpenColor => FocusId::of("settings.menu.color"),
         OpenBlur => FocusId::of("settings.menu.blur"),
-        OpenLook => FocusId::of("settings.themes.look"),
-        OpenLayauts => FocusId::of("settings.themes.layauts"),
-        OpenSounds => FocusId::of("settings.themes.sounds"),
-        Look(i) => FocusId::of("settings.look.item").item(i),
-        Layaut(i) => FocusId::of("settings.layauts.item").item(i),
-        Sounds(i) => FocusId::of("settings.sounds.item").item(i),
-        ResetScreen => FocusId::of("settings.layauts.reset_screen"),
+        ListBtn(l) => FocusId::of(match l {
+            ListId::Looks => "settings.lookfeel.themes",
+            ListId::Layauts => "settings.lookfeel.layauts",
+            ListId::Sounds => "settings.lookfeel.sounds",
+        }),
+        // A name's row is its index PAST whatever the list carries in
+        // front of it, so the editor door and the first theme cannot
+        // land on one id however long the list grows.
+        Pick(l, i) => dropdown_base(Dropdown::List(l)).item(i + l.head()),
+        ThemesEditor => dropdown_base(Dropdown::List(ListId::Looks)).item(0),
+        LookFeelReset => FocusId::of("settings.lookfeel.reset"),
+        LookFeelResetConfirm => FocusId::of("settings.lookfeel.reset.confirm"),
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
         BlurOpacityTrack => FocusId::of("settings.blur.opacity"),
         ColorDepth(bits) => FocusId::of("settings.color.depth").item(bits as usize),
@@ -201,6 +273,9 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::Family(Sect::Ui) => "settings.font.ui.family.list",
         Dropdown::Weight(Sect::Term) => "settings.font.term.weight.list",
         Dropdown::Weight(Sect::Ui) => "settings.font.ui.weight.list",
+        Dropdown::List(ListId::Looks) => "settings.lookfeel.themes.list",
+        Dropdown::List(ListId::Layauts) => "settings.lookfeel.layauts.list",
+        Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
     })
 }
 
@@ -273,6 +348,19 @@ pub enum BoardAction {
 /// Weight options offered in the WEIGHT dropdown.
 const WEIGHTS: [&str; 5] = ["Light", "Regular", "Medium", "SemiBold", "Bold"];
 
+/// The percentage that means "no scaling": the value
+/// [`config::term_font_prefs`] reports when nothing is written
+/// (`unwrap_or(1.0)`), in the percent its writers take.
+///
+/// Not an appearance number — it is the identity of the scale, and the
+/// same one [`Settings::new`] starts at. LOOK AND FEEL RESET writes it
+/// because `config.rs` has no way to say "unset" for a numeric key:
+/// every other key the reset touches takes an empty value, which its
+/// reader treats as absent, and this one cannot. That is the one place
+/// the reset pins a value instead of standing out of the cascade's
+/// way, and it is in the fleet's report as such.
+const FONT_SIZE_UNSET: u32 = 100;
+
 // ------------------------------------------------------------- theme access
 
 /// Token ids resolve once and live for the process. A missing name degrades
@@ -297,6 +385,24 @@ fn ladder(
     match *cell.get_or_init(|| theme::class_id(name)) {
         Some(c) => th.class_state(c, state),
         None => StateStyle::RAW,
+    }
+}
+
+/// Which rung of the button ladder a button state stands on — the
+/// object's own rule ([`nacelle::object::button::ButtonState`] keeps it
+/// private), needed here only by the two glyphs this file draws on top
+/// of a plate the object drew.
+fn rung(st: nacelle::object::button::ButtonState) -> State {
+    if st.flash {
+        State::Press
+    } else if st.hover && st.selected {
+        State::SelectedHover
+    } else if st.hover {
+        State::Hover
+    } else if st.selected {
+        State::Selected
+    } else {
+        State::Idle
     }
 }
 
@@ -491,7 +597,7 @@ enum BtnKind {
     /// The full content width: the FONT view's dropdown anchors.
     Wide,
     /// Listed, but pinned to the bottom of the content box instead of
-    /// flowing — RESET THIS SCREEN. The rows above it used to be able
+    /// flowing — LOOK AND FEEL RESET. The rows above it used to be able
     /// to reach it, and the later of two targets on one pixel won the
     /// click (P12); the flow is now held to [`Settings::body_box`],
     /// which stops short of whatever a page pins.
@@ -525,9 +631,10 @@ impl Unit {
     }
 }
 
-/// Which list of names a picker offers. The list, the act its rows
-/// carry, the selection it highlights and the words for "there are
-/// none" are all one decision, so they are one value.
+/// Which of LOOK AND FEEL's three lists is meant. The names it offers,
+/// the word its anchor wears, what it carries in front of those names
+/// and the words for "there are none" are all one decision, so they are
+/// one value.
 #[derive(Clone, Copy, PartialEq)]
 enum ListId {
     Looks,
@@ -535,12 +642,17 @@ enum ListId {
     Sounds,
 }
 
+/// The label of the row that opens the theme editor. It stands INSIDE
+/// the THEMES list, at the top (decision §3).
+const EDITOR_ROW: &str = "THEMES EDITOR";
+
 impl ListId {
-    fn act(self) -> fn(usize) -> Act {
+    /// The word its anchor wears — the whole of it (decision §2b).
+    fn label(self) -> &'static str {
         match self {
-            ListId::Looks => Act::Look,
-            ListId::Layauts => Act::Layaut,
-            ListId::Sounds => Act::Sounds,
+            ListId::Looks => "THEMES",
+            ListId::Layauts => "LAYAUTS",
+            ListId::Sounds => "SOUNDS",
         }
     }
 
@@ -550,6 +662,26 @@ impl ListId {
             ListId::Layauts => "NO LAYAUTS FOUND",
             ListId::Sounds => "NO SOUND THEMES FOUND",
         }
+    }
+
+    /// How many rows the open list carries BEFORE its first name. Only
+    /// THEMES has one — the editor door — and the count is asked for
+    /// rather than assumed because it is the offset between a drawn row
+    /// and the name it stands for.
+    fn head(self) -> usize {
+        matches!(self, ListId::Looks) as usize
+    }
+}
+
+/// What one ROW of an open list does. One derivation for the drawing,
+/// the hit map and the focus chain, so a row cannot pick the name above
+/// it and the door cannot be mistaken for the first theme.
+fn list_row_act(list: ListId, row: usize) -> Act {
+    match row.checked_sub(list.head()) {
+        Some(i) => Act::Pick(list, i),
+        // The rows in front of the names, in order. THEMES has exactly
+        // one, and it is the editor's door.
+        None => Act::ThemesEditor,
     }
 }
 
@@ -585,14 +717,19 @@ enum Ctrl {
     /// A value that steps to the next on every press: COLOR's SPACE,
     /// LUT and ICC.
     Cycle { label: &'static str, get: fn(&Settings) -> String, act: Act },
-    /// A list of names filling the page.
-    Picker { list: ListId },
+    /// One of LOOK AND FEEL's three lists: an anchor wearing the choice
+    /// in force, and the list itself unfolding from its bottom edge
+    /// when it is the open one ([`Settings::draw_open_dropdown`]).
+    Drop { list: ListId },
     Button { label: Text, kind: BtnKind, act: Act },
     /// A module header inside a page: the FONT view's TERMINAL and
     /// INTERFACE separators.
     Section { title: &'static str },
     /// A left-aligned aside in the flow.
     Note { text: Text },
+    /// The centred line a surface with nothing in it yet says about
+    /// itself (`emptystate.role`).
+    Empty { text: Text },
     /// A centred one-liner pinned to the bottom edge
     /// (`settings.hint_inset`) — the BOARDS view's gesture hint.
     Hint { text: Text },
@@ -647,9 +784,6 @@ enum Chrome {
     Close,
     /// BACK, with the body below it.
     Back,
-    /// BACK, with the body BESIDE it: a picker grid starts in the same
-    /// row's second column.
-    BackInline,
 }
 
 /// One view of the window.
@@ -665,16 +799,14 @@ struct Page {
 
 // --------------------------------------------------------------- the pages
 
-static MENU_ROWS: [Row; 7] = [
+/// The main menu. THEMES, LOOK, LAYAUTS, SOUNDS and FONT are no longer
+/// here: all five were one question — what the desktop looks like — and
+/// they are now one door (decision §2).
+static MENU_ROWS: [Row; 6] = [
     row(Ctrl::Button {
-        label: Text::Fixed("THEMES"),
+        label: Text::Fixed("LOOK AND FEEL"),
         kind: BtnKind::Listed,
-        act: Act::OpenThemes,
-    }),
-    row(Ctrl::Button {
-        label: Text::Fixed("FONT"),
-        kind: BtnKind::Listed,
-        act: Act::OpenFont,
+        act: Act::OpenLookFeel,
     }),
     row(Ctrl::Button {
         label: Text::Fixed("SOUND"),
@@ -708,39 +840,88 @@ static MENU_ROWS: [Row; 7] = [
     }),
 ];
 
-static THEMES_ROWS: [Row; 3] = [
+/// LOOK AND FEEL (decision §2): three choices and two doors. Three
+/// drop-downs rather than three columns, so the page at rest fits
+/// whole and at most one list is ever unfolded — three open lists one
+/// under the other would be a page you scroll through to reach the
+/// sounds.
+///
+/// The footer is the page's own undo, and it is pinned rather than
+/// flowed so that the four rows above it are the five-row page the
+/// decision describes. It opens a confirmation and nothing else: what
+/// stands behind it (decision §2a) is every setting this page and its
+/// doors write, and one press may not be able to spend all of them.
+static LOOKFEEL_ROWS: [Row; 5] = [
+    row(Ctrl::Drop { list: ListId::Looks }),
+    row(Ctrl::Drop { list: ListId::Layauts }),
+    row(Ctrl::Drop { list: ListId::Sounds }),
     row(Ctrl::Button {
-        label: Text::Fixed("LOOK"),
+        label: Text::Fixed("FONTS"),
         kind: BtnKind::Listed,
-        act: Act::OpenLook,
+        act: Act::OpenFont,
     }),
     row(Ctrl::Button {
-        label: Text::Fixed("LAYAUTS"),
-        kind: BtnKind::Listed,
-        act: Act::OpenLayauts,
-    }),
-    row(Ctrl::Button {
-        label: Text::Fixed("SOUNDS"),
-        kind: BtnKind::Listed,
-        act: Act::OpenSounds,
-    }),
-];
-
-static LOOK_ROWS: [Row; 1] = [row(Ctrl::Picker { list: ListId::Looks })];
-
-static LAYAUTS_ROWS: [Row; 2] = [
-    row(Ctrl::Picker { list: ListId::Layauts }),
-    // Beside the picker: deletes the pinned [WxH@D] section of the
-    // selected layout for the screen this window is on — the way out
-    // when a saved arrangement predates a change to the base under it.
-    row(Ctrl::Button {
-        label: Text::Fixed("RESET THIS SCREEN"),
+        label: Text::Fixed("LOOK AND FEEL RESET"),
         kind: BtnKind::Footer,
-        act: Act::ResetScreen,
+        act: Act::LookFeelReset,
     }),
 ];
 
-static SOUNDS_ROWS: [Row; 1] = [row(Ctrl::Picker { list: ListId::Sounds })];
+/// LOOK AND FEEL RESET's confirmation (decision §2a).
+///
+/// The decision asks for a hold or a confirmation, and this is the
+/// confirmation. It is a PAGE and not a second press on the footer for
+/// three reasons, each of which a same-place second press fails: the
+/// control that does the work stands where the pointer is not, so a
+/// double click cannot reach it; the keyboard reaches it exactly as
+/// the mouse does, which a hold cannot (this window has an Enter and
+/// no key release, so a held key is a key pressed once); and a page
+/// has room to NAME what is about to go, which is the difference
+/// between a confirmation and a speed bump.
+///
+/// The first three lines read the configuration in force, so what the
+/// user is told they are losing is what they are actually losing.
+static LOOKFEEL_RESET_ROWS: [Row; 8] = [
+    row_after(Ctrl::Section { title: "WHAT THIS CLEARS" }, Gap::None),
+    row(Ctrl::Note { text: Text::Of(clears_theme) }),
+    row(Ctrl::Note { text: Text::Of(clears_layaut) }),
+    row(Ctrl::Note { text: Text::Of(clears_sounds) }),
+    row(Ctrl::Note {
+        text: Text::Fixed("FONTS: SIZE, FAMILY AND WEIGHT, TERMINAL AND INTERFACE"),
+    }),
+    row_after(
+        Ctrl::Note { text: Text::Fixed("THE PINNED ARRANGEMENT OF THIS SCREEN") },
+        Gap::Section,
+    ),
+    row_after(
+        Ctrl::Note {
+            text: Text::Fixed("WHAT IS LEFT IS WHAT THE SYSTEM SETS. THERE IS NO WAY BACK."),
+        },
+        Gap::Double,
+    ),
+    row(Ctrl::Button {
+        label: Text::Fixed("RESET LOOK AND FEEL"),
+        kind: BtnKind::Listed,
+        act: Act::LookFeelResetConfirm,
+    }),
+];
+
+/// The theme editor's doorway, and nothing behind it yet.
+///
+/// It is a page like every other one so that the way in, the way back
+/// and the Escape ladder are real before the editor is: the row that
+/// opens it takes the window's content area over, exactly as it will
+/// when there is an editor to put there. Building that editor is
+/// another stage's work (decision §3, requirement 3).
+static EDITOR_ROWS: [Row; 2] = [
+    row_after(
+        Ctrl::Empty { text: Text::Fixed("THE THEME EDITOR IS NOT BUILT YET") },
+        Gap::Section,
+    ),
+    row(Ctrl::Note {
+        text: Text::Fixed("IT WILL EDIT THE TOKENS OF THE THEME IN FORCE, HERE."),
+    }),
+];
 
 /// The FONT view's two sections. The section header takes no gap under
 /// it: the size slider sits directly against the separator.
@@ -940,7 +1121,7 @@ static BLUR_ROWS: [Row; 2] = [
 
 /// The whole window. Indexed by [`View`], which `pages_are_in_view_order`
 /// keeps true.
-static PAGES: [Page; 11] = [
+static PAGES: [Page; 10] = [
     Page {
         view: View::Menu,
         title: "SETTINGS",
@@ -950,36 +1131,28 @@ static PAGES: [Page; 11] = [
         rows: &MENU_ROWS,
     },
     Page {
-        view: View::Themes,
-        title: "SETTINGS \u{2014} THEMES",
+        view: View::LookFeel,
+        title: "SETTINGS \u{2014} LOOK AND FEEL",
         chrome: Chrome::Back,
         lead: Gap::Row,
         cols: Cols::None,
-        rows: &THEMES_ROWS,
+        rows: &LOOKFEEL_ROWS,
     },
     Page {
-        view: View::Look,
-        title: "SETTINGS \u{2014} LOOK",
-        chrome: Chrome::BackInline,
-        lead: Gap::None,
+        view: View::LookFeelReset,
+        title: "SETTINGS \u{2014} LOOK AND FEEL RESET",
+        chrome: Chrome::Back,
+        lead: Gap::Section,
         cols: Cols::None,
-        rows: &LOOK_ROWS,
+        rows: &LOOKFEEL_RESET_ROWS,
     },
     Page {
-        view: View::Layauts,
-        title: "SETTINGS \u{2014} LAYAUTS",
-        chrome: Chrome::BackInline,
-        lead: Gap::None,
+        view: View::ThemeEditor,
+        title: "SETTINGS \u{2014} THEMES EDITOR",
+        chrome: Chrome::Back,
+        lead: Gap::Section,
         cols: Cols::None,
-        rows: &LAYAUTS_ROWS,
-    },
-    Page {
-        view: View::Sounds,
-        title: "SETTINGS \u{2014} SOUNDS",
-        chrome: Chrome::BackInline,
-        lead: Gap::None,
-        cols: Cols::None,
-        rows: &SOUNDS_ROWS,
+        rows: &EDITOR_ROWS,
     },
     Page {
         view: View::Font,
@@ -1061,6 +1234,27 @@ fn weight_label(s: &Settings, sect: Sect) -> String {
     )
 }
 
+// The three lines of the reset's confirmation that name a VALUE and
+// not just a key. They read the window's own copy of the
+// configuration — the one [`Settings::refresh_current`] takes on the
+// way into the page — so a line the page draws every frame costs no
+// file read.
+
+fn clears_theme(s: &Settings) -> String {
+    format!("THEME AND VARIANT: {}", s.drop_value(ListId::Looks))
+}
+
+/// Both halves of the layout setting: the desktop's own and the
+/// assignments made per connector, which are what a second monitor
+/// would otherwise keep after a reset.
+fn clears_layaut(s: &Settings) -> String {
+    format!("LAYAUT: {}, AND EVERY SCREEN'S OWN", s.drop_value(ListId::Layauts))
+}
+
+fn clears_sounds(s: &Settings) -> String {
+    format!("SOUNDS: {}", s.drop_value(ListId::Sounds))
+}
+
 /// Which sound set is in use, and whether it was found at all: silence
 /// with no explanation is the one thing worth spelling out here.
 fn sound_set_note(_: &Settings) -> String {
@@ -1096,10 +1290,12 @@ struct Metrics {
     /// `settings.note.role` and `settings.hint.role` are two decisions.
     note_h: f32,
     hint_h: f32,
+    /// One line of the empty-state role: what a page with nothing in it
+    /// yet reserves for saying so.
+    empty_h: f32,
     hint_inset: f32,
     corner_w: f32,
     list_w: f32,
-    grid_cols: usize,
 }
 
 impl Metrics {
@@ -1119,7 +1315,6 @@ impl Metrics {
         static BACK_W_FRAC: OnceLock<TokenId> = OnceLock::new();
         static BACK_W_MIN: OnceLock<TokenId> = OnceLock::new();
         static BACK_W_MIN_PX: OnceLock<TokenId> = OnceLock::new();
-        static GRID_COLS: OnceLock<TokenId> = OnceLock::new();
         Metrics {
             btn_h: th.px(tok(&BTN_H, "button.h")),
             gap: th.px(tok(&ROW_GAP, "modal.row_gap")),
@@ -1132,12 +1327,12 @@ impl Metrics {
             block_h: th.px(tok(&BLOCK_H, "panel.title.block_h")),
             note_h: role_note(ctx).line(),
             hint_h: role_hint(ctx).line(),
+            empty_h: role_empty(ctx).line(),
             hint_inset: th.px(tok(&HINT_INSET, "settings.hint_inset")),
             corner_w: (content.w * th.px(tok(&BACK_W_FRAC, "settings.back_w_frac")))
                 .max(th.px(tok(&BACK_W_MIN, "settings.back_w_min")))
                 .max(th.px(tok(&BACK_W_MIN_PX, "settings.back_w_min_min_px"))),
             list_w: content.w * th.px(tok(&LIST_W_FRAC, "settings.list_w_frac")),
-            grid_cols: (th.px(tok(&GRID_COLS, "settings.grid_cols")) as usize).max(1),
         }
     }
 
@@ -1151,28 +1346,23 @@ impl Metrics {
     }
 }
 
-/// What one row needs to place itself: the page's content box, the box
-/// the flow scrolls in, its own band in that flow, and the two column
-/// widths the page's rule produced.
+/// What one row needs to place itself: the page's content box, its own
+/// band in the flow, and the two column widths the page's rule
+/// produced. The box the flow scrolls in is the walker's business —
+/// every row is drawn under its clip and none of them lays out a grid
+/// of its own any more.
 #[derive(Clone, Copy)]
 struct RowCtx {
     content: Rect,
-    /// The scrolled body's box — what the clip holds the row to, and
-    /// what a row that lays out its own grid must stop at.
-    view: Rect,
     band: Rect,
     label_w: f32,
     value_w: f32,
     m: Metrics,
 }
 
-/// Where a page's body starts. A picker shares the chrome's row, which
-/// is what `BackInline` names.
+/// Where a page's body starts: under the chrome's own row.
 fn body_top(page: &Page, m: Metrics, content: Rect) -> f32 {
-    match page.chrome {
-        Chrome::BackInline => content.y,
-        Chrome::Close | Chrome::Back => content.y + m.btn_h + m.space(page.lead),
-    }
+    content.y + m.btn_h + m.space(page.lead)
 }
 
 /// The body box of the window: the modal less its title band and its
@@ -1232,10 +1422,14 @@ pub struct Settings {
     pub sound_dirty: bool,
     /// Set by EDIT GRID — main enters the layout editor and clears it.
     pub edit_requested: bool,
-    /// Set by RESET THIS SCREEN (the LAYAUTS view) — main clears the
-    /// pinned [WxH@D] section of the selected layout for the screen it
-    /// is on, then re-applies the configuration. The window itself
-    /// cannot: only the application knows which screen this is.
+    /// The last step of LOOK AND FEEL RESET — main clears the pinned
+    /// [WxH@D] section of the selected layout for the screen it is on,
+    /// then re-applies the configuration. The window itself cannot:
+    /// only the application knows which screen this is.
+    ///
+    /// Still spelled for the control's old name, which cleared this
+    /// section and nothing else. Renaming it is a `main.rs` change and
+    /// `main.rs` belongs to another fleet today; it is in the report.
     pub reset_screen: bool,
     /// The boards, fed by the application every frame the window is
     /// open; drawn by the BOARDS view.
@@ -1540,7 +1734,7 @@ impl Settings {
             Act::Close | Act::Back => {}
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
             Act::VolumeTrack => {}
-            Act::Look(_) | Act::Layaut(_) | Act::Sounds(_) => {}
+            Act::Pick(..) => {}
             _ => emit(Sfx::Click),
         }
         match act {
@@ -1551,56 +1745,58 @@ impl Settings {
             Act::Back => {
                 emit(Sfx::Click);
                 self.dropdown = None;
-                self.go(match self.view {
-                    View::Look | View::Layauts | View::Sounds => View::Themes,
-                    _ => View::Menu,
-                })
+                // The same answer Escape peels a layer by, so the two
+                // ways out of a page cannot lead to different places.
+                self.go(parent_view(self.view).unwrap_or(View::Menu))
             }
-            Act::OpenThemes => self.go(View::Themes),
-            Act::OpenLook => {
-                // Scanned when the view is opened.
-                // The engine's themes, not the look/ directories: a look
-                // bundled a stylesheet, and stylesheets are gone.
+            Act::OpenLookFeel => {
+                // All three lists are scanned on the way in, once: they
+                // are directories the user installs into behind the
+                // program's back, and the page offers all three at the
+                // same time now. The engine's themes, not the look/
+                // directories: a look bundled a stylesheet, and
+                // stylesheets are gone.
                 self.themes = config::list_engine_themes();
-                self.refresh_current();
-                self.go(View::Look);
-            }
-            Act::OpenLayauts => {
                 self.layauts = config::list_layauts();
-                self.refresh_current();
-                self.go(View::Layauts);
-            }
-            Act::OpenSounds => {
                 self.sounds = config::list_sound_themes();
                 self.refresh_current();
-                self.go(View::Sounds);
+                self.dropdown = None;
+                self.go(View::LookFeel);
             }
-            Act::Look(i) => {
-                // Selecting a theme writes Theme= and nothing else. Colour and
-                // layout are two independent axes now, so this must not touch
-                // Layaut= — picking crimson may not rearrange the boards.
-                if let Some(name) = self.themes.get(i).cloned() {
-                    config::set_engine_theme(&name);
+            Act::ListBtn(list) => {
+                let d = Dropdown::List(list);
+                self.dropdown = if self.dropdown == Some(d) {
+                    None
+                } else {
+                    self.dropdown_since = Some(Instant::now());
+                    Some(d)
+                };
+            }
+            Act::Pick(list, i) => {
+                self.dropdown = None;
+                // Choosing a theme writes Theme= and nothing else.
+                // Colour and layout are two independent axes now, so
+                // this must not touch Layaut= — picking crimson may not
+                // rearrange the boards.
+                if let Some(name) = self.names(list).get(i).cloned() {
+                    match list {
+                        ListId::Looks => config::set_engine_theme(&name),
+                        ListId::Layauts => config::set_layaut_option(&name),
+                        ListId::Sounds => config::set_sounds_option(&name),
+                    }
                     self.refresh_current();
                     emit(Sfx::Theme);
                     return true;
                 }
             }
-            Act::Layaut(i) => {
-                if let Some(name) = self.layauts.get(i).cloned() {
-                    config::set_layaut_option(&name);
-                    self.refresh_current();
-                    emit(Sfx::Theme);
-                    return true;
-                }
-            }
-            Act::Sounds(i) => {
-                if let Some(name) = self.sounds.get(i).cloned() {
-                    config::set_sounds_option(&name);
-                    self.refresh_current();
-                    emit(Sfx::Theme);
-                    return true;
-                }
+            Act::ThemesEditor => {
+                // Decision §3, requirement 2: the first row of the
+                // THEMES list is a door and not a choice. It writes no
+                // Theme=, moves no selection, and takes the window's
+                // content area over instead — which is why it answers
+                // false: nothing about the configuration changed.
+                self.dropdown = None;
+                self.go(View::ThemeEditor);
             }
             Act::OpenSound => {
                 let (vol, typing, ambient) = config::sound_prefs();
@@ -1708,11 +1904,32 @@ impl Settings {
                 self.edit_requested = true;
                 self.open = false;
             }
-            Act::ResetScreen => {
-                // The application clears the section — it knows the
-                // screen — and re-applies the layout; the window stays
-                // open so the result is visible behind it.
-                self.reset_screen = true;
+            Act::LookFeelReset => {
+                // The footer opens the confirmation and writes nothing.
+                // Answering false is what it means: no configuration
+                // changed, so the caller re-applies nothing.
+                //
+                // The list is folded on the way out, like every other
+                // door out of this page: an anchor the next page does
+                // not draw has nothing to hang a list from, and a
+                // dropdown left standing would eat the first Escape.
+                self.dropdown = None;
+                self.go(View::LookFeelReset);
+            }
+            Act::LookFeelResetConfirm => {
+                self.reset_look_and_feel();
+                // Back to the page the footer stands on, which now
+                // shows what the system end of the cascade gives.
+                //
+                // And it answers FALSE although everything changed.
+                // The caller re-applies the configuration itself, but
+                // only AFTER the request left in `reset_screen` — and
+                // that request clears the pinned section of the layout
+                // IN FORCE. Answering true would re-apply first, the
+                // screen would move to the layout the reset just fell
+                // back to, and the section would be cleared out of a
+                // file that never pinned anything.
+                self.go(View::LookFeel);
             }
             Act::OpenFont => {
                 self.families = [
@@ -1814,8 +2031,16 @@ impl Settings {
         }
         match ev.key {
             FKey::Escape => {
-                if self.dropdown.is_some() {
-                    self.dropdown = None;
+                // ONE layer per press (decision §3): the open list
+                // first, then the view it was opened on, and so on out
+                // to the main menu. The window's own last layer —
+                // closing it — is the application's, which is what
+                // Ignored asks for; from the editor, three levels in,
+                // Escape used to land straight on the desktop.
+                if self.dropdown.take().is_some() {
+                    KeyOut::Consumed
+                } else if let Some(back) = parent_view(self.view) {
+                    self.go(back);
                     KeyOut::Consumed
                 } else {
                     KeyOut::Ignored
@@ -1913,6 +2138,61 @@ impl Settings {
         );
     }
 
+    /// Decision §2a: everything to do with look and feel, cleared in
+    /// one go — everything the LOOK AND FEEL page controls and
+    /// everything its doors lead to. Afterwards the program looks the
+    /// way it looks with no user configuration at all: it takes what it
+    /// finds at the system end of the cascade.
+    ///
+    /// Every key goes out EMPTY rather than being deleted, because
+    /// `config.rs` writes values and has no way to remove a line
+    /// ([`config`]'s `set_conf_kv` replaces or appends). An empty value
+    /// reads as absent to `Theme=`, `Layaut=`, `Sounds=`, the two font
+    /// families, the two weights and the per-connector assignments —
+    /// their readers all filter it — so those eight keys really do fall
+    /// back. `Variant=` and the two sizes are the exceptions and are in
+    /// the fleet's report: an empty `Variant=` is documented as an
+    /// explicit off, and a size cannot be written empty at all
+    /// ([`FONT_SIZE_UNSET`]). Both need a "clear this key" writer in
+    /// `config.rs`, which belongs to another fleet today.
+    ///
+    /// The pinned `[WxH@D]` section is the application's to clear —
+    /// only it knows which screen this window is on — so it is asked
+    /// for, exactly as it was when this control cleared nothing else.
+    fn reset_look_and_feel(&mut self) {
+        // The theme engine's two keys. Colour and contrast are one
+        // choice made in two lines, and a reset that left the variant
+        // standing would hand the default theme somebody else's
+        // contrast.
+        config::set_engine_theme("");
+        config::set_engine_variant(None);
+        // The layout, and then every screen that was given one of its
+        // own: clearing `Layaut=` alone would leave a second monitor
+        // pinned to whatever `Layaut[DP-2]=` says, which is precisely
+        // the setting the user cannot see from this page.
+        config::set_layaut_option("");
+        for connector in config::screen_layauts().into_keys() {
+            config::set_layaut_for_connector(&connector, "");
+        }
+        config::set_sounds_option("");
+        // Both font sections, all three properties each — the page
+        // behind the FONTS door, whole.
+        config::set_term_font_size(FONT_SIZE_UNSET);
+        config::set_term_font_family("");
+        config::set_term_font_weight("");
+        config::set_ui_font_size(FONT_SIZE_UNSET);
+        config::set_ui_font_family("");
+        config::set_ui_font_weight("");
+        // The window's own copy of what it just cleared, so the page it
+        // returns to and the font page behind it do not go on showing
+        // settings that no longer exist.
+        self.cur_size = [FONT_SIZE_UNSET, FONT_SIZE_UNSET];
+        self.cur_family = [None, None];
+        self.cur_weight = [None, None];
+        self.refresh_current();
+        self.reset_screen = true;
+    }
+
     pub fn draw(&mut self, ctx: &mut Ctx) {
         if !self.open {
             return;
@@ -1950,7 +2230,7 @@ impl Settings {
         let corner = Rect::new(content.x, content.y, m.corner_w, m.btn_h);
         let (chrome_act, chrome_label) = match page.chrome {
             Chrome::Close => (Act::Close, "CLOSE"),
-            Chrome::Back | Chrome::BackInline => (Act::Back, "BACK"),
+            Chrome::Back => (Act::Back, "BACK"),
         };
         // The corner button takes its place at the HEAD of the focus
         // chain before the body registers anything (R5) — and is PAINTED
@@ -1982,7 +2262,7 @@ impl Settings {
         let mut bottom = content.bottom();
         for row in page.rows {
             if row.ctrl.pinned() {
-                bottom -= m.gap + self.row_h(page, &row.ctrl, m, content);
+                bottom -= m.gap + self.row_h(&row.ctrl, m, content);
             }
         }
         Rect::new(content.x, top, content.w, (bottom - top).max(0.0))
@@ -1998,7 +2278,7 @@ impl Settings {
             if row.ctrl.pinned() {
                 continue;
             }
-            h += self.row_h(page, &row.ctrl, m, content) + m.space(row.after);
+            h += self.row_h(&row.ctrl, m, content) + m.space(row.after);
             trailing = m.space(row.after);
         }
         (h - trailing).max(0.0)
@@ -2032,13 +2312,13 @@ impl Settings {
             if row.ctrl.pinned() {
                 continue;
             }
-            let h = self.row_h(page, &row.ctrl, m, content);
+            let h = self.row_h(&row.ctrl, m, content);
             let band = Rect::new(content.x, y, content.w, h);
             // A row wholly off the viewport is not drawn, and therefore
             // registers nothing: what the eye cannot see is not a
             // target and does not belong in the Tab order either.
             if band.bottom() > view.y && band.y < view.bottom() {
-                let rc = RowCtx { content, view, band, label_w, value_w, m };
+                let rc = RowCtx { content, band, label_w, value_w, m };
                 if (row.enabled)(self) {
                     self.draw_row(ctx, &row.ctrl, rc);
                 } else {
@@ -2054,9 +2334,9 @@ impl Settings {
             if !row.ctrl.pinned() {
                 continue;
             }
-            let h = self.row_h(page, &row.ctrl, m, content);
+            let h = self.row_h(&row.ctrl, m, content);
             let band = Rect::new(content.x, content.bottom() - h, content.w, h);
-            let rc = RowCtx { content, view, band, label_w, value_w, m };
+            let rc = RowCtx { content, band, label_w, value_w, m };
             if (row.enabled)(self) {
                 self.draw_row(ctx, &row.ctrl, rc);
             } else {
@@ -2125,34 +2405,24 @@ impl Settings {
         }
     }
 
-    /// How tall a row is. Everything is a theme length except the two
-    /// rows whose height is their content's: a picker's grid and the
-    /// boards' reserve.
-    fn row_h(&self, page: &Page, ctrl: &Ctrl, m: Metrics, content: Rect) -> f32 {
+    /// How tall a row is. Everything is a theme length except the one
+    /// row whose height is its content's: the boards' reserve.
+    ///
+    /// A drop-down is one button tall however many names it carries:
+    /// the list is drawn over the page and takes no room in the flow,
+    /// which is what lets LOOK AND FEEL stay five rows.
+    fn row_h(&self, ctrl: &Ctrl, m: Metrics, content: Rect) -> f32 {
         match ctrl {
             Ctrl::Toggle { .. } => m.check_h,
             Ctrl::Slider { .. } => m.slider_h,
             Ctrl::Chips { .. } => m.seg_h,
             Ctrl::Cycle { .. } => m.cyc_h,
-            Ctrl::Button { .. } => m.btn_h,
+            Ctrl::Button { .. } | Ctrl::Drop { .. } => m.btn_h,
             Ctrl::Section { .. } => m.block_h,
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
+            Ctrl::Empty { .. } => m.empty_h,
             Ctrl::Custom { h, .. } => h(m, content),
-            Ctrl::Picker { list } => {
-                let n = self.names(*list).len();
-                let first = match page.chrome {
-                    Chrome::BackInline => 1,
-                    Chrome::Close | Chrome::Back => 0,
-                };
-                let rows = (first + n).max(1).div_ceil(m.grid_cols) as f32;
-                let mut h = rows * m.btn_h + (rows - 1.0) * m.gap;
-                if n == 0 {
-                    // The empty note stands under the corner button.
-                    h += m.gap + m.note_h;
-                }
-                h
-            }
         }
     }
 
@@ -2215,7 +2485,7 @@ impl Settings {
                 let value = get(self);
                 self.draw_cycle(ctx, label, &value, *act, rc)
             }
-            Ctrl::Picker { list } => self.draw_picker(ctx, *list, rc),
+            Ctrl::Drop { list } => self.draw_drop(ctx, *list, rc),
             Ctrl::Button { label, kind, act } => {
                 let r = Self::button_rect(*kind, rc);
                 let text = self.text_of(*label);
@@ -2253,6 +2523,24 @@ impl Settings {
                     &s,
                     col(th.color(tok(&MUTED_FG, "text.muted"))),
                     n.track,
+                );
+            }
+            // What a surface with nothing in it yet says about itself,
+            // set the way every other empty box in the program sets it
+            // (`emptystate.role`) and inked like every other aside.
+            Ctrl::Empty { text } => {
+                let v = role_empty(ctx);
+                let ty = center_y(ctx, rc.band, v);
+                let s = self.text_of(*text);
+                ctx.dl.text_center(
+                    ctx.fonts,
+                    FONT_UI,
+                    v.px,
+                    rc.content.cx(),
+                    ty,
+                    &s,
+                    col(th.color(tok(&MUTED_FG, "text.muted"))),
+                    v.track,
                 );
             }
             // One line that explains the other way in (settings.hint.role).
@@ -2467,64 +2755,82 @@ impl Settings {
         }
     }
 
-    /// Whether row `i` of a list is the entry the configuration names.
-    fn is_selected(&self, list: ListId, i: usize) -> bool {
-        let current = match list {
+    /// The name the configuration carries for one list.
+    fn current_of(&self, list: ListId) -> Option<&String> {
+        match list {
             ListId::Looks => self.current_look.as_ref(),
             ListId::Layauts => self.current_layaut.as_ref(),
             ListId::Sounds => self.current_sounds.as_ref(),
-        };
-        current.is_some() && self.names(list).get(i) == current
+        }
     }
 
-    /// A list of names filling the page: the corner button holds the
-    /// first cell and the names take the rest.
+    /// The name one list is set to, for the page that has to say what
+    /// it is about to destroy — an empty list says why there is nothing
+    /// to choose from rather than standing blank
+    /// (`ListId::empty_note`).
     ///
-    /// The grid is laid out in full and only DRAWN where the viewport
-    /// reaches, which is the whole of P11: a name past the bottom edge
-    /// used to end the loop and vanish — no bar, no count, no notice —
-    /// and now it is simply a scroll away, because the offset the walker
-    /// applies runs to the end of the description and not to the end of
-    /// the box.
-    fn draw_picker(&mut self, ctx: &mut Ctx, list: ListId, rc: RowCtx) {
-        let cols = rc.m.grid_cols;
-        let bw = (rc.content.w - rc.m.gap * (cols as f32 - 1.0)) / cols as f32;
-        let make_act = list.act();
-        let n = self.names(list).len();
-        let mut c = 1usize; // the first row starts next to the corner button
-        let mut y = rc.band.y;
-        for i in 0..n {
-            if c >= cols {
-                c = 0;
-                y += rc.m.btn_h + rc.m.gap;
-            }
-            if y + rc.m.btn_h > rc.view.y && y < rc.view.bottom() {
-                let label = self.names(list)[i].to_uppercase();
-                let br =
-                    Rect::new(rc.content.x + c as f32 * (bw + rc.m.gap), y, bw, rc.m.btn_h);
-                self.button(ctx, br, &label, make_act(i));
-            }
-            c += 1;
-        }
-        if n == 0 {
-            self.empty_note(ctx, rc, list.empty_note());
+    /// It was the anchor's second half until decision §2b took the
+    /// choice off the anchor. The reading survives the anchor because
+    /// the confirmation needs it: "THEME AND VARIANT: MIDNIGHT" is a
+    /// warning, "THEME AND VARIANT" alone is a category.
+    fn drop_value(&self, list: ListId) -> String {
+        match self.current_of(list) {
+            Some(name) if !self.names(list).is_empty() => name.to_uppercase(),
+            _ => list.empty_note().to_string(),
         }
     }
 
-    /// `emptystate.role` says how the "nothing here" line is set;
-    /// `text.muted` is the ink an aside is written in.
-    fn empty_note(&mut self, ctx: &mut Ctx, rc: RowCtx, note: &str) {
+    /// One of LOOK AND FEEL's three lists at rest: the toolkit's button
+    /// wearing the LIST'S OWN NAME, with the toolkit's disclosure
+    /// triangle at its tail. The list itself is not drawn here — it
+    /// hangs over the whole window and is drawn last
+    /// ([`Settings::draw_open_dropdown`]).
+    ///
+    /// The name and not the choice (decision §2b). The owner ruled it
+    /// against the convention of the font page, whose anchors read
+    /// "FAMILY: TERMINUS" — so this is a deliberate difference and not
+    /// an oversight, and the value it used to wear now stands on the
+    /// LOOK AND FEEL RESET page, where naming what is about to be
+    /// cleared is the whole point ([`Settings::drop_value`]).
+    fn draw_drop(&mut self, ctx: &mut Ctx, list: ListId, rc: RowCtx) {
+        let act = Act::ListBtn(list);
+        let r = Self::button_rect(BtnKind::Wide, rc);
+        self.button(ctx, r, list.label(), act);
+        self.caret(ctx, r, act);
+    }
+
+    /// The triangle at the tail of an anchor: the toolkit's own
+    /// disclosure glyph ([`nacelle::view::paint::disclosure`]), turned
+    /// down while its list is unfolded and pointing along it when it is
+    /// not. The state turns the GLYPH and not its colour, which is the
+    /// primitive's rule and not this window's.
+    ///
+    /// Sized and inked like the BACK arrow at the other end of a button
+    /// — `button.icon_size` glyph, `button.pad_x` from the edge, the
+    /// ladder's own text colour — because a glyph on a button is a
+    /// glyph on a button.
+    fn caret(&mut self, ctx: &mut Ctx, r: Rect, act: Act) {
+        static ICON_SIZE: OnceLock<TokenId> = OnceLock::new();
+        static ICON_MIN: OnceLock<TokenId> = OnceLock::new();
+        static PAD_X: OnceLock<TokenId> = OnceLock::new();
         let th = theme::resolved();
-        let v = role_empty(ctx);
-        ctx.dl.text_center(
-            ctx.fonts,
-            FONT_UI,
-            v.px,
-            rc.content.cx(),
-            rc.band.y + rc.m.btn_h + rc.m.gap,
-            note,
-            col(th.color(tok(&MUTED_FG, "text.muted"))),
-            v.track,
+        let s = th
+            .px(tok(&ICON_SIZE, "button.icon_size"))
+            .max(th.px(tok(&ICON_MIN, "button.icon_size_min_px")));
+        let pad = th.px(tok(&PAD_X, "button.pad_x"));
+        let open = self.dropdown.map_or(false, |d| anchor_act(d) == act);
+        let ink = col(ladder(th, &BTN_CLASS, "button", self.button_rung(ctx, r, act)).text);
+        // `line_px` is the box the glyph is centred in vertically; the
+        // glyph's own size is that box, so the triangle sits on the
+        // row's middle without a second centring rule.
+        nacelle::view::paint::disclosure(
+            &mut nacelle::view::surface::CtxSurface::new(ctx),
+            r.right() - pad - s,
+            r.y + (r.h - s) / 2.0,
+            s,
+            s,
+            open,
+            ink,
         );
     }
 
@@ -2537,11 +2843,7 @@ impl Settings {
     fn draw_open_dropdown(&mut self, ctx: &mut Ctx) {
         static MENU_ROW_H: OnceLock<TokenId> = OnceLock::new();
         let Some(d) = self.dropdown else { return };
-        let anchor_act = match d {
-            Dropdown::Family(s) => Act::FamilyBtn(s),
-            Dropdown::Weight(s) => Act::WeightBtn(s),
-        };
-        let Some(anchor) = self.rect_of_act(anchor_act) else { return };
+        let Some(anchor) = self.rect_of_act(anchor_act(d)) else { return };
         let item_h = theme::resolved().px(tok(&MENU_ROW_H, "menu.row_h"));
         match d {
             Dropdown::Family(sect) => {
@@ -2559,6 +2861,37 @@ impl Settings {
                 self.draw_dropdown(ctx, anchor, item_h, &names, dropdown_base(d), |i| {
                     Act::WeightPick(sect, i)
                 });
+            }
+            Dropdown::List(list) => {
+                // What the list carries in front of its names first —
+                // THEMES carries the editor's door — then the names.
+                let mut names: Vec<String> = Vec::new();
+                if list.head() > 0 {
+                    names.push(EDITOR_ROW.to_string());
+                }
+                names.extend(self.names(list).iter().map(|n| n.to_uppercase()));
+                let rows = self
+                    .draw_dropdown(ctx, anchor, item_h, &names, dropdown_base(d), |i| {
+                        list_row_act(list, i)
+                    });
+                // Decision §3, requirement 1: the row that is NOT a
+                // choice must not read as one. The toolkit's own
+                // hairline (`ui::rule`) draws the seam between the door
+                // and the names under it — the whole of the difference
+                // an accordion row can carry today, and the reason the
+                // fleet's report asks for a list row that can say for
+                // itself that it is an action.
+                if list.head() > 0 {
+                    if let Some(&(r, full)) = rows.first() {
+                        // Only once the row has finished unfolding: a
+                        // line on a rect that is still moving is the
+                        // same fault the accordion refuses to make with
+                        // its focus ring.
+                        if full {
+                            nacelle::ui::rule(ctx, Rect::new(r.x, r.bottom(), r.w, 0.0));
+                        }
+                    }
+                }
             }
         }
     }
@@ -2763,6 +3096,11 @@ impl Settings {
     /// focus id — the accordion object registers every fully unfolded
     /// row as `base.item(i)` itself, the same derivation
     /// [`focus_id`] uses for the pick acts.
+    ///
+    /// Returns the rows the object drew, in order, each with whether it
+    /// is done unfolding: a caller that has something to say about ONE
+    /// row (the THEMES list's door) can only say it where that row was
+    /// actually put.
     fn draw_dropdown<F: Fn(usize) -> Act>(
         &mut self,
         ctx: &mut Ctx,
@@ -2771,7 +3109,7 @@ impl Settings {
         names: &[String],
         base: FocusId,
         make_act: F,
-    ) {
+    ) -> Vec<(Rect, bool)> {
         // Accordion animation: the list unfolds from the anchor's edge.
         static UNFOLD_MS: OnceLock<TokenId> = OnceLock::new();
         let dur = theme::resolved().px(tok(&UNFOLD_MS, "motion.menu_unfold.duration_ms")) / 1000.0;
@@ -2787,22 +3125,53 @@ impl Settings {
             .unwrap_or(1.0);
         // motion.menu_unfold.easing = ease_out, awaiting a motion resolver.
         let p = 1.0 - (1.0 - t) * (1.0 - t);
-        for (i, (r, _full)) in
-            nacelle::object::dropdown::accordion_focusable(ctx, anchor, item_h, names, p, base)
-                .into_iter()
-                .enumerate()
-        {
+        let rows =
+            nacelle::object::dropdown::accordion_focusable(ctx, anchor, item_h, names, p, base);
+        for (i, (r, _full)) in rows.iter().copied().enumerate() {
             // Deliberately unclipped: the list hangs past the window's
             // edge and stays pressable there, which is the one place in
             // this file where a target may leave the body's box.
             self.hits.push((r, make_act(i)));
         }
+        rows
     }
 
     /// Button in the terminal-tab style (slant, hover, flash on click),
     /// joining the focus chain where it is drawn.
     fn button(&mut self, ctx: &mut Ctx, r: Rect, label: &str, act: Act) {
         self.button_drawn(ctx, r, label, act, None)
+    }
+
+    /// How a button stands this frame. Asked in two places — the plate
+    /// itself, and the glyphs this file draws ON a plate (BACK's arrow,
+    /// a list anchor's caret) — so that a glyph can never end up a
+    /// different colour from the word beside it.
+    fn button_state(
+        &self,
+        ctx: &Ctx,
+        r: Rect,
+        act: Act,
+    ) -> nacelle::object::button::ButtonState {
+        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
+        let th = theme::resolved();
+        // With an open dropdown only its items react to the mouse.
+        let hover = self.dropdown.is_none() && r.contains(ctx.mouse.0, ctx.mouse.1);
+        let press_s = th.px(tok(&PRESS_MS, "motion.press.duration_ms")) / 1000.0;
+        let flash = self
+            .flash
+            .map(|(a, t)| a == act && t.elapsed().as_secs_f32() < press_s)
+            .unwrap_or(false);
+        // An anchor whose list is unfolded is the one button on the
+        // page that is switched ON, and the ladder already has the rung
+        // for it: a list left open is a state the eye should see.
+        let selected = self.dropdown.map_or(false, |d| anchor_act(d) == act);
+        nacelle::object::button::ButtonState { hover, flash, selected }
+    }
+
+    /// [`Settings::button_state`]'s ladder rung, for a caller that
+    /// needs the colour rather than the plate.
+    fn button_rung(&self, ctx: &Ctx, r: Rect, act: Act) -> State {
+        rung(self.button_state(ctx, r, act))
     }
 
     /// [`Settings::button`], with the chain membership spelled out.
@@ -2819,25 +3188,10 @@ impl Settings {
         ring: Option<bool>,
     ) {
         let th = theme::resolved();
-        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
         static SKEW: OnceLock<TokenId> = OnceLock::new();
         static ICON_SIZE: OnceLock<TokenId> = OnceLock::new();
         static ICON_MIN: OnceLock<TokenId> = OnceLock::new();
-        // With an open dropdown only its items react to the mouse.
-        let hover = self.dropdown.is_none() && r.contains(ctx.mouse.0, ctx.mouse.1);
-        let press_s = th.px(tok(&PRESS_MS, "motion.press.duration_ms")) / 1000.0;
-        let flash = self
-            .flash
-            .map(|(a, t)| a == act && t.elapsed().as_secs_f32() < press_s)
-            .unwrap_or(false);
-        // The currently selected item is highlighted like an active tab.
-        let is_current = match act {
-            Act::Look(i) => self.is_selected(ListId::Looks, i),
-            Act::Layaut(i) => self.is_selected(ListId::Layauts, i),
-            Act::Sounds(i) => self.is_selected(ListId::Sounds, i),
-            _ => false,
-        };
-        let st = nacelle::object::button::ButtonState { hover, flash, selected: is_current };
+        let st = self.button_state(ctx, r, act);
         // The plate, and the ring the chain owes it (F1 §1.3). BACK's
         // arrow and label draw after it, which is fine — the ring sits
         // outside the quad and overlaps neither.
@@ -2862,16 +3216,7 @@ impl Settings {
             // is a quad, so no glyph token applies.
             let f = role_button(ctx);
             let ty = center_y(ctx, r, f);
-            let state = if flash {
-                State::Press
-            } else if is_current {
-                State::Selected
-            } else if hover {
-                State::Hover
-            } else {
-                State::Idle
-            };
-            let color = col(ladder(th, &BTN_CLASS, "button", state).text);
+            let color = col(ladder(th, &BTN_CLASS, "button", rung(st)).text);
             let skew = th.px(tok(&SKEW, "button.skew"));
             let s = th
                 .px(tok(&ICON_SIZE, "button.icon_size"))
@@ -2912,21 +3257,29 @@ mod tests {
         let acts = [
             Act::Close,
             Act::Back,
-            Act::OpenThemes,
+            Act::OpenLookFeel,
             Act::OpenFont,
             Act::OpenSound,
             Act::OpenGrid,
             Act::OpenBoards,
             Act::OpenColor,
             Act::OpenBlur,
-            Act::OpenLook,
-            Act::OpenLayauts,
-            Act::OpenSounds,
-            Act::Look(0),
-            Act::Look(1),
-            Act::Layaut(0),
-            Act::Sounds(0),
-            Act::ResetScreen,
+            Act::ListBtn(ListId::Looks),
+            Act::ListBtn(ListId::Layauts),
+            Act::ListBtn(ListId::Sounds),
+            // The door and the first theme stand on two rows of one
+            // list: the pair a shared id would silently merge.
+            Act::ThemesEditor,
+            Act::Pick(ListId::Looks, 0),
+            Act::Pick(ListId::Looks, 1),
+            Act::Pick(ListId::Layauts, 0),
+            Act::Pick(ListId::Layauts, 1),
+            Act::Pick(ListId::Sounds, 0),
+            // The footer and the control it leads to: one id between
+            // them would let the press that opens the confirmation be
+            // the press that answers it.
+            Act::LookFeelReset,
+            Act::LookFeelResetConfirm,
             Act::BlurRadiusTrack,
             Act::BlurOpacityTrack,
             Act::ColorDepth(8),
@@ -2986,6 +3339,426 @@ mod tests {
             focus_id(Act::FamilyPick(Sect::Term, 0)),
             focus_id(Act::FamilyBtn(Sect::Term))
         );
+        // The three lists of LOOK AND FEEL derive theirs the same way,
+        // counting from the ROW and not from the name: the THEMES list
+        // carries a door in front of its first theme, and the door owns
+        // row zero.
+        let themes = dropdown_base(Dropdown::List(ListId::Looks));
+        assert_eq!(focus_id(Act::ThemesEditor), themes.item(0));
+        assert_eq!(focus_id(Act::Pick(ListId::Looks, 0)), themes.item(1));
+        assert_eq!(
+            focus_id(Act::Pick(ListId::Sounds, 0)),
+            dropdown_base(Dropdown::List(ListId::Sounds)).item(0)
+        );
+    }
+
+    /// Decision §3, requirements 1 and 2 — the first row of the THEMES
+    /// list is a door, not a theme.
+    ///
+    /// It stands where a theme stands, in a list whose entire role is
+    /// "choose one of these", so the only thing keeping it from writing
+    /// `Theme=` is that the row carries a different act. The derivation
+    /// is asserted first — row 0 is the door, row 1 is the first theme,
+    /// and the other two lists carry no door at all — and then the act
+    /// is performed: [`Settings::perform`] answers true exactly when
+    /// the configuration changed, and this one may not.
+    #[test]
+    fn the_themes_editor_row_is_a_door_and_writes_no_theme() {
+        assert!(
+            list_row_act(ListId::Looks, 0) == Act::ThemesEditor,
+            "the THEMES list does not open with its door"
+        );
+        assert!(
+            list_row_act(ListId::Looks, 1) == Act::Pick(ListId::Looks, 0),
+            "the row under the door picks the wrong theme"
+        );
+        for list in [ListId::Layauts, ListId::Sounds] {
+            assert!(
+                list_row_act(list, 0) == Act::Pick(list, 0),
+                "{} carries a door it has no editor for",
+                list.label()
+            );
+        }
+
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        let before = s.current_look.clone();
+        assert!(
+            !s.perform(Act::ThemesEditor, 0.0),
+            "the door reported a configuration change"
+        );
+        assert_eq!(s.current_look, before, "the door moved the selection");
+        assert!(s.view == View::ThemeEditor, "the door opened nothing");
+        assert!(s.dropdown.is_none(), "the list stayed open behind the editor");
+        // And the way back out is the page it was opened from.
+        assert!(parent_view(View::ThemeEditor) == Some(View::LookFeel));
+    }
+
+    /// Decision §3 — Escape peels ONE layer per press.
+    ///
+    /// Open list, then editor, then page, and only then the window
+    /// itself: the last step is the application's ([`KeyOut::Ignored`]
+    /// is what `main.rs` turns into a close), so the window has to
+    /// answer for the three before it. From the editor, three levels
+    /// in, one press used to land on the desktop.
+    #[test]
+    fn escape_peels_one_layer_at_a_time() {
+        fn escape(s: &mut Settings) -> KeyOut {
+            let mut fc = FocusCtl::new();
+            s.key(
+                &KeyEv { key: FKey::Escape, mods: Mods::NONE, repeat: false, text: None },
+                &mut fc,
+            )
+        }
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        assert!(matches!(escape(&mut s), KeyOut::Consumed));
+        assert!(s.dropdown.is_none(), "the list stayed open");
+        assert!(s.view == View::LookFeel, "the list took the page with it");
+
+        s.view = View::ThemeEditor;
+        assert!(matches!(escape(&mut s), KeyOut::Consumed));
+        assert!(s.view == View::LookFeel, "the editor did not fall back to its page");
+        assert!(matches!(escape(&mut s), KeyOut::Consumed));
+        assert!(s.view == View::Menu, "the page did not fall back to the menu");
+        // The last layer is the window itself, and that one is not
+        // this window's to close.
+        assert!(matches!(escape(&mut s), KeyOut::Ignored));
+        assert!(s.open, "the window closed itself");
+    }
+
+    /// Decision §3, requirement 1 — the door is set apart from the
+    /// choices under it.
+    ///
+    /// A list whose whole role is "choose one of these" now opens with
+    /// a row that is not a choice, and it may not read as one. What
+    /// separates them is the toolkit's own hairline (`ui::rule`, which
+    /// had no consumer in this program either), drawn along the seam
+    /// between the door and the first theme. It is thin cover for the
+    /// requirement — see the fleet's report: an accordion row cannot
+    /// yet carry emphasis of its own — but it is drawn from the
+    /// theme's ink and width and not from numbers written here.
+    #[test]
+    fn the_door_is_ruled_off_from_the_themes() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        s.dropdown_since = None;
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let door = s
+            .hits
+            .iter()
+            .find(|&&(_, a)| a == Act::ThemesEditor)
+            .map(|&(r, _)| r)
+            .expect("the open THEMES list drew no door");
+        let seam = dl.cmds().iter().any(|c| match c {
+            nacelle::draw::DrawCmd::Line { from, to, stroke, .. } => {
+                *stroke > 0.0
+                    && (from[1] - door.bottom()).abs() < 0.51
+                    && (to[1] - from[1]).abs() < 0.01
+                    && (from[0] - door.x).abs() < 0.51
+                    && (to[0] - door.right()).abs() < 0.51
+            }
+            _ => false,
+        });
+        assert!(seam, "the door and the first theme share one look");
+    }
+
+    /// Every anchor wears the toolkit's disclosure triangle, and the
+    /// triangle turns when its list unfolds.
+    ///
+    /// The affordance is the only thing on the page that says a row is
+    /// a list and not a button, and it is the toolkit's glyph
+    /// ([`nacelle::view::paint::disclosure`], which had no consumer in
+    /// this program at all): closed it points along the row, open it
+    /// points down. The state turns the GLYPH, so the shape is what
+    /// this test reads.
+    #[test]
+    fn every_list_anchor_wears_a_caret_that_turns() {
+        /// The closed three-point outlines one frame drew — the shape
+        /// `paint::disclosure` makes, and nothing else on this page.
+        fn carets(dl: &nacelle::draw::DrawList) -> Vec<Vec<[f32; 2]>> {
+            dl.cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::Polyline { pts, closed: true, .. }
+                        if pts.len() == 3 =>
+                    {
+                        Some(pts.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let drawn = |fonts: &mut nacelle::font::FontSystem, open: Option<ListId>| {
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            s.dropdown = open.map(Dropdown::List);
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            s.draw(&mut ctx);
+            carets(&dl)
+        };
+        let rest = drawn(&mut fonts, None);
+        assert_eq!(rest.len(), 3, "one caret per list, and no more");
+        for pts in &rest {
+            // Pointing along the row: the two ends of its upright edge
+            // stand on one x.
+            assert!(
+                (pts[0][0] - pts[2][0]).abs() < 0.01,
+                "a closed list's caret is not pointing at its list"
+            );
+        }
+        let open = drawn(&mut fonts, Some(ListId::Looks));
+        assert_eq!(open.len(), 3, "an open list took a caret with it");
+        assert!(
+            open.iter().any(|p| (p[0][1] - p[1][1]).abs() < 0.01),
+            "the open list's caret never turned"
+        );
+    }
+
+    /// Every text run one frame wrote, in call order.
+    fn text_runs(dl: &nacelle::draw::DrawList) -> Vec<String> {
+        dl.cmds()
+            .iter()
+            .filter_map(|c| match c {
+                nacelle::draw::DrawCmd::Text { text, .. } => Some(text.clone()),
+                nacelle::draw::DrawCmd::ModuleTitle { left, .. } => Some(left.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One page, drawn at rest, as the text it wrote.
+    fn page_runs(fonts: &mut nacelle::font::FontSystem, s: &mut Settings) -> Vec<String> {
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        text_runs(&dl)
+    }
+
+    /// Decision §2b — an anchor wears its list's NAME, and nothing else.
+    ///
+    /// The anchors read "THEMES: MIDNIGHT" until the owner ruled
+    /// otherwise, deliberately against the font page's own convention.
+    /// So the test is two-sided: the name has to be there, and the
+    /// value the anchor used to carry — the choice in force, or the
+    /// note an empty list stands behind — may not be anywhere on the
+    /// page. Half a rename would leave the old spelling drawn under a
+    /// new one.
+    #[test]
+    fn a_list_anchor_wears_its_name_and_not_its_choice() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        let drawn = page_runs(&mut fonts, &mut s);
+        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds] {
+            assert!(
+                drawn.iter().any(|t| t == list.label()),
+                "{} does not wear its own name",
+                list.label()
+            );
+            let value = s.drop_value(list);
+            assert!(
+                !drawn.iter().any(|t| t.contains(&value)),
+                "{} still wears its choice: {value}",
+                list.label()
+            );
+        }
+    }
+
+    /// Decision §2a — the reset cannot be done by one press.
+    ///
+    /// Six settings and a pinned arrangement go at once and nothing
+    /// puts them back, so the footer may only OPEN the confirmation:
+    /// it writes nothing, asks the application for nothing, and the
+    /// control that does the work is described by one page alone. That
+    /// last assertion is the guard itself — a confirm act described by
+    /// the LOOK AND FEEL page too would be a second door standing open
+    /// beside the locked one.
+    ///
+    /// The reset itself is not performed here, and cannot be: it
+    /// writes the configuration of whoever runs the tests.
+    #[test]
+    fn the_look_and_feel_reset_takes_a_second_press_on_another_page() {
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        assert!(
+            !s.perform(Act::LookFeelReset, 0.0),
+            "the footer reported a configuration change"
+        );
+        assert!(s.view == View::LookFeelReset, "the footer opened nothing");
+        assert!(!s.reset_screen, "the footer asked for the screen to be cleared");
+
+        for p in PAGES.iter() {
+            assert_eq!(
+                described_acts(&s, p).contains(&Act::LookFeelResetConfirm),
+                p.view == View::LookFeelReset,
+                "{}: the reset's own control is on the wrong page",
+                p.title
+            );
+        }
+
+        // And changing your mind is the ordinary way out, leaving
+        // everything exactly as it was.
+        let mut fc = FocusCtl::new();
+        let esc =
+            KeyEv { key: FKey::Escape, mods: Mods::NONE, repeat: false, text: None };
+        assert!(matches!(s.key(&esc, &mut fc), KeyOut::Consumed));
+        assert!(s.view == View::LookFeel, "Escape did not come back to the page");
+        assert!(!s.reset_screen, "cancelling still asked for a reset");
+    }
+
+    /// Decision §2a — the confirmation says what it is about to spend.
+    ///
+    /// A confirmation that only asks "are you sure" is a speed bump.
+    /// This one names the theme, the layout and the sound set standing
+    /// in the configuration right now — the reading that used to sit on
+    /// the anchors (§2b) — and the two settings that have no name to
+    /// give: the fonts and the pinned arrangement.
+    #[test]
+    fn the_confirmation_names_what_the_reset_clears() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::LookFeelReset;
+        let drawn = page_runs(&mut fonts, &mut s);
+        let said = |needle: &str| drawn.iter().any(|t| t.contains(needle));
+        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds] {
+            let value = s.drop_value(list);
+            assert!(
+                said(&value),
+                "the confirmation does not say what {} is set to",
+                list.label()
+            );
+        }
+        assert!(said("FONTS"), "the confirmation does not mention the fonts");
+        assert!(
+            said("PINNED"),
+            "the confirmation does not mention the pinned arrangement"
+        );
+    }
+
+    /// Every view can be left, and no view is its own way out. A cycle
+    /// here would be a window Escape cannot get out of.
+    #[test]
+    fn every_view_but_the_menu_has_a_way_out() {
+        for p in PAGES.iter() {
+            let mut v = p.view;
+            let mut steps = 0;
+            while let Some(up) = parent_view(v) {
+                v = up;
+                steps += 1;
+                assert!(steps <= PAGES.len(), "{}: the way out is a circle", p.title);
+            }
+            assert!(v == View::Menu, "{}: the way out is not the menu", p.title);
+        }
+    }
+
+    /// An open list offers one pressable row per name, plus whatever it
+    /// carries in front of them — and every row picks the name it is
+    /// drawn against.
+    ///
+    /// This is the page's whole worth: the three choices moved out of
+    /// pages of their own and into lists that hang over one page, and a
+    /// list that loses a name loses a theme the user installed.
+    #[test]
+    fn an_open_list_offers_every_name_it_has() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds] {
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            s.dropdown = Some(Dropdown::List(list));
+            // Fully unfolded: a list caught mid-animation is drawn but
+            // not yet answerable, by the object's own rule.
+            s.dropdown_since = None;
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            s.draw(&mut ctx);
+            let acts: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+            for i in 0..s.names(list).len() {
+                assert!(
+                    acts.contains(&Act::Pick(list, i)),
+                    "{}: name {i} is in the list and not on the screen",
+                    list.label()
+                );
+            }
+            assert_eq!(
+                acts.contains(&Act::ThemesEditor),
+                list.head() > 0,
+                "{}: the editor door is on the wrong list",
+                list.label()
+            );
+        }
+    }
+
+    /// The reach P11 used to guard, pinned the WRONG way round on
+    /// purpose, because the toolkit cannot give it back yet.
+    ///
+    /// P11 (`a_long_list_loses_no_name`) stocked forty names on the LOOK
+    /// page and walked the page's scroll from top to bottom, asserting
+    /// every name was drawn INSIDE the body's box. That page is gone,
+    /// and with it its scroll: `object::dropdown::accordion` lays its
+    /// rows out as one column of `item_h * names.len()` with no scroll,
+    /// no `max_rows` and no flip, and this file may not grow a second
+    /// list of its own to fix that (the toolkit rule). The half of P11
+    /// that still holds — no name is dropped — is
+    /// [`an_open_list_offers_every_name_it_has`]; this is the half that
+    /// does not.
+    ///
+    /// So it asserts the FAULT: with forty themes the tail of the list
+    /// is pressable below the window's bottom edge. The day the
+    /// accordion learns to scroll (the fleet's report asks for scroll +
+    /// max_rows + flip) this test fails, and whoever made it pass has to
+    /// come here and turn it back into P11. A regression nobody can
+    /// delete quietly is worth more than a guard nobody replaced.
+    #[test]
+    fn a_long_list_hangs_past_the_window_until_the_accordion_can_scroll() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        const N: usize = 40;
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.themes = (0..N).map(|i| format!("theme {i}")).collect();
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        s.dropdown_since = None;
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let h = ctx.h;
+        s.draw(&mut ctx);
+        // Offered, all forty of them — that much the list does keep.
+        let acts: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+        for i in 0..N {
+            assert!(
+                acts.contains(&Act::Pick(ListId::Looks, i)),
+                "name {i} is in the list and not in the hit map"
+            );
+        }
+        // And offered where the pointer cannot follow.
+        let lost = s
+            .hits
+            .iter()
+            .filter(|(r, a)| matches!(a, Act::Pick(ListId::Looks, _)) && r.y > h)
+            .count();
+        assert!(
+            lost > 0,
+            "forty names now fit the window: the accordion has learnt to \
+             scroll, so turn this test back into P11 — every name inside \
+             the body's box, walking the list's own scroll"
+        );
+        viewport_home();
     }
 
     /// The keyboard split: sliders answer arrows, everything else
@@ -3115,7 +3888,7 @@ mod tests {
     /// Scrolled to its end, the last row of every page stands exactly on
     /// the bottom edge of the body's box: not short of it (which would
     /// mean the offset stops before the content does) and not past it
-    /// (which would mean a row nobody can reach). RESET THIS SCREEN used
+    /// (which would mean a row nobody can reach). That footer used
     /// to share pixels with the rows above it and win the click by
     /// standing later in the hit map; it now stands outside the box the
     /// rows are held to, so the two can no longer meet.
@@ -3144,7 +3917,7 @@ mod tests {
                     if row.ctrl.pinned() {
                         continue;
                     }
-                    let rh = s.row_h(p, &row.ctrl, m, content);
+                    let rh = s.row_h(&row.ctrl, m, content);
                     last = Some(y + rh);
                     y += rh + m.space(row.after);
                 }
@@ -3166,7 +3939,7 @@ mod tests {
                     if !row.ctrl.pinned() {
                         continue;
                     }
-                    let rh = s.row_h(p, &row.ctrl, m, content);
+                    let rh = s.row_h(&row.ctrl, m, content);
                     let pinned_top = content.bottom() - rh;
                     assert!(
                         view.bottom() <= pinned_top + 0.01,
@@ -3269,86 +4042,58 @@ mod tests {
         }
     }
 
-    /// The corner button is painted after the body it scrolls, so that
-    /// a row sliding past cannot paint over the way out. That is only
-    /// safe while the chrome and the body do not share pixels when the
-    /// body is at rest — and the one page where they stand in the same
-    /// row is the picker, whose first name sits in the grid's second
-    /// column. This is the gap between them, at every height.
-    #[test]
-    fn the_corner_button_never_reaches_the_first_list_cell() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut dl = nacelle::draw::DrawList::new();
-        for h in HEIGHTS {
-            theme::resolved();
-            theme::set_viewport(h, 1.0);
-            let ctx = probe(&mut dl, &mut fonts, h, 1.0);
-            let content = content_rect(modal_rect(ctx.w, ctx.h));
-            let m = Metrics::of(&ctx, content);
-            let cell = (content.w - m.gap * (m.grid_cols as f32 - 1.0)) / m.grid_cols as f32;
-            assert!(
-                m.corner_w <= cell + m.gap,
-                "at {h}px BACK is {} px wide and the second column starts at {}",
-                m.corner_w,
-                cell + m.gap
-            );
-        }
-        viewport_home();
-    }
-
-    /// P11 — a list loses no name, however long it is.
+    /// A page whose flow is longer than its box can be scrolled to its
+    /// end, and every row it describes is reachable somewhere along the
+    /// way.
     ///
-    /// The grid used to `break` out of its loop at the bottom edge of
-    /// the content box: past about twenty entries a name simply was not
-    /// there, with no bar, no count and no notice. Forty names are laid
-    /// out here and the view is walked from top to bottom; every one of
-    /// them has to appear, and the ones that do have to be inside the
-    /// body's box while they do.
+    /// P11 was a list that `break`-ed out of its own loop at the bottom
+    /// edge: past about twenty entries a name simply was not there,
+    /// with no bar, no count and no notice. The lists have since moved
+    /// into drop-downs, which is a DIFFERENT surface with the same
+    /// question still open (see the fleet's report: the accordion does
+    /// not scroll). What is tested here is the half that stayed — the
+    /// page's own flow, walked from top to bottom with a page of extra
+    /// rows in it.
     #[test]
-    fn a_long_list_loses_no_name() {
+    fn a_page_longer_than_its_box_reaches_its_last_row() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
-        const N: usize = 40;
-        let names: Vec<String> = (0..N).map(|i| format!("theme {i}")).collect();
-        let p = page(View::Look);
+        // The tallest page the description has, drawn short: FONT's two
+        // sections do not fit a 500 px window, which is the case the
+        // scrolling exists for.
+        let p = page(View::Font);
         let stocked = |offset: f32| {
             let mut s = furnished();
-            s.view = View::Look;
-            s.themes = names.clone();
+            s.view = View::Font;
             s.scroll.set_offset(offset);
             s
         };
-        // The travel, and a step of one row: no name can slip between
-        // two frames of the walk.
-        let (furthest, step) = {
+        let (furthest, step, last_act) = {
             let mut dl = nacelle::draw::DrawList::new();
-            let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            let ctx = probe(&mut dl, &mut fonts, 500.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
             let s = stocked(0.0);
-            ((s.flow_h(p, m, content) - s.body_box(p, m, content).h).max(0.0), m.btn_h)
+            (
+                (s.flow_h(p, m, content) - s.body_box(p, m, content).h).max(0.0),
+                m.btn_h,
+                Act::WeightBtn(Sect::Ui),
+            )
         };
-        assert!(furthest > 0.0, "forty names ought not to fit");
-        assert!(step > 0.0, "a row has a height");
-        let mut seen = vec![false; N];
+        assert!(furthest > 0.0, "the FONT page ought not to fit at 500 px");
+        let mut seen = false;
         let mut offset = 0.0f32;
         while offset <= furthest + step {
             let mut s = stocked(offset);
             let mut dl = nacelle::draw::DrawList::new();
-            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            let mut ctx = probe(&mut dl, &mut fonts, 500.0, 1.0);
             s.draw(&mut ctx);
-            for (_, act) in &s.hits {
-                if let Act::Look(i) = act {
-                    seen[*i] = true;
-                }
-            }
+            seen |= s.hits.iter().any(|&(_, a)| a == last_act);
             offset += step;
         }
-        let lost: Vec<usize> = (0..N).filter(|i| !seen[*i]).collect();
-        assert!(lost.is_empty(), "names {lost:?} were never drawn");
+        assert!(seen, "the last row of the page was never drawn");
         viewport_home();
     }
 
@@ -3475,7 +4220,7 @@ mod tests {
     fn described_acts(s: &Settings, page: &Page) -> Vec<Act> {
         let mut out = vec![match page.chrome {
             Chrome::Close => Act::Close,
-            Chrome::Back | Chrome::BackInline => Act::Back,
+            Chrome::Back => Act::Back,
         }];
         for row in page.rows {
             if !(row.enabled)(s) {
@@ -3489,12 +4234,13 @@ mod tests {
                 Ctrl::Chips { values, act, .. } => {
                     out.extend(values.iter().map(|v| act(*v)))
                 }
-                Ctrl::Picker { list } => {
-                    let make = list.act();
-                    out.extend((0..s.names(*list).len()).map(make));
-                }
+                // The anchor alone: what the list holds is only on
+                // screen while it is open, which is another test's
+                // question (`an_open_list_offers_every_name_it_has`).
+                Ctrl::Drop { list } => out.push(Act::ListBtn(*list)),
                 Ctrl::Section { .. }
                 | Ctrl::Note { .. }
+                | Ctrl::Empty { .. }
                 | Ctrl::Hint { .. }
                 | Ctrl::Custom { .. } => {}
             }
