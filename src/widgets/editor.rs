@@ -78,9 +78,15 @@ fn grab_edge() -> f32 {
 }
 
 /// Hold time on an ADD WIDGET entry before placement starts.
+///
+/// Its own token, not `motion.hold.duration_ms`: that one exists so a
+/// DESTRUCTIVE control can be held long enough to change your mind,
+/// and adding a widget is not that — it is placed, moved, or removed
+/// again in a second. Sharing the token meant one of the two was
+/// always wrong, and the destructive one is the one you cannot undo.
 fn hold_secs() -> f32 {
     static D: OnceLock<TokenId> = OnceLock::new();
-    (theme::resolved().px(tok(&D, "motion.hold.duration_ms")) / 1000.0).max(0.0)
+    (theme::resolved().px(tok(&D, "editor.add_hold_ms")) / 1000.0).max(0.0)
 }
 
 /// Padding inside the ADD WIDGET window, with its device-px floor.
@@ -445,11 +451,14 @@ impl Editor {
         Rect::new(r.right() - s - inset, r.y + inset, s, s)
     }
 
-    /// Whether the panel can be removed from the grid. The control
-    /// panel is the one widget that cannot be switched off — it is the
-    /// only way back into the settings — so it never gets an X.
+    /// Whether the panel can be removed from the grid. A widget that
+    /// declared itself ESSENTIAL never gets an X: switching it off
+    /// would leave the user with no way back — the way into the
+    /// settings is one of its buttons. Which widget that is, is the
+    /// widget's own declaration, so an installation whose way back
+    /// lives somewhere else is protected just the same.
     fn removable(i: usize) -> bool {
-        Panel(i as u16).name() != "control"
+        !Panel(i as u16).essential()
     }
 
     /// Topmost panel whose body or edge area contains the point,
@@ -727,18 +736,28 @@ impl Editor {
     }
 
     /// Placement size of a freshly added widget.
+    /// How big a widget is when it first lands.
+    ///
+    /// One intent, expressed once: a fresh widget takes a share of the
+    /// screen. Snapping does not get a size of its own — it only
+    /// QUANTIZES that share up to whole cells, so turning the grid on
+    /// no longer shrinks a new widget to a few cells (three by two,
+    /// which on a fine grid arrived the size of an icon) and no longer
+    /// hides two more numbers from the theme.
     fn spawn_size(&self, w: f32, h: f32) -> (f32, f32) {
+        static SW: OnceLock<TokenId> = OnceLock::new();
+        static SH: OnceLock<TokenId> = OnceLock::new();
+        let t = nacelle::theme::resolved();
         let m = self.min_outer();
+        let want_w = w * t.px(tok(&SW, "editor.spawn_w_frac")).clamp(0.0, 1.0);
+        let want_h = h * t.px(tok(&SH, "editor.spawn_h_frac")).clamp(0.0, 1.0);
         if self.snap {
-            ((w / self.cols as f32 * 3.0).max(m), (h / self.rows as f32 * 2.0).max(m))
+            let (cw, ch) = (w / self.cols as f32, h / self.rows as f32);
+            let cols = (want_w / cw).ceil().max(1.0);
+            let rows = (want_h / ch).ceil().max(1.0);
+            ((cols * cw).max(m), (rows * ch).max(m))
         } else {
-            static SW: OnceLock<TokenId> = OnceLock::new();
-            static SH: OnceLock<TokenId> = OnceLock::new();
-            let t = nacelle::theme::resolved();
-            (
-                (w * t.px(tok(&SW, "editor.spawn_w_frac")).clamp(0.0, 1.0)).max(m),
-                (h * t.px(tok(&SH, "editor.spawn_h_frac")).clamp(0.0, 1.0)).max(m),
-            )
+            (want_w.max(m), want_h.max(m))
         }
     }
 
@@ -762,6 +781,47 @@ impl Editor {
                 })
                 .unwrap_or(false);
             Self::draw_button(ctx, br, labels[i], hover, flash);
+        }
+    }
+
+    /// The editor as a HALL shows it: the grid and the edited rectangles
+    /// solved for the hall's own geometry, and nothing else. No hover,
+    /// no resize handles, no remove buttons, no button stack, no ADD
+    /// WIDGET window — every one of those is something to operate, and a
+    /// hall is a preview: the pointer over it is deliberately not routed
+    /// into the editor (see the hall's event arm in main). Hence `&self`
+    /// where [`Editor::draw`] takes `&mut self`: a hall frame can never
+    /// move a panel or advance an animation, so drawing the same editor
+    /// on four screens stays one editor.
+    pub fn draw_preview(&self, ctx: &mut Ctx) {
+        let t = theme::resolved();
+        let (w, h) = (ctx.w, ctx.h);
+        static GRID_C: OnceLock<TokenId> = OnceLock::new();
+        static GRID_W: OnceLock<TokenId> = OnceLock::new();
+        static PROXY_CLASS: OnceLock<Option<u16>> = OnceLock::new();
+        let grid_c = col(t.color(tok(&GRID_C, "component.editor.grid_line")));
+        let grid_w = t.px(tok(&GRID_W, "editor.grid.stroke"));
+        for i in 0..=self.cols {
+            let x = i as f32 / self.cols as f32 * w;
+            ctx.dl.line(x, 0.0, x, h, grid_w, grid_c);
+        }
+        for i in 0..=self.rows {
+            let y = i as f32 / self.rows as f32 * h;
+            ctx.dl.line(0.0, y, w, y, grid_w, grid_c);
+        }
+        // The resting proxy style — a hall has no cursor of its own to
+        // heat a rectangle with.
+        let edge = match *PROXY_CLASS.get_or_init(|| theme::class_id("editor.proxy")) {
+            Some(c) => t.class_state(c, State::Idle),
+            None => StateStyle::RAW,
+        }
+        .edge;
+        for i in 0..self.rects.len() {
+            if !on_screen(&self.rects[i]) {
+                continue;
+            }
+            let r = self.px_rect(i, w, h);
+            ctx.dl.rect_outline(r.x, r.y, r.w, r.h, proxy_border(false), col(edge));
         }
     }
 

@@ -1,8 +1,21 @@
 //! User configuration and theme data.
 //!
-//! Configuration (XDG_CONFIG_HOME):
-//!   ~/.config/nacelle-desktop/nacelle-desktop.conf        — main configuration (Key=Value)
-//!   ~/.config/nacelle-desktop/shellrc             — generated bash startup file
+//! Configuration is read as an XDG cascade — the arrangement GTK, Qt,
+//! libadwaita and COSMIC all use. The user's own file comes first and
+//! the system ones after it, key by key: a key the user never set is
+//! answered by the system file, so a distribution or an administrator
+//! can change a default without anything being copied into anybody's
+//! home directory.
+//!
+//!   $XDG_CONFIG_HOME/nacelle-desktop/nacelle-desktop.conf  — the user's own (Key=Value)
+//!       (~/.config/nacelle-desktop/… when the variable is unset)
+//!   $XDG_CONFIG_DIRS/nacelle-desktop/nacelle-desktop.conf  — the system defaults
+//!       (/etc/xdg/nacelle-desktop/… when the variable is unset)
+//!   <either of those>/shellrc                     — bash startup file, first one found
+//!
+//! Writes go to the user's directory and nowhere else, and only when
+//! the user changes something: the program creates no directory and
+//! copies no file at startup.
 //!
 //! Everything a theme is made of is DATA, not configuration, so it lives
 //! under XDG_DATA_HOME:
@@ -32,8 +45,10 @@
 //!   gap = 2.5           # vertical gap between panels (weight units)
 //!   panel = cpu 26 ref 15.5 min 9.0   # panels top->bottom with height
 //!   panel = control 12                # weights and optional ref/min (vh)
-//! Panels: clock, sysinfo, uptime, hardware, cpu, memory, processes,
-//! shell, network, filesystem, keyboard, control.
+//! A panel is named by the addon that draws it — whatever is installed
+//! under addons/scripts and addons/plugins, which the program lists at
+//! startup. A layout naming an addon this machine does not have simply
+//! leaves that panel out.
 //!
 //! Legacy — "<panel> = x y w h" percentages at the 16:9 reference,
 //! re-adapted to the window continuously (edge-anchored transform on
@@ -63,21 +78,47 @@ pub use nacelle::layout::{board_key, BoardId, LayoutDef, ResOverride};
 use nacelle::assets::AssetRoots;
 use nacelle::layout::LayautStore;
 
-/// The one widget factory of this application: the four core widgets
-/// linked in, plugins honouring NACELLE_SAFE, everything on the XDG
-/// search path. Widgets are made through it and the registry is built
-/// from it, so the two can never disagree about what exists.
+/// The widget crates linked into this binary.
+///
+/// This is the only place in the program where linking a widget in is
+/// arranged at all, and it has to exist: a linked-in addon is a SYMBOL
+/// in this executable, and no directory scan can find a symbol. What it
+/// does NOT do is describe those widgets. Each crate exports its own
+/// [`BuiltinWidget`](nacelle::widget::factory::BuiltinWidget) — the
+/// name the addon would have as a file, and the very bytes of the
+/// `.meta` that ships beside that file — so the list below names
+/// CRATES, never widgets: no label, no size, no category and no place
+/// in the arrangement of any widget is written down anywhere in this
+/// program.
+///
+/// Everything else comes from the addons directory, exactly as
+/// third-party addons do. A machine with nothing installed and nothing
+/// linked has no widgets, and says so.
+const LINKED: [nacelle::widget::factory::BuiltinWidget; 8] = [
+    nacelle_widget_ai::WIDGET,
+    nacelle_widget_appcats::WIDGET,
+    nacelle_widget_appgrid::WIDGET,
+    nacelle_widget_control::WIDGET,
+    nacelle_widget_filesystem::WIDGET,
+    nacelle_widget_keyboard::WIDGET,
+    nacelle_widget_search::WIDGET,
+    nacelle_widget_shell::WIDGET,
+];
+
+/// The one widget factory of this application: the linked-in crates,
+/// plugins honouring NACELLE_SAFE, everything on the XDG search path.
+/// Widgets are made through it and the registry is built from it, so
+/// the two can never disagree about what exists.
 pub fn widget_factory() -> &'static nacelle::widget::factory::WidgetFactory {
     static F: std::sync::OnceLock<nacelle::widget::factory::WidgetFactory> =
         std::sync::OnceLock::new();
     F.get_or_init(|| {
-        nacelle::widget::factory::WidgetFactory::new(AssetRoots::xdg("nacelle-desktop"))
-            .with_builtin("appcats", nacelle_widget_appcats::builtin_attach)
-            .with_builtin("appgrid", nacelle_widget_appgrid::builtin_attach)
-            .with_builtin("control", nacelle_widget_control::builtin_attach)
-            .with_builtin("filesystem", nacelle_widget_filesystem::builtin_attach)
-            .with_builtin("keyboard", nacelle_widget_keyboard::builtin_attach)
-            .with_builtin("shell", nacelle_widget_shell::builtin_attach)
+        LINKED
+            .into_iter()
+            .fold(
+                nacelle::widget::factory::WidgetFactory::new(AssetRoots::xdg("nacelle-desktop")),
+                |f, w| f.with_builtin(w),
+            )
             .plugins_enabled(!crate::plugins::disabled())
     })
 }
@@ -92,7 +133,6 @@ pub struct Config {
 }
 
 pub fn load() -> (Config, Option<String>) {
-    init_tree(&config_dir());
     // The dead Look=/Style= keys retire on sight — before anything
     // reads the layout or the theme (u3 §6.3).
     migrate_look_style_in(
@@ -107,15 +147,26 @@ pub fn load() -> (Config, Option<String>) {
     let regs = widget_factory().registry();
     if scanned == 0 {
         eprintln!(
-            "nacelle-desktop: no addons installed \u{2014} running on the built-in set; looked in {}",
+            "nacelle-desktop: no addons installed \u{2014} looked in {}",
             roots.read.iter().map(|d| d.join("addons").display().to_string()).collect::<Vec<_>>().join(", ")
         );
         eprintln!(
-            "nacelle-desktop: the rest install with `make install` in the \
+            "nacelle-desktop: addons install with `make install` in the \
              nacelle-addons repository"
         );
     }
-    eprintln!("nacelle-desktop: {} widgets", regs.len());
+    // No addons and no linked crates = no widgets. That is a real
+    // state of the program, not a fault to be papered over with an
+    // invented set: it is a console with nothing to show, exactly as a
+    // program with no theme installed is a page with no stylesheet.
+    if regs.is_empty() {
+        eprintln!(
+            "nacelle-desktop: no widgets at all \u{2014} every board will be empty \
+             until an addon is installed"
+        );
+    } else {
+        eprintln!("nacelle-desktop: {} widgets", regs.len());
+    }
     nacelle::base::set_registry(regs);
     // The theme engine, before anything asks for a colour. Every warning it
     // has about the theme file — an unknown key, a bad value, a cycle — is
@@ -144,9 +195,9 @@ fn layaut_by_name(name: &str) -> Option<LayoutDef> {
 /// `widgets/{board,appgrid,search_and_ai}/<name>/<name>.{rhai,so}` —
 /// and the pre-split top level — becomes the flat `addons/scripts/`
 /// and `addons/plugins/`. The category a directory used to carry
-/// moves into the script itself as a header pragma; a compiled
-/// plugin cannot declare one through the table yet, and every
-/// shipped one was a board widget anyway. Only the WRITE root is
+/// moves into the addon: a script gets a header pragma of its own, a
+/// compiled plugin the `<name>.meta` file beside it, and neither
+/// depends on the program remembering anything. Only the WRITE root is
 /// migrated — a system install is somebody else's file to move — and
 /// nothing is ever overwritten: a name already present under addons/
 /// keeps its file, the old copy stays where it was, and the
@@ -201,13 +252,23 @@ fn migrate_widgets_to_addons(roots: &AssetRoots) {
                 continue;
             }
             let ok = match pragma {
-                // The directory carried the category; the script
-                // carries it now.
+                // The directory carried the category; the ADDON
+                // carries it now — a script in a header pragma of its
+                // own, a compiled plugin in the metadata file beside
+                // it. Nothing in the program remembers it for them.
                 Some(cat) if ext == "rhai" => std::fs::read_to_string(&src)
                     .and_then(|body| std::fs::write(&dest, format!("// category: {cat}\n{body}")))
                     .map(|()| std::fs::remove_file(&src).is_ok())
                     .unwrap_or(false),
-                _ => std::fs::rename(&src, &dest).is_ok(),
+                Some(cat) => {
+                    let moved = std::fs::rename(&src, &dest).is_ok();
+                    let meta = dest.with_extension("meta");
+                    if moved && !meta.exists() {
+                        let _ = std::fs::write(&meta, format!("category = {cat}\n"));
+                    }
+                    moved
+                }
+                None => std::fs::rename(&src, &dest).is_ok(),
             };
             if ok {
                 moved += 1;
@@ -455,9 +516,17 @@ pub fn list_engine_themes() -> Vec<String> {
     nacelle::theme::available_themes()
 }
 
-/// Path of the bash startup file generated by nacelle-desktop.
+/// Path of the bash startup file nacelle-desktop hands to the shell:
+/// the first `shellrc` on the configuration search path, so a
+/// system-wide one works for a user who has none of their own. When
+/// nothing is installed this names the user's own path — the file
+/// simply does not exist, and the shell starts without it.
 pub fn shellrc_path() -> PathBuf {
-    config_dir().join("shellrc")
+    config_dirs()
+        .into_iter()
+        .map(|d| d.join("shellrc"))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| config_dir().join("shellrc"))
 }
 
 /// Accepts a config value only if it is a single safe path component
@@ -479,8 +548,15 @@ fn safe_component(name: &str) -> Option<String> {
     }
 }
 
+/// The effective configuration: the user's file laid over the system
+/// ones, key by key.
 fn conf_kv() -> HashMap<String, String> {
-    parse_kv(&std::fs::read_to_string(config_dir().join(CONF_FILE)).unwrap_or_default())
+    cascade_kv(&conf_files())
+}
+
+/// Every `nacelle-desktop.conf` that takes part, most specific first.
+fn conf_files() -> Vec<PathBuf> {
+    config_dirs().into_iter().map(|d| d.join(CONF_FILE)).collect()
 }
 
 /// Sub-directories named `sub` that exist, in search order.
@@ -942,9 +1018,23 @@ fn monitor_diag_inches_uncached(monitor_name: &str) -> u32 {
     0
 }
 
-/// Sets Key=Value in nacelle-desktop.conf, preserving the rest of the file.
+/// Sets Key=Value in the USER's nacelle-desktop.conf, preserving the
+/// rest of the file. The system files are read-only to the program —
+/// what a settings click writes is always the user's own copy, which
+/// then outranks them.
+///
+/// This is also the moment the configuration directory is created.
+/// The program makes no directory at startup and installs nothing:
+/// what is not installed is simply not offered, and the home
+/// directory stays untouched until the user changes something.
 fn set_conf_kv(key: &str, value: &str) {
     let path = config_dir().join(CONF_FILE);
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("nacelle-desktop: cannot create {}: {e}", dir.display());
+            return;
+        }
+    }
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     let mut replaced = false;
@@ -966,6 +1056,8 @@ fn set_conf_kv(key: &str, value: &str) {
     }
 }
 
+/// The one configuration directory anything is ever WRITTEN to:
+/// `$XDG_CONFIG_HOME/nacelle-desktop`, or `~/.config/nacelle-desktop`.
 fn config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
@@ -974,6 +1066,36 @@ fn config_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".config").join("nacelle-desktop")
+}
+
+/// Every directory the configuration is READ from, most specific
+/// first: the user's own, then the system ones from `XDG_CONFIG_DIRS`
+/// (or `/etc/xdg` when it is unset).
+///
+/// The counterpart of [`data_dirs`] for configuration, and the reason
+/// a package can ship defaults: they are read where they are
+/// installed, never copied to the user.
+fn config_dirs() -> Vec<PathBuf> {
+    config_search_path(
+        config_dir(),
+        std::env::var("XDG_CONFIG_DIRS").ok().as_deref(),
+    )
+}
+
+/// [`config_dirs`] without the environment: the user's directory
+/// first, then `system` split on ':' and joined with the application
+/// name, duplicates dropped. An unset or empty value means the
+/// standard `/etc/xdg`, as the XDG base directory specification says.
+fn config_search_path(user: PathBuf, system: Option<&str>) -> Vec<PathBuf> {
+    let mut out = vec![user];
+    let system = system.filter(|v| !v.is_empty()).unwrap_or("/etc/xdg");
+    for base in system.split(':').filter(|b| !b.is_empty()) {
+        let dir = PathBuf::from(base).join("nacelle-desktop");
+        if !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out
 }
 
 /// Data directory: ~/.local/share/nacelle-desktop. Holds everything a theme is
@@ -1013,22 +1135,27 @@ fn data_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Makes sure the user's own directories exist.
+/// Merges Key=Value files given MOST SPECIFIC FIRST: an earlier file
+/// wins key by key, and a key only a later file has is inherited. A
+/// file that does not exist contributes nothing, which is the normal
+/// case on both ends — a machine with no system defaults and a user
+/// who has never changed a setting are both perfectly ordinary.
 ///
-/// That is all the program does to the filesystem at startup. It
-/// installs nothing and generates nothing: the looks, styles, sound
-/// themes, layouts and widgets are installed from their own
-/// repositories, and what is not installed is simply not offered. These
-/// two directories are created because the program WRITES to them — the
-/// layout editor saves here, and so does every settings change.
-fn init_tree(config: &Path) {
-    for d in [config, &data_dir().join("layauts")] {
-        if let Err(e) = std::fs::create_dir_all(d) {
-            eprintln!("nacelle-desktop: cannot create {}: {e}", d.display());
+/// An empty value is a value, not an absence: `ColorLut=` in the
+/// user's file is how the settings panel says "off", and it has to
+/// beat a system file that names one.
+///
+/// Takes its paths rather than reading the environment, so a test
+/// hands it two temporary files and no process-wide state is touched.
+fn cascade_kv(paths: &[PathBuf]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for path in paths.iter().rev() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            out.extend(parse_kv(&text));
         }
     }
+    out
 }
-
 
 /// Parser for Key=Value files (# and ; comments).
 fn parse_kv(text: &str) -> HashMap<String, String> {
@@ -1091,9 +1218,12 @@ mod tests {
     /// resolver had stopped reading.
     #[test]
     fn selecting_a_theme_changes_the_colours_the_program_draws_with() {
+        fixture_registry();
         let dir = std::env::temp_dir().join(format!("nacelle-theme-switch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("nacelle-desktop")).unwrap();
+        // Deliberately NOT created: the program makes no configuration
+        // directory at startup, so the first settings click is what
+        // has to bring it into being.
         std::env::set_var("XDG_CONFIG_HOME", &dir);
 
         let colour_of = |name: &str| {
@@ -1108,6 +1238,10 @@ mod tests {
         };
 
         let crimson = colour_of("crimson");
+        assert!(
+            dir.join("nacelle-desktop").join(CONF_FILE).is_file(),
+            "the first settings change must create the user's configuration file"
+        );
         let azure = colour_of("azure");
         let pure = colour_of("pure");
 
@@ -1127,6 +1261,7 @@ mod tests {
     /// only the changes in their sections; everything else is preserved.
     #[test]
     fn safe_component_blocks_traversal() {
+        fixture_registry();
         assert!(safe_component("tron").is_some());
         assert!(safe_component("my-layaut_2").is_some());
         assert!(safe_component("../../etc/passwd").is_none());
@@ -1137,45 +1272,229 @@ mod tests {
         assert!(safe_component("x\\y").is_none());
     }
 
+    /// The XDG cascade every other toolkit implements: the user's file
+    /// wins key by key, the system file answers everything it does not
+    /// mention, and a missing file on either end is ordinary rather
+    /// than an error. Nothing is copied for this to work — which is
+    /// the whole point of reading a search path instead of seeding a
+    /// home directory at install time.
+    ///
+    /// Hermetic: explicit paths, no process environment.
+    #[test]
+    fn the_user_file_wins_and_the_system_file_fills_the_gaps() {
+        fixture_registry();
+        let base =
+            std::env::temp_dir().join(format!("nacelle-conf-cascade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let system = base.join("etc/xdg/nacelle-desktop");
+        let user = base.join("config/nacelle-desktop");
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            system.join(CONF_FILE),
+            "# the distribution's defaults\nTheme=azure\nLayaut=console\nColorLut=studio\n",
+        )
+        .unwrap();
+        std::fs::write(user.join(CONF_FILE), "Theme=crimson\nColorLut=\n").unwrap();
+
+        let paths = vec![user.join(CONF_FILE), system.join(CONF_FILE)];
+        let kv = cascade_kv(&paths);
+        assert_eq!(
+            kv.get("Theme").map(String::as_str),
+            Some("crimson"),
+            "the user's own value must win"
+        );
+        assert_eq!(
+            kv.get("Layaut").map(String::as_str),
+            Some("console"),
+            "a key the user never set comes from the system file"
+        );
+        assert_eq!(
+            kv.get("ColorLut").map(String::as_str),
+            Some(""),
+            "an empty user value is an explicit off, not an absence"
+        );
+
+        // A user who has never changed a setting has no file at all,
+        // and the system defaults stand on their own.
+        std::fs::remove_file(user.join(CONF_FILE)).unwrap();
+        let kv = cascade_kv(&paths);
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
+        assert_eq!(kv.get("ColorLut").map(String::as_str), Some("studio"));
+
+        // And with nothing installed anywhere the program is left with
+        // what is built into it, rather than with an error.
+        assert!(cascade_kv(&[base.join("nowhere.conf")]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The search path itself: the user's directory first — it is also
+    /// the only one written to — then XDG_CONFIG_DIRS in its own
+    /// order, `/etc/xdg` when it is unset or empty, and no directory
+    /// twice.
+    #[test]
+    fn the_configuration_search_path_follows_xdg() {
+        fixture_registry();
+        let user = PathBuf::from("/home/somebody/.config/nacelle-desktop");
+        let etc = PathBuf::from("/etc/xdg/nacelle-desktop");
+        for unset in [None, Some(""), Some("/etc/xdg")] {
+            assert_eq!(
+                config_search_path(user.clone(), unset),
+                vec![user.clone(), etc.clone()],
+                "{unset:?} must resolve to the standard /etc/xdg"
+            );
+        }
+        assert_eq!(
+            config_search_path(user.clone(), Some("/opt/site/etc:/etc/xdg:/opt/site/etc")),
+            vec![
+                user.clone(),
+                PathBuf::from("/opt/site/etc/nacelle-desktop"),
+                etc,
+            ],
+            "the order of the variable is kept and duplicates drop"
+        );
+        assert_eq!(
+            config_search_path(user.clone(), Some("/opt/site/etc"))[0],
+            user,
+            "the write target is always the head of the read path"
+        );
+    }
+
+    /// The registry the tests resolve names against.
+    ///
+    /// There is no built-in table to fall back on, so the tests have to
+    /// bring a registry — and a hand-written one here would BE such a
+    /// table: a shipped addon could lose its metadata and not a single
+    /// test would notice. So this stages the real thing instead: the
+    /// crates linked into this binary, plus the addons repository next
+    /// door copied into an `addons/scripts` tree and scanned exactly as
+    /// an installed one is. What the tests see is what `make install`
+    /// gives a machine.
+    ///
+    /// Staged once, and called by EVERY test in this module — the
+    /// process-wide registry is fixed by the first call *or the first
+    /// read*, so one test resolving a layout before the staging would
+    /// freeze it empty for all the others.
+    fn fixture_registry() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // Per PROCESS: two test binaries running at once must not
+            // stage over each other's tree mid-scan.
+            let stage = std::env::temp_dir()
+                .join(format!("nacelle-desktop-registry-fixture-{}", std::process::id()));
+            let scripts = stage.join("addons").join("scripts");
+            let _ = std::fs::remove_dir_all(&stage);
+            std::fs::create_dir_all(&scripts).expect("the fixture tree must be writable");
+            let shipped = std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../nacelle-addons/scripts"
+            ));
+            let rd = std::fs::read_dir(shipped)
+                .expect("the nacelle-addons repository must sit next to this one");
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("rhai") {
+                    let name = path.file_name().expect("a file has a name");
+                    std::fs::copy(&path, scripts.join(name)).expect("stage the addon");
+                }
+            }
+            let roots = AssetRoots::new(vec![stage.clone()], stage);
+            let factory = LINKED.into_iter().fold(
+                nacelle::widget::factory::WidgetFactory::new(roots),
+                |f, w| f.with_builtin(w),
+            );
+            nacelle::base::set_registry(factory.registry());
+        });
+    }
+
     /// Test widgets, resolved by name against the registry the same way
     /// the rest of the program does.
     fn wp(name: &str) -> Panel {
-        Panel::from_name(name).expect("built-in widget must be registered")
+        fixture_registry();
+        Panel::from_name(name).expect("the staged addons must hold this widget")
     }
 
-    /// The registry is built from the directory: the widget IS its
-    /// file — `<name>.rhai` or `<name>.so` — its directory name is its
-    /// name, and a directory holding neither is not a widget.
+    /// The registry is built from the directory and from nothing else:
+    /// the widget IS its file — `<name>.rhai` or `<name>.so` — its
+    /// stem is its name, a file of another extension is not an addon,
+    /// and what the program knows about a widget is what the widget
+    /// declared. No name in this program's own code puts anything in
+    /// the registry, so a directory with nothing in it yields nothing.
     #[test]
     fn widget_registry_reads_the_directory() {
+        fixture_registry();
         let base = std::env::temp_dir().join("nacelle-desktop-widget-registry-test");
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("addons");
         std::fs::create_dir_all(root.join("scripts")).unwrap();
         std::fs::create_dir_all(root.join("plugins")).unwrap();
-        std::fs::write(root.join("scripts").join("mywidget.rhai"), "fn draw() { [] }")
-            .unwrap();
+        std::fs::write(
+            root.join("scripts").join("mywidget.rhai"),
+            "// label: MY WIDGET\n// ref_h: 12.5\nfn draw() { [] }",
+        )
+        .unwrap();
         // A stray file of the wrong extension is not an addon.
         std::fs::write(root.join("scripts").join("notes.txt"), "Label=NOPE\n").unwrap();
-        // A compiled widget is its library; a shipped name keeps its
-        // built-in label and sizes.
-        std::fs::write(root.join("plugins").join("shell.so"), b"not really").unwrap();
+        // A compiled widget is its library, described by the metadata
+        // file beside it — and a library WITHOUT one still counts.
+        std::fs::write(root.join("plugins").join("meter.so"), b"not really").unwrap();
+        std::fs::write(root.join("plugins").join("meter.meta"), "min_h = 3.5\n").unwrap();
+        std::fs::write(root.join("plugins").join("bare.so"), b"not really").unwrap();
 
         let defs = nacelle::widget::registry::scan(&nacelle::assets::AssetRoots::new(vec![base.clone()], base.clone()));
-        assert_eq!(defs.len(), 2, "only addon files count");
         // Sorted, so panel order never depends on the filesystem.
-        // An unknown widget gets its name as the label and the
-        // standard sizes; a layout overrides them per panel.
-        assert_eq!(defs[0].name, "mywidget");
-        assert_eq!(defs[0].label, "MYWIDGET");
-        assert_eq!(defs[0].ref_h_vh, 10.0);
-        assert_eq!(defs[1].name, "shell");
-        assert_eq!(defs[1].label, "SHELL");
-        assert_eq!(defs[1].ref_h_vh, 60.0);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["bare", "meter", "mywidget"], "only addon files count");
+        let d = |n: &str| defs.iter().find(|d| d.name == n).unwrap();
+        assert_eq!(d("mywidget").label, "MY WIDGET", "the script's own pragma");
+        assert_eq!(d("mywidget").ref_h_vh, 12.5);
+        assert_eq!(d("mywidget").min_h_vh, 6.0, "what it did not name it kept");
+        assert_eq!(d("meter").min_h_vh, 3.5, "the .meta file beside the library");
+        assert_eq!(d("meter").label, "METER", "a name in capitals is the default");
+        assert_eq!(d("bare").label, "BARE", "no metadata is not no addon");
+        assert_eq!((d("bare").ref_h_vh, d("bare").min_h_vh), (10.0, 6.0));
 
         let empty = nacelle::assets::AssetRoots::new(vec![base.join("nope")], base.join("nope"));
         assert!(nacelle::widget::registry::scan(&empty).is_empty());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The other half of the same rule: a widget crate LINKED into this
+    /// binary is registered by the crate, not by this file. Every entry
+    /// of [`LINKED`] carries its own name and its own metadata, and the
+    /// registry the factory builds is those plus the directory — never
+    /// a table written here.
+    #[test]
+    fn linked_widget_crates_register_themselves() {
+        fixture_registry();
+        let empty = std::env::temp_dir().join("nacelle-desktop-linked-crates-test");
+        let _ = std::fs::remove_dir_all(&empty);
+        let factory = LINKED.into_iter().fold(
+            nacelle::widget::factory::WidgetFactory::new(AssetRoots::new(
+                vec![empty.clone()],
+                empty,
+            )),
+            |f, w| f.with_builtin(w),
+        );
+        let defs = factory.registry();
+        assert_eq!(defs.len(), LINKED.len(), "an empty tree offers the linked crates");
+        for w in LINKED {
+            let d = defs
+                .iter()
+                .find(|d| d.name == w.name)
+                .unwrap_or_else(|| panic!("{} must register itself", w.name));
+            // Its description came from the crate, not from a default:
+            // a core widget whose `.meta` went missing or empty would
+            // come out bare, and this is what catches it.
+            let bare = nacelle::widget::registry::bare_def(w.name.to_string());
+            assert!(
+                d.label != bare.label
+                    || d.ref_h_vh != bare.ref_h_vh
+                    || d.min_h_vh != bare.min_h_vh,
+                "{} declares nothing about itself",
+                w.name
+            );
+        }
     }
 
     /// The one-time migration: the pre-addons tree moves into
@@ -1184,6 +1503,7 @@ mod tests {
     /// and a second run finds nothing to do.
     #[test]
     fn the_widgets_layout_retires_into_addons() {
+        fixture_registry();
         let base = std::env::temp_dir().join("nacelle-desktop-widget-migration-test");
         let _ = std::fs::remove_dir_all(&base);
         let old = base.join("widgets");
@@ -1194,6 +1514,11 @@ mod tests {
         // The pre-split top level, and a compiled widget beside it.
         std::fs::create_dir_all(old.join("meter")).unwrap();
         std::fs::write(old.join("meter/meter.so"), b"not really").unwrap();
+        // A compiled widget whose DIRECTORY carried the category: it
+        // has nowhere to write a pragma, so the metadata file beside
+        // the library is where the category goes.
+        std::fs::create_dir_all(old.join("appgrid/tiles")).unwrap();
+        std::fs::write(old.join("appgrid/tiles/tiles.so"), b"not really").unwrap();
         // A name already installed under addons/ must survive intact.
         let roots = nacelle::assets::AssetRoots::new(vec![base.clone()], base.clone());
         std::fs::create_dir_all(base.join("addons/scripts")).unwrap();
@@ -1213,9 +1538,77 @@ mod tests {
             "the directory's category becomes the script's pragma"
         );
         assert!(base.join("addons/plugins/meter.so").is_file());
+        assert!(
+            !base.join("addons/plugins/meter.meta").exists(),
+            "a board widget names no category, so it needs no metadata file"
+        );
+        assert!(base.join("addons/plugins/tiles.so").is_file());
+        assert_eq!(
+            std::fs::read_to_string(base.join("addons/plugins/tiles.meta")).unwrap(),
+            "category = appgrid\n",
+            "the directory's category becomes the plugin's metadata file"
+        );
         assert!(!old.join("appgrid").exists(), "emptied category directories disappear");
         migrate_widgets_to_addons(&roots);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every addon this project ships describes itself, and the
+    /// program reads what it wrote. A shipped script that lost its
+    /// header pragmas, a core crate whose `.meta` went missing, a
+    /// typo in either — any of them comes out bare, with the file's
+    /// name in capitals and the standard heights. That is the right
+    /// answer for a stranger's addon and the wrong one for ours, and
+    /// nothing else in the program would notice: there is no table
+    /// left to fall back on.
+    #[test]
+    fn every_shipped_addon_declares_itself() {
+        fixture_registry();
+        let defs = nacelle::base::registry();
+        assert!(!defs.is_empty(), "the staged tree must hold the shipped addons");
+        for d in defs {
+            let bare = nacelle::widget::registry::bare_def(d.name.clone());
+            assert!(
+                d.ref_h_vh != bare.ref_h_vh || d.min_h_vh != bare.min_h_vh,
+                "{} was read without any metadata of its own",
+                d.name
+            );
+            // And every board addon says WHERE it wants to stand. The
+            // shipped arrangement is composed from these declarations
+            // and from nothing else, so one that named no column would
+            // be placed by the engine's fallback instead of by its
+            // author — and the console layaut would stop matching.
+            if d.category == nacelle::base::WidgetCategory::Board {
+                assert_ne!(
+                    d.slot,
+                    nacelle::base::PanelSlot::Auto,
+                    "{} names no column of the arrangement",
+                    d.name
+                );
+            }
+        }
+    }
+
+    /// The pinned edges of the shipped arrangement, and the widget the
+    /// editor may not remove, are DECLARATIONS — counted here rather
+    /// than named, because naming one would be the very table this
+    /// program does not keep. One addon opens the work column, one
+    /// closes it, one is the bar, and exactly one says that switching
+    /// it off would leave the user no way back.
+    #[test]
+    fn the_shipped_addons_declare_the_arrangements_fixed_points() {
+        fixture_registry();
+        let count = |a: nacelle::base::PanelAnchor| {
+            nacelle::base::registry().iter().filter(|d| d.anchor == a).count()
+        };
+        assert_eq!(count(nacelle::base::PanelAnchor::Top), 1);
+        assert_eq!(count(nacelle::base::PanelAnchor::Bottom), 1);
+        assert_eq!(count(nacelle::base::PanelAnchor::Bar), 1);
+        assert_eq!(
+            nacelle::base::registry().iter().filter(|d| d.essential).count(),
+            1,
+            "exactly one shipped addon carries the way back"
+        );
     }
 
     /// Boards travel inside the .layaut file: parsed from [board k]
@@ -1223,6 +1616,7 @@ mod tests {
     /// every path that rewrites the file for other reasons.
     #[test]
     fn boards_live_in_the_layaut_file() {
+        fixture_registry();
         let text = "screen = 1920x1080@27\nclock = 1.00 2.00 10.00 10.00\n\n\
                     [1280x720@7]\nclock = 5.00 5.00 20.00 20.00\n\n\
                     [board 4]\ncpu = 10.00 10.00 30.00 30.00\n\n[board -3]\n\n[board 0 2]\nmemory = 1.00 1.00 20.00 20.00\n";
@@ -1274,6 +1668,7 @@ mod tests {
     /// being touched.
     #[test]
     fn a_user_widget_shadows_a_system_one() {
+        fixture_registry();
         let root = std::env::temp_dir().join("nacelle-desktop-widget-shadow-test");
         let _ = std::fs::remove_dir_all(&root);
         let user = root.join("user").join("addons").join("scripts");
@@ -1310,6 +1705,7 @@ mod tests {
     /// normal selectable file.
     #[test]
     fn shipped_console_layaut_matches_builtin_default() {
+        fixture_registry();
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../nacelle-themes/layauts/console.layaut"
@@ -1368,6 +1764,7 @@ mod tests {
     /// layauts, and each of them places all twelve.
     #[test]
     fn shipped_layauts_place_every_widget_exactly_once() {
+        fixture_registry();
         for name in ["console", "instrument"] {
             let path = format!(
                 "{}/../nacelle-themes/layauts/{name}.layaut",
@@ -1406,6 +1803,7 @@ mod tests {
     /// round-trips through the write path.
     #[test]
     fn units_pad_and_flex_boards_parse_and_roundtrip() {
+        fixture_registry();
         let (fl, _) = nacelle::layout::layaut::parse_flex(
             "units = px\npad_x = 3.2\n[column]\nbasis = 20\npanel = clock 7\n",
         )
@@ -1440,6 +1838,7 @@ mod tests {
     /// base, the other screens and the boards survive.
     #[test]
     fn clear_screen_section_removes_only_its_screen() {
+        fixture_registry();
         let dir = std::env::temp_dir().join("nacelle-desktop-clear-screen-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1476,6 +1875,7 @@ mod tests {
     /// placement, and a widget directory carries none.
     #[test]
     fn a_layout_carries_the_panel_sizes() {
+        fixture_registry();
         let (fl, sizes) = nacelle::layout::layaut::parse_flex(
             "[column]\n\
              basis = 20\n\
@@ -1506,6 +1906,7 @@ mod tests {
 
     #[test]
     fn overrides_roundtrip() {
+        fixture_registry();
         let name = "unittest-roundtrip";
         let dir = std::env::temp_dir().join("nacelle-desktop-overrides-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1587,6 +1988,7 @@ mod tests {
     /// parallel tests and races).
     #[test]
     fn look_and_style_retire_carrying_the_bundled_layaut() {
+        fixture_registry();
         let dir = std::env::temp_dir()
             .join(format!("nacelle-look-migration-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1635,6 +2037,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_look_layaut_yields_its_stem_and_an_explicit_choice_wins() {
+        fixture_registry();
         let dir = std::env::temp_dir()
             .join(format!("nacelle-look-symlink-migration-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

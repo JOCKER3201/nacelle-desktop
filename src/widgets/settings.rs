@@ -2219,8 +2219,8 @@ impl Settings {
         if !names.is_empty() {
             return;
         }
-        // No emptystate.* tokens in the master yet; the value role and
-        // text.muted stand in for emptystate.role.
+        // `emptystate.role` is `value` in the master, which is the role
+        // read here; `text.muted` is the ink an aside is written in.
         let th = theme::resolved();
         let v = role_value(th);
         ctx.dl.text_center(

@@ -27,6 +27,8 @@ nacelle-widget-appcats = { git = "https://github.com/JOCKER3201/nacelle-addons",
 nacelle-widget-shell = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 nacelle-widget-keyboard = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
+nacelle-widget-search = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
+nacelle-widget-ai = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 
 # Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
 # requests on the shared XWayland display. The same crate winit
