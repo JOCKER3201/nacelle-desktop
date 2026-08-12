@@ -24,6 +24,7 @@
 
 use super::{Ctx, Layout, Panel, PanelSpec, Rect, WidgetCategory, OFF_SPEC};
 use crate::font::FONT_UI;
+use crate::screen::Gutter;
 use nacelle::layout::{BoardId, Instance, InstanceId, InstanceList};
 use nacelle::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use std::sync::OnceLock;
@@ -47,11 +48,18 @@ struct Role {
     size: OnceLock<TokenId>,
     min: OnceLock<TokenId>,
     track: OnceLock<TokenId>,
+    lead: OnceLock<TokenId>,
 }
 
 impl Role {
     const fn new(name: &'static str) -> Self {
-        Role { name, size: OnceLock::new(), min: OnceLock::new(), track: OnceLock::new() }
+        Role {
+            name,
+            size: OnceLock::new(),
+            min: OnceLock::new(),
+            track: OnceLock::new(),
+            lead: OnceLock::new(),
+        }
     }
     fn px(&self, ctx: &Ctx) -> f32 {
         let t = theme::resolved();
@@ -70,6 +78,15 @@ impl Role {
         });
         px * t.px(k)
     }
+    /// The role's line height as a multiple of its px — the height a
+    /// line of it OCCUPIES, which is what a box centres.
+    fn leading(&self) -> f32 {
+        let t = theme::resolved();
+        let l = *self.lead.get_or_init(|| {
+            theme::id(&format!("type.{}.leading", self.name)).unwrap_or(TokenId::MISSING)
+        });
+        t.px(l)
+    }
 }
 
 // The roles the editor's own chrome binds its text to in the master:
@@ -86,6 +103,121 @@ fn grab_edge() -> f32 {
     static EM: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     t.px(tok(&E, "editor.edge")).max(t.px(tok(&EM, "editor.edge_min_px")))
+}
+
+/// The little name tag over a proxy's top-left corner: the plate, and
+/// the label sitting on it in `ink`.
+///
+/// One function for both wearers — the proxies on the board and the
+/// miniatures in the ADD WIDGET window — because they are the same tag,
+/// and two copies of its arithmetic meant fixing its centring once
+/// fixed only half the program.
+fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
+    static FILL: OnceLock<TokenId> = OnceLock::new();
+    static PAD: OnceLock<TokenId> = OnceLock::new();
+    static INSET: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    let px = ROLE_LABEL.px(ctx);
+    let track = ROLE_LABEL.tracking(px);
+    let tw = ctx.fonts.measure(FONT_UI, px, label, track);
+    ctx.dl.rect(
+        x,
+        y,
+        tw + t.px(tok(&PAD, "editor.proxy.label_pad_x")),
+        nameplate_h(),
+        col(t.color(tok(&FILL, "component.nameplate.fill"))),
+    );
+    ctx.dl.text(
+        ctx.fonts,
+        FONT_UI,
+        px,
+        x + t.px(tok(&INSET, "panel.title.inset_x")),
+        nameplate_text_y(y, px),
+        label,
+        ink,
+        track,
+    );
+}
+
+/// Height of that plate.
+fn nameplate_h() -> f32 {
+    static H: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&H, "editor.proxy.label_h"))
+}
+
+/// Where the label sits inside a plate whose top edge is at `top`.
+fn nameplate_text_y(top: f32, px: f32) -> f32 {
+    super::center_line_y(top, nameplate_h(), px, ROLE_LABEL.leading())
+}
+
+/// Where a modal's title sits in a title band starting at `top`. Upper
+/// case in a band is the very case the master turned optical centring
+/// on for.
+fn modal_title_y(top: f32, px: f32) -> f32 {
+    static BAND_H: OnceLock<TokenId> = OnceLock::new();
+    let band_h = theme::resolved().px(tok(&BAND_H, "modal.title.band_h"));
+    super::center_line_y(top, band_h, px, ROLE_TITLE.leading())
+}
+
+/// How far the tear-off growth has run `elapsed` seconds in: the raw
+/// 0..1 progress, which says when the animation is over, and the same
+/// progress under `motion.widget_grow.easing`, which says how big the
+/// widget is drawn.
+///
+/// Reduced motion (`motion.scale = 0`), a disabled effect and a zero
+/// duration all answer (1, 1) on the first frame: a one-shot freezes at
+/// the state it was travelling to, so the widget is simply placed at
+/// full size. Only the ARRIVAL was ever the point of this animation.
+fn grow_progress(elapsed: f32) -> (f32, f32) {
+    static MS: OnceLock<TokenId> = OnceLock::new();
+    static ON: OnceLock<TokenId> = OnceLock::new();
+    static SCALE: OnceLock<TokenId> = OnceLock::new();
+    static EASE: OnceLock<TokenId> = OnceLock::new();
+    static WORDS: OnceLock<[Option<u16>; 3]> = OnceLock::new();
+    let t = theme::resolved();
+    let dur = t.px(tok(&MS, "motion.widget_grow.duration_ms"))
+        * t.px(tok(&SCALE, "motion.scale"))
+        / 1000.0;
+    let x = match t.flag(tok(&ON, "motion.widget_grow.enabled")) && dur > 0.0 {
+        true => (elapsed / dur).clamp(0.0, 1.0),
+        false => 1.0,
+    };
+    // The declared curve; an unknown word runs linear (the raw look).
+    let ease = tok(&EASE, "motion.widget_grow.easing");
+    let words = WORDS.get_or_init(|| {
+        [
+            theme::enum_index(ease, "ease_out"),
+            theme::enum_index(ease, "ease_in"),
+            theme::enum_index(ease, "ease_in_out"),
+        ]
+    });
+    let word = Some(t.enum_of(ease));
+    let e = if word == words[0] {
+        1.0 - (1.0 - x) * (1.0 - x)
+    } else if word == words[1] {
+        x * x
+    } else if word == words[2] {
+        x * x * (3.0 - 2.0 * x)
+    } else {
+        x
+    };
+    (x, e)
+}
+
+/// How long a button stays lit after a click, in milliseconds.
+///
+/// Zero when the theme switches the effect off or asks for reduced
+/// motion — the decay is a one-shot, and its end state is a button that
+/// is not lit, so it never lights at all.
+fn press_ms() -> f32 {
+    static MS: OnceLock<TokenId> = OnceLock::new();
+    static ON: OnceLock<TokenId> = OnceLock::new();
+    static SCALE: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    match t.flag(tok(&ON, "motion.press.enabled")) {
+        true => t.px(tok(&MS, "motion.press.duration_ms")) * t.px(tok(&SCALE, "motion.scale")),
+        false => 0.0,
+    }
 }
 
 /// Hold time on an ADD WIDGET entry before placement starts.
@@ -249,13 +381,21 @@ fn seed(list: &mut InstanceList, inst: Instance) {
 }
 
 impl Editor {
-    pub fn new() -> Self {
+    /// `padding` is the gutter of the screen this editor belongs to.
+    ///
+    /// Handed in rather than asked for. The gutter is a `u`, so the
+    /// answer depends on the height of the window it is asked under, and
+    /// an editor asking for itself would be answered under whatever
+    /// screen last drew — the neighbour's, at boot the engine's own
+    /// 1080-line default. One screen, one length, and its owner is the
+    /// screen. `start` refreshes it from the same place.
+    pub fn new(padding: Gutter) -> Self {
         Editor {
             active: false,
             snap: false,
             cols: crate::config::GRID_MIN,
             rows: crate::config::GRID_MIN,
-            padding: 8.0,
+            padding: padding.px(),
             board: (0, 0),
             takes: WidgetCategory::default(),
             list: InstanceList::new(),
@@ -280,6 +420,10 @@ impl Editor {
     /// layout the board belongs to ([`InstanceList::next_free`]), so
     /// that a widget dragged out here cannot be given an id some other
     /// board is already using.
+    ///
+    /// `padding` is the calling screen's gutter, stored as given —
+    /// see [`Editor::sync_from_screen`] for why it is neither rounded
+    /// nor floored on the way in.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
@@ -289,7 +433,7 @@ impl Editor {
         snap: bool,
         cols: u32,
         rows: u32,
-        padding: f32,
+        padding: Gutter,
         board: BoardId,
         takes: WidgetCategory,
         next_id: u32,
@@ -300,7 +444,7 @@ impl Editor {
         self.snap = snap;
         self.cols = cols.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
         self.rows = rows.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
-        self.padding = padding.max(0.0);
+        self.padding = padding.px();
         self.close_naming();
         self.drag = None;
         self.add_open = false;
@@ -511,12 +655,39 @@ impl Editor {
     }
 
     /// Applies grid preferences changed in the settings window while the
-    /// editor is running; enabling snap auto-fits all panels.
-    pub fn sync_prefs(&mut self, snap: bool, cols: u32, rows: u32, padding: f32, w: f32, h: f32) {
+    /// editor is running, under the gutter of the SCREEN the editor is
+    /// drawn over — [`crate::screen::Screen::sync_editor`] is the only
+    /// caller, and `padding` is that screen's `pad`.
+    ///
+    /// The preferences file is read HERE and its fourth field — the
+    /// gutter — is dropped on the floor, so that no caller is left
+    /// holding a second, different answer to the same question. That
+    /// field is whole pixels, because it is the number the settings
+    /// spinner edits; the boards under the editor are solved with the
+    /// unrounded length the theme gives at this screen's height. At the
+    /// shipped 9u and 1080 lines the two are 48.6 and 49, and an editor
+    /// told 49 draws its grid half a pixel per u off the panels it is
+    /// editing — a WYSIWYG editor quietly lying about where the panels
+    /// are.
+    pub fn sync_from_screen(&mut self, padding: Gutter, w: f32, h: f32) {
+        let (snap, cols, rows, _) = crate::config::grid_prefs();
+        self.sync_prefs(snap, cols, rows, padding, w, h);
+    }
+
+    /// The preferences, applied. Private: the gutter must come from the
+    /// screen, so [`Editor::sync_from_screen`] is the door.
+    ///
+    /// `padding` is stored as it arrives — not rounded, and with no
+    /// floor of its own. The boards are solved with that same number
+    /// unfloored (`Screen::pad`), and an editor that clamped what the
+    /// board does not would disagree with the picture underneath it
+    /// exactly when the theme wandered off the beaten path, which is
+    /// the one time nobody would think to look here.
+    fn sync_prefs(&mut self, snap: bool, cols: u32, rows: u32, padding: Gutter, w: f32, h: f32) {
         let was = self.snap;
         self.cols = cols.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
         self.rows = rows.clamp(crate::config::GRID_MIN, crate::config::GRID_MAX);
-        self.padding = padding.max(0.0);
+        self.padding = padding.px();
         self.snap = snap;
         if snap && !was {
             self.snap_all(w, h);
@@ -945,14 +1116,13 @@ impl Editor {
         let now = Instant::now();
         let btns = Self::save_buttons(w, h);
         let labels = ["SETTINGS", "ADD WIDGET", "SAVE", "SAVE AS", "CANCEL", "EXIT"];
-        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
-        let press_ms = theme::resolved().px(tok(&PRESS_MS, "motion.press.duration_ms"));
+        let lit_ms = press_ms();
         for (i, br) in btns.iter().enumerate() {
             let hover = !self.add_open && self.naming.is_none() && br.contains(mx, my);
             let flash = self
                 .flash
                 .map(|(fi, t)| {
-                    fi == i && now.duration_since(t).as_secs_f32() * 1000.0 < press_ms
+                    fi == i && now.duration_since(t).as_secs_f32() * 1000.0 < lit_ms
                 })
                 .unwrap_or(false);
             Self::draw_button(ctx, br, labels[i], hover, flash);
@@ -999,30 +1169,7 @@ impl Editor {
         // Growth animation: miniature -> placement size, centred on the
         // cursor while it is being dragged.
         if let Some((id, t0, mw, mh)) = self.grow {
-            static GROW_MS: OnceLock<TokenId> = OnceLock::new();
-            static GROW_EASE: OnceLock<TokenId> = OnceLock::new();
-            static EASE_WORDS: OnceLock<[Option<u16>; 3]> = OnceLock::new();
-            let dur = (t.px(tok(&GROW_MS, "motion.widget_grow.duration_ms")) / 1000.0).max(0.001);
-            let x = (t0.elapsed().as_secs_f32() / dur).min(1.0);
-            // The declared curve; an unknown word runs linear (the raw look).
-            let ease = tok(&GROW_EASE, "motion.widget_grow.easing");
-            let words = EASE_WORDS.get_or_init(|| {
-                [
-                    theme::enum_index(ease, "ease_out"),
-                    theme::enum_index(ease, "ease_in"),
-                    theme::enum_index(ease, "ease_in_out"),
-                ]
-            });
-            let word = Some(t.enum_of(ease));
-            let e = if word == words[0] {
-                1.0 - (1.0 - x) * (1.0 - x)
-            } else if word == words[1] {
-                x * x
-            } else if word == words[2] {
-                x * x * (3.0 - 2.0 * x)
-            } else {
-                x
-            };
+            let (x, e) = grow_progress(t0.elapsed().as_secs_f32());
             match self.px_rect(id, w, h) {
                 None => self.grow = None,
                 Some(r) => {
@@ -1078,10 +1225,6 @@ impl Editor {
         static HANDLE_C: OnceLock<TokenId> = OnceLock::new();
         static HANDLE_S: OnceLock<TokenId> = OnceLock::new();
         static HANDLE_MIN: OnceLock<TokenId> = OnceLock::new();
-        static PLATE: OnceLock<TokenId> = OnceLock::new();
-        static PLATE_PAD: OnceLock<TokenId> = OnceLock::new();
-        static PLATE_H: OnceLock<TokenId> = OnceLock::new();
-        static TAG_X: OnceLock<TokenId> = OnceLock::new();
         static X_INSET: OnceLock<TokenId> = OnceLock::new();
         static X_STROKE: OnceLock<TokenId> = OnceLock::new();
         static X_HOT_C: OnceLock<TokenId> = OnceLock::new();
@@ -1131,28 +1274,7 @@ impl Editor {
                     ctx.dl.rect(cx - s / 2.0, cy - s / 2.0, s, s, hc);
                 }
             }
-            let px = ROLE_LABEL.px(ctx);
-            let track = ROLE_LABEL.tracking(px);
-            let label = inst.widget.label();
-            let tw = ctx.fonts.measure(FONT_UI, px, label, track);
-            let plate_h = t.px(tok(&PLATE_H, "editor.proxy.label_h"));
-            ctx.dl.rect(
-                r.x,
-                r.y,
-                tw + t.px(tok(&PLATE_PAD, "editor.proxy.label_pad_x")),
-                plate_h,
-                col(t.color(tok(&PLATE, "component.nameplate.fill"))),
-            );
-            ctx.dl.text(
-                ctx.fonts,
-                FONT_UI,
-                px,
-                r.x + t.px(tok(&TAG_X, "panel.title.inset_x")),
-                r.y + (plate_h - px) / 2.0,
-                label,
-                col(st.text),
-                track,
-            );
+            nameplate(ctx, r.x, r.y, inst.widget.label(), col(st.text));
             // X in the top-right corner takes this instance off the
             // board — except where it is the last of something the
             // user could not switch back on.
@@ -1213,10 +1335,6 @@ impl Editor {
             static HOLD_FILL: OnceLock<TokenId> = OnceLock::new();
             static HEAD: OnceLock<TokenId> = OnceLock::new();
             static MINI_PAD: OnceLock<TokenId> = OnceLock::new();
-            static PLATE2: OnceLock<TokenId> = OnceLock::new();
-            static PLATE2_PAD: OnceLock<TokenId> = OnceLock::new();
-            static PLATE2_H: OnceLock<TokenId> = OnceLock::new();
-            static TAG2_X: OnceLock<TokenId> = OnceLock::new();
             static RING_W: OnceLock<TokenId> = OnceLock::new();
             let (win, items) = self.add_list_rects(w, h);
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
@@ -1275,7 +1393,13 @@ impl Editor {
                         ir.x + m,
                         ir.y + m + head,
                         ir.w - 2.0 * m,
-                        (ir.h - 2.0 * m - head).max(10.0),
+                        // Only the degenerate case is caught here. The
+                        // 10 px this used to stand on was a floor with
+                        // nobody's name on it: a theme that squeezed the
+                        // entry got a miniature this file had decided
+                        // on. `editor.list.item_h_min_px` is where an
+                        // entry's own floor is declared.
+                        (ir.h - 2.0 * m - head).max(0.0),
                     ),
                 );
                 // Hold progress fills the entry from the left.
@@ -1302,28 +1426,8 @@ impl Editor {
                     t.px(tok(&RING_W, "editor.proxy.border")),
                     col(st.edge),
                 );
-                // Small name tag like on the panels.
-                let px = ROLE_LABEL.px(ctx);
-                let track = ROLE_LABEL.tracking(px);
-                let tw = ctx.fonts.measure(FONT_UI, px, widget.label(), track);
-                let plate_h = t.px(tok(&PLATE2_H, "editor.proxy.label_h"));
-                ctx.dl.rect(
-                    ir.x,
-                    ir.y,
-                    tw + t.px(tok(&PLATE2_PAD, "editor.proxy.label_pad_x")),
-                    plate_h,
-                    col(t.color(tok(&PLATE2, "component.nameplate.fill"))),
-                );
-                ctx.dl.text(
-                    ctx.fonts,
-                    FONT_UI,
-                    px,
-                    ir.x + t.px(tok(&TAG2_X, "panel.title.inset_x")),
-                    ir.y + (plate_h - px) / 2.0,
-                    widget.label(),
-                    col(st.text),
-                    track,
-                );
+                // The same name tag the panels wear.
+                nameplate(ctx, ir.x, ir.y, widget.label(), col(st.text));
             }
         }
 
@@ -1335,7 +1439,6 @@ impl Editor {
             static W_MIN_PX: OnceLock<TokenId> = OnceLock::new();
             static H_FRAC: OnceLock<TokenId> = OnceLock::new();
             static H_MIN: OnceLock<TokenId> = OnceLock::new();
-            static BAND_H: OnceLock<TokenId> = OnceLock::new();
             static TITLE_C: OnceLock<TokenId> = OnceLock::new();
             static BODY_TOP: OnceLock<TokenId> = OnceLock::new();
             static PAD: OnceLock<TokenId> = OnceLock::new();
@@ -1359,7 +1462,7 @@ impl Editor {
                 FONT_UI,
                 tpx,
                 bx + bw / 2.0,
-                by + (t.px(tok(&BAND_H, "modal.title.band_h")) - tpx) / 2.0,
+                modal_title_y(by, tpx),
                 "SAVE AS \u{2014} TYPE A NAME",
                 col(t.color(tok(&TITLE_C, "text.title"))),
                 ROLE_TITLE.tracking(tpx),
@@ -1438,6 +1541,18 @@ mod tests {
     const W: f32 = 1920.0;
     const H: f32 = 1080.0;
 
+    /// A gutter as a SCREEN would hand it over.
+    ///
+    /// `Screen::new` wants a window and an event loop, so these tests
+    /// reach the editor's doors directly — and what they are testing is
+    /// that a length passed through them comes out unchanged. The type
+    /// exists so that nothing SHIPPED can put the settings file's
+    /// rounded reading in this position; standing in for a screen is
+    /// what its test-only constructor is for.
+    fn screen_gutter(px: f32) -> Gutter {
+        Gutter::of_test(px)
+    }
+
     /// The widget registry these tests place from: the crates linked
     /// into this program plus the addons shipped beside it, which is
     /// the set the program itself comes up with.
@@ -1512,8 +1627,19 @@ mod tests {
     /// at `next_id`.
     fn editor_over(board: &Layout, next_id: u32) -> Editor {
         fixture_registry();
-        let mut ed = Editor::new();
-        ed.start(board, W, H, false, 20, 20, 8.0, (0, 0), WidgetCategory::Board, next_id);
+        let mut ed = Editor::new(screen_gutter(8.0));
+        ed.start(
+            board,
+            W,
+            H,
+            false,
+            20,
+            20,
+            screen_gutter(8.0),
+            (0, 0),
+            WidgetCategory::Board,
+            next_id,
+        );
         ed
     }
 
@@ -1680,5 +1806,290 @@ mod tests {
         assert!(same_spec(&rect_of(&ed, InstanceId::new(4)), &kept));
         let b = place(&mut ed, w, 1000.0, 500.0);
         assert_ne!(a, b, "an abandoned id is never handed out again");
+    }
+
+    // ------------------------------------------------- the theme's say
+
+    use crate::widgets::{token_px as number, Themed};
+
+    /// Where the name tag's label sits is the rhythm block's business,
+    /// and this file used to keep it to itself: it shared the plate out
+    /// over the GLYPH (`px`) instead of over the line the glyph stands
+    /// on, and never asked whether the theme centres optically. The
+    /// master asks for both, so the tag was drawn in a place its own
+    /// theme does not name.
+    #[test]
+    fn the_name_tag_sits_where_the_rhythm_block_puts_it() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let (top, px) = (100.0, 20.0);
+        let plate_h = nameplate_h();
+        let leading = ROLE_LABEL.leading();
+        let bias = number("rhythm.cap_center_bias");
+        assert!(leading > 1.0, "the master gives type.caption a line taller than its glyphs");
+
+        let optical = nameplate_text_y(top, px);
+        let glyph_centred = top + (plate_h - px) / 2.0;
+        assert!(
+            (optical - glyph_centred).abs() > 0.5,
+            "the tag is still centred the old way: {optical} vs {glyph_centred}"
+        );
+
+        // The one token that decides whether the optical nudge happens.
+        let geometric = {
+            let _t = Themed::new("geometric", "[rhythm]\ncenter_mode = geometric\n");
+            nameplate_text_y(top, px)
+        };
+        assert!(
+            ((optical - geometric) - px * bias).abs() < 1e-3,
+            "switching center_mode moved the label by {} rather than the declared {}",
+            optical - geometric,
+            px * bias
+        );
+
+        // And the role's line height, which is the other half of it.
+        let tall = {
+            let _t = Themed::new("tall-caption", "[type]\ncaption.leading = 2.0\n");
+            nameplate_text_y(top, px)
+        };
+        assert!(
+            (tall - (optical - px * (2.0 - leading) / 2.0)).abs() < 1e-3,
+            "a taller line did not move the label: {tall} vs {optical}"
+        );
+    }
+
+    /// The SAVE AS title had the same two omissions, in a band whose
+    /// height is a token of its own.
+    #[test]
+    fn the_modal_title_sits_where_the_rhythm_block_puts_it() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let (top, px) = (60.0, 24.0);
+        let master = modal_title_y(top, px);
+        let glyph_centred = top + (number("modal.title.band_h") - px) / 2.0;
+        assert!(
+            (master - glyph_centred).abs() > 0.5,
+            "the title is still centred the old way: {master} vs {glyph_centred}"
+        );
+
+        let geometric = {
+            let _t = Themed::new("geometric-title", "[rhythm]\ncenter_mode = geometric\n");
+            modal_title_y(top, px)
+        };
+        let bias = number("rhythm.cap_center_bias");
+        assert!(
+            ((master - geometric) - px * bias).abs() < 1e-3,
+            "switching center_mode left the modal title where it was"
+        );
+
+        let deep = {
+            let _t = Themed::new("deep-band", "[modal]\ntitle.band_h = 20u\n");
+            modal_title_y(top, px)
+        };
+        assert!(deep > master + 1.0, "a taller title band did not move the title");
+    }
+
+    /// `motion.scale = 0` is how a theme says "no animation", and the
+    /// tear-off growth ran straight through it. A one-shot freezes at
+    /// the state it was going to, so the widget arrives at full size on
+    /// the first frame instead of never arriving.
+    #[test]
+    fn reduced_motion_places_the_widget_instead_of_growing_it() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let dur = number("motion.widget_grow.duration_ms") / 1000.0;
+        let (x0, e0) = grow_progress(0.0);
+        assert_eq!((x0, e0), (0.0, 0.0), "the master's widget does start small");
+        let (half, eased) = grow_progress(dur / 2.0);
+        assert!((half - 0.5).abs() < 1e-3, "halfway through is {half}");
+        assert!(eased > half, "the master's ease_out runs ahead of linear");
+
+        for (tag, body) in [
+            ("still", "[motion]\nscale = 0.0\n"),
+            ("nogrow", "[motion.widget_grow]\nenabled = false\n"),
+        ] {
+            let _t = Themed::new(tag, body);
+            assert_eq!(
+                grow_progress(0.0),
+                (1.0, 1.0),
+                "{tag}: the widget still grew on screen"
+            );
+        }
+
+        // And the scale is a MULTIPLIER, not a switch: doubling it
+        // doubles the time the same instant is a fraction of.
+        let _t = Themed::new("slow", "[motion]\nscale = 2.0\n");
+        let (slow, _) = grow_progress(dur / 2.0);
+        assert!((slow - 0.25).abs() < 1e-3, "half the time into a doubled duration is {slow}");
+    }
+
+    /// The same global, on the button flash — whose end state is a
+    /// button that is not lit, so stillness means it never lights.
+    #[test]
+    fn reduced_motion_takes_the_flash_off_the_editor_buttons() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let master = press_ms();
+        assert!(master > 0.0, "the master's buttons do flash");
+
+        for (tag, body) in [
+            ("still-press", "[motion]\nscale = 0.0\n"),
+            ("nopress", "[motion.press]\nenabled = false\n"),
+        ] {
+            let _t = Themed::new(tag, body);
+            assert_eq!(press_ms(), 0.0, "{tag}: the button still flashed");
+        }
+
+        let _t = Themed::new("slow-press", "[motion]\nscale = 2.0\n");
+        assert!(
+            (press_ms() - 2.0 * master).abs() < 1e-3,
+            "the flash does not follow motion.scale"
+        );
+    }
+
+    // ------------------------------------------ the gutter, and whose it is
+
+    /// A window height at which the theme's gutter is not a whole number
+    /// of device pixels, with that gutter. A `u` is a fraction of the
+    /// window, so most heights are such a height — but which ones depends
+    /// on the theme, so it is searched for rather than assumed.
+    ///
+    /// The viewport is left standing at the height that answered: the
+    /// caller is about to compare numbers taken under it.
+    fn a_height_with_a_fractional_gutter() -> (f32, f32) {
+        (600..=2400)
+            .step_by(3)
+            .find_map(|h| {
+                nacelle::theme::set_viewport(h as f32, 1.0);
+                let g = crate::config::panel_gutter(None);
+                (g.fract() > 0.01 && g.fract() < 0.99).then_some((h as f32, g))
+            })
+            .expect(
+                "no height in 600..2400 gave a fractional gutter — if the gutter is \
+                 now whole by construction, the editor no longer needs the screen's \
+                 own reading and this test should be retired deliberately",
+            )
+    }
+
+    /// THE defect this seam exists to prevent, stated as a test.
+    ///
+    /// The editor is drawn OVER the boards, and the boards are solved
+    /// with `Screen::pad` — the theme's gutter at that screen's height,
+    /// fractions and all. The settings file can only answer the same
+    /// question in whole pixels, because that is what the spinner edits,
+    /// and for a long time the event loop handed the editor that rounded
+    /// answer four lines after the screen had handed it the exact one.
+    /// The picture said nothing: the grid simply sat up to half a pixel
+    /// per u away from the panels it was editing.
+    ///
+    /// So: whatever the screen hands over is what the editor keeps —
+    /// through the front door (`start`) and through the one the settings
+    /// window uses while the editor runs (`sync_from_screen`), which is
+    /// the door that reads the file and must drop the gutter it finds
+    /// there. A rounded reading cannot be equal to a fractional length,
+    /// so a fixture with a fraction in it is the whole assertion.
+    #[test]
+    fn the_editor_draws_with_the_screens_gutter_and_never_the_files() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let _wide = Themed::new("editor-gutter", "[layout]\npanel_gutter = 9u\n");
+        let (h, exact) = a_height_with_a_fractional_gutter();
+        assert_ne!(
+            exact,
+            exact.round(),
+            "the fixture must be a length no whole-pixel reading can equal"
+        );
+
+        // Built while the engine's last bake was somebody ELSE's height —
+        // the neighbour drawing, or at boot the engine's own default. The
+        // number belongs to the screen that hands it over; an editor that
+        // goes and asks for itself gets the neighbour's answer and nothing
+        // says so.
+        nacelle::theme::set_viewport(h * 2.0, 1.0);
+        let theirs = crate::config::panel_gutter(None);
+        assert_ne!(theirs, exact, "two heights must give two gutters, or this proves nothing");
+        assert_eq!(
+            Editor::new(screen_gutter(exact)).padding,
+            exact,
+            "the editor asked the theme under the neighbour's height ({theirs}) instead \
+             of taking its own screen's {exact}"
+        );
+        nacelle::theme::set_viewport(h, 1.0);
+
+        // Entering the editor: the screen's number, unrounded.
+        let mut ed = Editor::new(screen_gutter(exact));
+        assert_eq!(ed.padding, exact, "an editor is built with its screen's gutter");
+        ed.start(
+            &Layout::empty(W, h),
+            W,
+            h,
+            false,
+            20,
+            20,
+            screen_gutter(exact),
+            (0, 0),
+            WidgetCategory::Board,
+            1,
+        );
+        assert_eq!(
+            ed.padding, exact,
+            "at {h} lines the board is drawn with {exact}; the editor took \
+             something else"
+        );
+
+        // And the path the settings window takes with the editor already
+        // running — the one that re-reads the preferences file. It must
+        // come back with the SCREEN's gutter still in place.
+        ed.sync_from_screen(screen_gutter(exact), W, h);
+        assert_eq!(
+            ed.padding, exact,
+            "the file's gutter ({}) beat the screen's ({exact}) on the way \
+             through sync_from_screen",
+            crate::config::grid_prefs().3
+        );
+
+        nacelle::theme::set_viewport(1080.0, 1.0);
+    }
+
+    /// And no floor of the editor's own on top of it.
+    ///
+    /// `.max(0.0)` on the way in reads as a guard against a nonsense
+    /// theme, but the boards are solved with the same length UNGUARDED
+    /// (`Screen::pad`), so all it can ever do is make the editor
+    /// disagree with the picture underneath it — and say nothing. The
+    /// gutter here is a §5.0 sentinel, which is how a length token in
+    /// this engine becomes negative at all: the master's `@corner.pill`
+    /// bakes to -2, a theme may name it in any length slot, and the
+    /// board takes it as it stands.
+    #[test]
+    fn the_editor_puts_no_floor_of_its_own_under_the_screens_gutter() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let _odd = Themed::new("editor-gutter-sentinel", "[layout]\npanel_gutter = @corner.pill\n");
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        let pad = crate::config::panel_gutter(None);
+        assert!(
+            pad < 0.0,
+            "the fixture must make the gutter non-positive, or this test guards \
+             nothing (it read {pad})"
+        );
+
+        let mut ed = Editor::new(screen_gutter(pad));
+        assert_eq!(ed.padding, pad, "the constructor floored the screen's gutter");
+        ed.start(
+            &Layout::empty(W, H),
+            W,
+            H,
+            false,
+            20,
+            20,
+            screen_gutter(pad),
+            (0, 0),
+            WidgetCategory::Board,
+            1,
+        );
+        assert_eq!(ed.padding, pad, "`start` floored the screen's gutter");
+        ed.sync_from_screen(screen_gutter(pad), W, H);
+        assert_eq!(ed.padding, pad, "`sync_from_screen` floored the screen's gutter");
     }
 }

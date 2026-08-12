@@ -52,6 +52,123 @@ fn tcol(c: ThemeColor) -> theme::Color {
     theme::Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
+/// How far the hand may travel before a press stops being a click.
+///
+/// The master names this length and describes it in exactly these terms,
+/// which is why the number the event loop used to carry — two per cent of
+/// the window, floored at twenty pixels — is not a second opinion but a
+/// duplicate. It is an accessibility length besides: an unsteady hand
+/// wants it wider, and the contrast variants are where that is said.
+fn drag_slop() -> f32 {
+    static SLOP: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&SLOP, "a11y.drag_slop"))
+}
+
+/// Which way a held press has travelled far enough to turn the board:
+/// `Some(true)` sideways, `Some(false)` up and down, `None` while it is
+/// still a click. The axis is decided once, by whichever way the hand
+/// went first, and the drag stays on it.
+fn drag_axis(dx: f32, dy: f32, slop: f32) -> Option<bool> {
+    if dx.abs() > slop && dx.abs() > dy.abs() {
+        Some(true)
+    } else if dy.abs() > slop && dy.abs() > dx.abs() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Whether a released gesture left the world far enough off-centre to be
+/// worth settling back. The same threshold the frame uses to decide a ride
+/// is over: authored in the cube's degrees, so the flat slide — whose full
+/// travel is 1.0 rather than 90 — takes it in that ratio.
+fn ride_visible(a: f32, full: f32) -> bool {
+    static SETTLE: OnceLock<TokenId> = OnceLock::new();
+    let eps = theme::resolved().px(tok(&SETTLE, "motion.board_ride.epsilon"));
+    a.abs() > full * (eps / 90.0)
+}
+
+/// How big the content of ONE panel is drawn, out of the theme's three
+/// responsive numbers and the box the panel was given. `None` is the
+/// widget that is sized against its reference box instead — the frame
+/// asks the drawing context for that one, which is the only branch that
+/// needs a live frame, and the reason the other three are here.
+///
+/// A function, and not the arithmetic written out inside the frame,
+/// because these three tokens decide the size of the type in EVERY panel
+/// on the board: what a theme that states a floor of zero — or a
+/// reference panel of no width — gets has to be answerable without a
+/// window, or the answer is whatever nobody looked at. Both used to be
+/// capped here by constants (`0.05`, `0.01`) that the master never wrote
+/// and could not reach.
+///
+/// `natural` inside `Content` is the content height the widget measured
+/// for itself; `scales` is its answer to whether it follows the panel
+/// scale at all.
+fn panel_scale(
+    rect: &widgets::Rect,
+    screen_h: f32,
+    chrome_extra: f32,
+    sizing: widgets::Sizing,
+    scales: bool,
+) -> Option<f32> {
+    static REF: OnceLock<TokenId> = OnceLock::new();
+    static LO: OnceLock<TokenId> = OnceLock::new();
+    static HI: OnceLock<TokenId> = OnceLock::new();
+    let t = theme::resolved();
+    // The three numbers are the theme's, taken as it wrote them. A rescue
+    // constant here decides the size of the type behind the master's back
+    // — and silently, since a theme asking for a floor of zero would
+    // simply be answered something else with nothing said.
+    let rf = t.px(tok(&REF, "responsive.panel_ref_frac"));
+    let lo = t.px(tok(&LO, "responsive.scale_min"));
+    // Still the theme's own pair and not a constant: a master that puts
+    // its ceiling under its floor has contradicted itself, and the floor
+    // wins — the way the toolkit's `type.min_px` beats a role's own cap.
+    // `clamp` also refuses an inverted pair outright, and a panic is the
+    // one answer that helps nobody.
+    let hi = t.px(tok(&HI, "responsive.scale_max")).max(lo);
+    // The reference panel is `panel_ref_frac` of the screen height. A
+    // reference of NO width is not a width to divide by: every panel is
+    // then wider than the reference, which is what the ceiling means, and
+    // the alternative is a 0/0 NaN riding out into every glyph on the
+    // board.
+    let refw = screen_h * rf;
+    let ws = if refw > 0.0 { (rect.w / refw).clamp(lo, hi) } else { hi };
+    Some(match sizing {
+        widgets::Sizing::Rows => ws,
+        // A widget that does not follow panel_scale draws its measured
+        // content at scale 1 in any box, so its want must be published
+        // whole: shrinking the want without shrinking the drawing is how
+        // the control buttons left their panel at 1280x800.
+        widgets::Sizing::Content(_) if !scales => 1.0,
+        // The height left over after the chrome, over the height the
+        // content says it needs. Both are pixels the frame measured, not
+        // lengths a theme wrote, and a box or a content of no height is
+        // an arithmetic hole rather than a design.
+        widgets::Sizing::Content(natural) => {
+            ws.min((rect.h - chrome_extra).max(1.0) / natural.max(1.0)).clamp(lo, hi)
+        }
+        widgets::Sizing::Reference => return None,
+    })
+}
+
+/// ONE SCREEN'S gutter: the band kept clear around every panel, taken
+/// under the height of the screen that is going to use it.
+///
+/// The viewport is set FIRST, every time, and that is the whole point of
+/// this being a function rather than two lines written out at each site.
+/// The gutter is a u, u is a fraction of the window height, and the
+/// engine bakes one viewport at a time — so "read it once, hand it to
+/// every screen" answers whichever screen last drew. On a mixed-height
+/// desktop that is the neighbour's number, and it changes as the
+/// neighbour draws. The user's `GridPadding=` is not a u and rides past
+/// the bake untouched, which is why it travels as a plain override.
+fn screen_gutter(h: f32, over: Option<u32>) -> f32 {
+    nacelle::theme::set_viewport(h, 1.0);
+    config::panel_gutter(over)
+}
+
 /// One terminal session (tab): PTY + emulation + parser.
 struct Session {
     term: term::Term,
@@ -178,6 +295,10 @@ struct Prefs {
     /// rather than one it can make, and it is the same on every screen:
     /// a mood is global, and an alarm on one monitor is an alarm.
     mood_wash: Option<theme::Color>,
+    /// `GridPadding=`, or `None` while the theme's own gutter stands. Only
+    /// the override rides here: the length behind it is a u, and the u
+    /// that answers belongs to the screen being drawn, not to the frame.
+    grid_pad: Option<u32>,
     /// The clock this frame is told it is (virtual while the pixel
     /// guard is armed).
     t: f64,
@@ -254,8 +375,11 @@ fn main() {
     // Font preferences (size scales + family/weight, terminal and UI).
     let (mut font_scale, tfam, twgt) = config::term_font_prefs();
     let (mut ui_font_scale, ufam, uwgt) = config::ui_font_prefs();
-    // Widget padding: content inset from the outer panel edge (GRID view).
-    let mut ui_padding = config::grid_prefs().3 as f32;
+    // The band kept clear around every panel. The theme writes it and the
+    // GRID view's `GridPadding=` overrides it, so what is kept between
+    // frames is the OVERRIDE: the length behind it is a u, and a u moves
+    // with the window height and with every re-bake.
+    let mut pad_override = config::grid_padding_override();
     let mut last_term_key = (tfam.clone().unwrap_or_default(), twgt.clone().unwrap_or_default());
     let mut last_ui_key = (ufam.clone().unwrap_or_default(), uwgt.clone().unwrap_or_default());
     if tfam.is_some() || twgt.is_some() {
@@ -361,9 +485,6 @@ fn main() {
     if screens.is_empty() {
         eprintln!("nacelle-desktop: no screen came up — nothing to draw on");
         return;
-    }
-    for sc in screens.iter_mut() {
-        sc.pad = ui_padding;
     }
     for sc in screens.iter() {
         let (w, h) = sc.size();
@@ -689,13 +810,36 @@ fn main() {
 
     let start = Instant::now();
 
+    // The gutter, asked of the theme once per screen.
+    //
+    // Asked INSIDE the loop and not once above it: the gutter is a u, u
+    // is a function of the window height, and two monitors of two
+    // heights are two lengths. One reading handed to every screen would
+    // be whichever screen last set the viewport — on a mixed-height
+    // desktop that is the neighbour's, and it would change as the
+    // neighbour drew.
+    macro_rules! apply_gutter {
+        () => {{
+            for sc in screens.iter_mut() {
+                sc.pad = screen_gutter(sc.size().1, pad_override);
+            }
+        }};
+    }
+    // Once here, because the reading `Screen::new` took was taken off the
+    // engine's 1080-line default bake, before this window said how tall
+    // it is.
+    apply_gutter!();
+
     // Every screen re-reads the layaut its connector is assigned and
     // brings its widgets into line with it. One call, so no path that
     // changes a layout can quietly forget a screen.
     macro_rules! reload_layauts {
         () => {{
             for sc in screens.iter_mut() {
-                sc.pad = ui_padding;
+                // The solve about to run reads `sc.pad`, so the gutter is
+                // refreshed under this screen's own height first — the same
+                // reason `apply_gutter!` asks inside its loop.
+                sc.pad = screen_gutter(sc.size().1, pad_override);
                 sc.reload_layaut();
             }
         }};
@@ -761,6 +905,10 @@ fn main() {
                 }
             }
             apply_lens!();
+            // Before the reload, because that is what hands the new
+            // gutter to every screen's solve.
+            pad_override = config::grid_padding_override();
+            apply_gutter!();
             reload_layauts!();
         }};
     }
@@ -1368,12 +1516,14 @@ fn main() {
                 // With the editor already running the window simply
                 // hides — back to the grid.
             }
-            let (snap, cols, rows, pad) = config::grid_prefs();
+            // Every running editor re-reads the grid preferences. The
+            // gutter is NOT among the things this loop passes: the screen
+            // takes it from its own `pad`, which is the length its boards
+            // were solved with (`Screen::sync_editor`). This block held
+            // the file's rounded gutter once, and that is precisely what
+            // slid the editor's grid off the panels it was editing.
             for sc in screens.iter_mut() {
-                if sc.editor.active {
-                    let (w, h) = sc.size();
-                    sc.editor.sync_prefs(snap, cols, rows, pad as f32, w, h);
-                }
+                sc.sync_editor();
             }
         }};
     }
@@ -1449,16 +1599,10 @@ fn main() {
                         // never delivered.
                         if let Some((px0, py0)) = screens[si].press_at {
                             if screens[si].pan.is_none() && screens[si].cube.is_none() {
-                                let (w, _) = screens[si].size();
-                                let (dx, dy) = (mouse.0 - px0, mouse.1 - py0);
-                                let th = (w * 0.02).max(20.0);
-                                // The axis is decided once, by whichever
-                                // way the hand went first, and the drag
-                                // stays on it.
-                                if dx.abs() > th && dx.abs() > dy.abs() {
-                                    screens[si].pan = Some((true, 0.0));
-                                } else if dy.abs() > th && dy.abs() > dx.abs() {
-                                    screens[si].pan = Some((false, 0.0));
+                                if let Some(hz) =
+                                    drag_axis(mouse.0 - px0, mouse.1 - py0, drag_slop())
+                                {
+                                    screens[si].pan = Some((hz, 0.0));
                                 }
                             }
                             if let Some((horizontal, _)) = screens[si].pan {
@@ -1577,6 +1721,11 @@ fn main() {
                         if screens[si].editor.active {
                             return;
                         }
+                        // TODO(theme): [scroll] describes the notch a wheel
+                        // reports (wheel_px) and not the distance a device
+                        // reporting pixels spends on one — a touchpad and a
+                        // high-resolution wheel therefore travel a distance
+                        // the file has no name for.
                         let dy = match delta {
                             MouseScrollDelta::LineDelta(_, y) => y,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32 / 20.0,
@@ -1657,15 +1806,14 @@ fn main() {
                         }
                         if screens[si].editor.active && settings.open {
                             settings.release();
-                            let (snap, cols, rows, pad) = config::grid_prefs();
-                            let (w, h) = screens[si].size();
-                            screens[si]
-                                .editor
-                                .sync_prefs(snap, cols, rows, pad as f32, w, h);
-                            ui_padding = pad as f32;
-                            for sc in screens.iter_mut() {
-                                sc.pad = ui_padding;
-                            }
+                            pad_override = config::grid_padding_override();
+                            // The gutter slider has just been let go, so
+                            // this screen's `pad` is refreshed FIRST and
+                            // the editor then takes that very number —
+                            // never a second reading of the file, which
+                            // rounds it to the spinner's whole pixel.
+                            apply_gutter!();
+                            screens[si].sync_editor();
                             return;
                         }
                         if settings.open && settings.release() {
@@ -1687,6 +1835,10 @@ fn main() {
                             // reach the top and bottom from anywhere.
                             let on_arm = if horizontal { here.1 == 0 } else { true };
                             let full: f32 = if horizontal { 90.0 } else { 1.0 };
+                            // TODO(theme): the commit threshold is the one
+                            // material property of the ride the master does
+                            // not name — motion.board_ride would want a
+                            // commit_frac beside gesture_frac and rubber_*.
                             let past = a.abs() >= full / 3.0;
                             if past && on_arm && screens[si].has_board(target) {
                                 nacelle::sound::emit(nacelle::sound::Event::Snap);
@@ -1698,7 +1850,7 @@ fn main() {
                                     to: target,
                                     face_b: target,
                                 });
-                            } else if a.abs() > full * 0.001 {
+                            } else if ride_visible(a, full) {
                                 screens[si].cube = Some(Cube {
                                     horizontal,
                                     a0: a,
@@ -1904,11 +2056,16 @@ fn main() {
                         // Begin answers None and the press falls through
                         // to the machinery below, so tab clicks and
                         // board drags are exactly what they were.
+                        // How far the second click may land from the first
+                        // and still be the same click: the same slop the
+                        // board drag is measured against, because it is the
+                        // same hand and the same accessibility setting.
+                        let slop = drag_slop();
                         click_streak = match click_last {
                             Some((t, x, y))
                                 if t.elapsed() < std::time::Duration::from_millis(400)
-                                    && (mouse.0 - x).abs() < 6.0
-                                    && (mouse.1 - y).abs() < 6.0 =>
+                                    && (mouse.0 - x).abs() < slop
+                                    && (mouse.1 - y).abs() < slop =>
                             {
                                 click_streak + 1
                             }
@@ -2486,11 +2643,12 @@ fn main() {
                             ui_font_scale = uscale;
                         }
                         // Live widget padding while the GRID view is open.
+                        // A slider under the hand is an override that has
+                        // not reached the file yet, which is exactly what
+                        // the override slot is for.
                         if let Some(p) = settings.live_padding() {
-                            ui_padding = p as f32;
-                            for sc in screens.iter_mut() {
-                                sc.pad = ui_padding;
-                            }
+                            pad_override = Some(p);
+                            apply_gutter!();
                         }
                         // The layout is recomputed from the window size every
                         // frame (nacelle::flex), so moving the window to another
@@ -2555,6 +2713,7 @@ fn main() {
                             // engine's epoch has not moved and there is no
                             // wash in flight.
                             mood_wash: wash.at(clock),
+                            grid_pad: pad_override,
                             t: clock,
                         };
                         // The application's own interface is drawn on
@@ -2715,6 +2874,17 @@ fn main() {
                     // other frame of the session.
                     if nacelle::theme::epoch() != lens_epoch {
                         apply_lens!();
+                        // The gutter deliberately does NOT ride this guard.
+                        // `render.text_gamma` is one number for the session,
+                        // so re-reading it off whichever bake is published
+                        // costs nothing and answers the same. A u does not
+                        // survive that: each screen sets the viewport as it
+                        // draws, so on a mixed-height desktop the published
+                        // bake alternates and the epoch alternates with it —
+                        // re-broadcasting one gutter here would retune every
+                        // screen to its neighbour's height, every frame.
+                        // The gutter is taken per screen in `draw_screen`,
+                        // under the viewport that screen just set.
                     }
                     if now >= next_frame {
                         // Catching up frame by frame after a stall would
@@ -2774,6 +2944,15 @@ fn draw_screen(
     // a height that lands on the same u is deduplicated inside, so a
     // one-screen desktop pays nothing for the call.
     nacelle::theme::set_viewport(h, 1.0);
+    // The gutter belongs to the bake the line above just published, so it
+    // is taken here rather than broadcast from the event loop: this is the
+    // one place in the program that is certain to be looking at THIS
+    // screen's height. The hit tests that read `sc.pad` between frames get
+    // the value this screen last drew with, which is the one under the
+    // pointer. Through the same function the event loop uses, so there is
+    // one place that knows a gutter belongs to a height — the viewport it
+    // sets is the one set just above, and the engine drops a repeat.
+    sc.pad = screen_gutter(h, prefs.grid_pad);
     // The decoration plate follows the theme and the surface, never the
     // frame: a rebake is kicked when either changes and collected
     // whenever it lands.
@@ -2974,27 +3153,12 @@ fn draw_screen(
                 // stretched downwards, and a clock must keep its
                 // proportions whichever way it is pulled.
                 let scale_of = |rect: &widgets::Rect, ctx: &mut nacelle::Ctx| -> f32 {
-                    static REF: OnceLock<TokenId> = OnceLock::new();
-                    static LO: OnceLock<TokenId> = OnceLock::new();
-                    static HI: OnceLock<TokenId> = OnceLock::new();
-                    let t = nacelle::theme::resolved();
-                    let rf = t.px(tok(&REF, "responsive.panel_ref_frac")).max(0.01);
-                    let lo = t.px(tok(&LO, "responsive.scale_min")).max(0.05);
-                    let hi = t.px(tok(&HI, "responsive.scale_max")).max(lo);
-                    let ws = (rect.w / (h * rf)).clamp(lo, hi);
-                    match sizing {
-                        widgets::Sizing::Rows => ws,
-                        // A widget that does not follow panel_scale
-                        // draws its measured content at scale 1 in any
-                        // box, so its want must be published whole:
-                        // shrinking the want without shrinking the
-                        // drawing is how the control buttons left their
-                        // panel at 1280x800.
-                        widgets::Sizing::Content(_) if !scales => 1.0,
-                        widgets::Sizing::Content(natural) => ws
-                            .min((rect.h - chrome_extra).max(1.0) / natural.max(1.0))
-                            .clamp(lo, hi),
-                        widgets::Sizing::Reference => ctx.panel_font_scale(rect, p),
+                    // Everything but the reference-sized widget is decided
+                    // by `panel_scale`, out of the theme and the box; that
+                    // one is the drawing context's own answer.
+                    match panel_scale(rect, h, chrome_extra, sizing, scales) {
+                        Some(s) => s,
+                        None => ctx.panel_font_scale(rect, p),
                     }
                 };
                 // Every placement gets its own scale: two terminals in
@@ -3392,6 +3556,11 @@ fn run_resolution_dialog(
     mw: u32,
     mh: u32,
 ) {
+    // TODO(theme): [dialog] tokenises every fraction OF this box and the
+    // box itself has no key. modal.min_w/min_h are the wrong stand-in —
+    // they are a portrait minimum, and the two body lines here are drawn
+    // centred and unwrapped, so borrowing them would push the text off
+    // the only window a user with a small monitor ever sees.
     let window = WindowBuilder::new()
         .with_title("nacelle-desktop")
         .with_inner_size(winit::dpi::LogicalSize::new(640.0, 200.0))
@@ -3716,5 +3885,189 @@ mod tests {
         assert_eq!(key_sound(&named(NamedKey::Backspace)), Event::KeyErase);
         assert_eq!(key_sound(&Key::Character("a".into())), Event::Key);
         assert_eq!(key_sound(&named(NamedKey::ArrowDown)), Event::Key);
+    }
+
+    /// Where a press stops being a click and starts turning the board.
+    ///
+    /// This used to be two per cent of the window floored at twenty
+    /// pixels, three lines above a block that takes the rest of the ride
+    /// — travel, give, and the give's bound — out of the theme. The
+    /// master had already named the same length, and named it as an
+    /// accessibility one; this is what says the code reads it now.
+    #[test]
+    fn the_theme_decides_how_far_a_click_may_travel() {
+        let _theme = widgets::theme_test_lock();
+        let shipped = drag_slop();
+        assert_eq!(
+            shipped,
+            widgets::token_px("a11y.drag_slop"),
+            "the threshold must BE the token"
+        );
+        // A hand that travels twice the shipped slop sideways turns the
+        // board, and does so on the axis it travelled.
+        let far = shipped * 2.0;
+        assert_eq!(drag_axis(far, 0.0, shipped), Some(true));
+        assert_eq!(drag_axis(0.0, far, shipped), Some(false));
+        assert_eq!(drag_axis(-far, far * 0.5, shipped), Some(true), "the longer axis wins");
+        // Half of it is still a click, whichever way it went.
+        assert_eq!(drag_axis(shipped * 0.5, shipped * 0.5, shipped), None);
+
+        // And a theme for an unsteady hand makes that same travel a
+        // click again — the whole point of the token being a token.
+        let _steady = widgets::Themed::new("slop", "[a11y]\ndrag_slop = 6u\n");
+        let wide = drag_slop();
+        assert!(wide > far, "6u must be wider than twice 1.5u: {far} vs {wide}");
+        assert_eq!(
+            drag_axis(far, 0.0, wide),
+            None,
+            "under a wider slop the very same travel is a click, not a turn"
+        );
+    }
+
+    /// Every screen's gutter is asked under that screen's own height.
+    ///
+    /// This is the one thing `screen_gutter` exists to guarantee, and the
+    /// only reason it is a function: the event loop applies it in a loop
+    /// over the screens and the frame applies it again for the screen it
+    /// is drawing, so a version that forgot to set the viewport would hand
+    /// two monitors one number and nothing would say so — the picture
+    /// would simply breathe as the two heights took turns publishing.
+    ///
+    /// Two heights an octave apart, so no rounding can bring them
+    /// together, and the pair is asked TWICE in opposite orders: the
+    /// answer must depend on the height passed in and on nothing that
+    /// happened before.
+    #[test]
+    fn every_screen_takes_the_gutter_of_its_own_height() {
+        let _theme = widgets::theme_test_lock();
+        // Far from the shipped gutter so the two answers cannot land on
+        // the same pixel by accident.
+        let _wide = widgets::Themed::new("gutter-two", "[layout]\npanel_gutter = 9u\n");
+
+        let short = screen_gutter(1080.0, None);
+        let tall = screen_gutter(2160.0, None);
+        assert!(
+            tall > short,
+            "a taller screen must get a wider gutter, or the gutter is not a u: \
+             {short} -> {tall}"
+        );
+        // The neighbour drew last, and this screen's answer is unmoved.
+        assert_eq!(screen_gutter(1080.0, None), short, "the height decides, not the order");
+        assert_eq!(screen_gutter(2160.0, None), tall);
+
+        // The user's override is not a u: it is the same length on every
+        // screen, which is why it may travel on the frame.
+        assert_eq!(screen_gutter(1080.0, Some(31)), 31.0);
+        assert_eq!(screen_gutter(2160.0, Some(31)), 31.0);
+
+        nacelle::theme::set_viewport(1080.0, 1.0);
+    }
+
+    /// The threshold below which a released gesture is simply let go
+    /// rather than settled back. The frame that DRAWS the ride already
+    /// took it from the theme; the event loop that ends one carried its
+    /// own copy, so a theme could move one and not the other.
+    #[test]
+    fn the_theme_decides_when_a_released_ride_is_worth_settling() {
+        let _theme = widgets::theme_test_lock();
+        let eps = widgets::token_px("motion.board_ride.epsilon");
+        // Authored in the cube's 90 degrees, and the flat slide's full
+        // travel of 1.0 takes it in the same ratio — so the same tilt,
+        // expressed on either axis, answers the same.
+        assert!(ride_visible(eps * 2.0, 90.0));
+        assert!(!ride_visible(eps * 0.5, 90.0));
+        assert!(ride_visible(eps * 2.0 / 90.0, 1.0));
+        assert!(!ride_visible(eps * 0.5 / 90.0, 1.0));
+
+        // A theme that wants the ride to give up sooner is obeyed: a
+        // tilt that settled before now does not.
+        let _lazy = widgets::Themed::new(
+            "settle",
+            "[motion.board_ride]\nepsilon = 0.4\n",
+        );
+        assert!(
+            !ride_visible(eps * 2.0, 90.0),
+            "a coarser epsilon must swallow a tilt the shipped one settled"
+        );
+    }
+
+    /// The size of the type in every panel on the board rests on three
+    /// theme numbers, and two of them used to be capped here by
+    /// constants the master never wrote and could not reach — a floor of
+    /// 0.05 under `scale_min` and 0.01 under `panel_ref_frac`. With the
+    /// shipped theme (0.62 and 0.30) neither cap ever bit, which is why
+    /// nothing on screen said they were there; a theme that wants its
+    /// panels to shrink away, or that names no reference width at all,
+    /// was answered a number of this file's own invention instead.
+    #[test]
+    fn the_theme_alone_decides_how_far_a_panels_type_scales() {
+        let _theme = widgets::theme_test_lock();
+        nacelle::theme::set_viewport(1080.0, 1.0);
+        const H: f32 = 1080.0;
+        let rect = |w: f32| widgets::Rect::new(0.0, 0.0, w, 600.0);
+        let rows = |w: f32| panel_scale(&rect(w), H, 0.0, widgets::Sizing::Rows, true);
+        let rf = widgets::token_px("responsive.panel_ref_frac");
+        let lo = widgets::token_px("responsive.scale_min");
+        let hi = widgets::token_px("responsive.scale_max");
+
+        // A panel exactly the reference width is the reference: 1:1.
+        assert_eq!(rows(H * rf), Some(1.0));
+        // Off either end of the theme's range, the theme's own bounds.
+        assert_eq!(rows(1.0), Some(lo), "a sliver of a panel must land on the theme's floor");
+        assert_eq!(rows(H * rf * 1000.0), Some(hi));
+        // The reference-sized widget is the drawing context's answer and
+        // nobody else's, which is what `None` says.
+        assert_eq!(
+            panel_scale(&rect(500.0), H, 0.0, widgets::Sizing::Reference, true),
+            None
+        );
+        // A widget that does not follow the panel scale draws whole,
+        // however wide its box is.
+        assert_eq!(
+            panel_scale(&rect(H * rf * 4.0), H, 0.0, widgets::Sizing::Content(300.0), false),
+            Some(1.0)
+        );
+        // One that does is held by whichever axis runs out first — here
+        // the height, less the chrome, over the content's own.
+        assert_eq!(
+            panel_scale(&rect(H * rf * 4.0), H, 100.0, widgets::Sizing::Content(400.0), true),
+            Some((600.0f32 - 100.0) / 400.0)
+        );
+
+        // A theme that states no floor at all — zero is how the engine
+        // spells an absent bound — lets a sliver of a panel keep its own
+        // ratio all the way down. This is the assertion the old
+        // `.max(0.05)` failed: it would have answered 0.05, sixteen times
+        // the size the theme asked for, and said nothing.
+        {
+            let _floor = widgets::Themed::new("scale-floor", "[responsive]\nscale_min = 0.0\n");
+            let raw = 1.0 / (H * rf);
+            assert!(
+                raw < 0.05,
+                "the sliver must fall UNDER the constant that used to be here, or this \
+                 proves nothing: {raw}"
+            );
+            assert_eq!(
+                rows(1.0),
+                Some(raw),
+                "a floor of zero came back as something else — the file overrode the master"
+            );
+        }
+        // And a reference panel of NO width is answered with the theme's
+        // ceiling — every panel is wider than a reference of nothing —
+        // rather than with a rescue fraction, and never with the NaN that
+        // 0/0 would send out into every glyph size on the board.
+        {
+            let _norm =
+                widgets::Themed::new("scale-ref", "[responsive]\npanel_ref_frac = 0.0\n");
+            let ceiling = widgets::token_px("responsive.scale_max");
+            assert_eq!(rows(500.0), Some(ceiling));
+            assert_eq!(
+                panel_scale(&widgets::Rect::new(0.0, 0.0, 0.0, 600.0), H, 0.0,
+                            widgets::Sizing::Rows, true),
+                Some(ceiling),
+                "a panel of no width against a reference of no width is 0/0"
+            );
+        }
     }
 }
