@@ -5,6 +5,7 @@
 mod audio;
 mod clipboard;
 mod config;
+mod mood;
 mod plugins;
 mod pty;
 mod screen;
@@ -171,6 +172,12 @@ struct Prefs {
     ui_font_scale: f32,
     /// The user's scale over the alpha of the theme's own glass wash.
     frost_wash: f32,
+    /// §5.24's mood transition tint, at this frame's point in its fade,
+    /// or `None` when no mood has changed lately. Not the user's say at
+    /// all — it rides here because it is a decision the frame is handed
+    /// rather than one it can make, and it is the same on every screen:
+    /// a mood is global, and an alarm on one monitor is an alarm.
+    mood_wash: Option<theme::Color>,
     /// The clock this frame is told it is (virtual while the pixel
     /// guard is armed).
     t: f64,
@@ -478,6 +485,28 @@ fn main() {
     // System telemetry in the background.
     let sys = system::start();
 
+    // §5.24's mood arbiter, reading the rules the loaded theme declares and
+    // the telemetry that thread publishes once a second. Built here because
+    // the theme is loaded and the collector is running, and consulted once
+    // per frame in AboutToWait, where it decides at most once a second.
+    let mut mood = mood::Moods::new();
+    // §5.24's transition tint, built BEFORE anything latches a mood: the
+    // resting console is what the desktop starts from, so a session that
+    // boots straight into lockdown announces itself exactly like one that
+    // falls into it an hour later. Everything else about a mood arrives by
+    // index swap and needs no help; this one quad is the whole of what the
+    // host draws for it, and without it a re-skin is indistinguishable from
+    // a rendering fault.
+    let mut wash = mood::Wash::new();
+    // The one host that can speak before there is a SYSTEM LOCKDOWN button
+    // to press (image 5). It is a latch like any other host choice: the
+    // theme's own rules keep running underneath and never lift it.
+    if let Ok(name) = std::env::var("NACELLE_MOOD") {
+        if !name.is_empty() && mood.set_host(Some(&name)) {
+            eprintln!("nacelle-desktop: mood \"{name}\" held by the host");
+        }
+    }
+
     // Home directory — default start directory for the terminal and file panel.
     let home = std::env::var("HOME")
         .map(PathBuf::from)
@@ -506,10 +535,28 @@ fn main() {
         sc.set_blur_radius(blur_radius);
     }
     // The theme's lens: glyph-coverage exponent and the blur pyramid's clear.
-    // Re-applied on every configuration change beside the rest of the theme.
+    //
+    // This is the ONE token value the picture does not re-read while it
+    // draws: it is pushed into the renderer, which then keeps it. Everything
+    // else asks the resolved theme per frame, which is why a mood or a
+    // contrast variant re-skins the whole interface for the price of one
+    // index swap — and why the lens does not follow along by itself. It used
+    // to be re-applied on a configuration change and on nothing else, so a
+    // sibling that moves `render.text_gamma` (a high-contrast variant has
+    // every reason to) would have gone on drawing text with the exponent of
+    // the theme before it, until something unrelated reloaded the config.
+    //
+    // The engine's epoch is the signal, and it is one atomic load: it moves
+    // on exactly the events that can change the answer — mood, variant,
+    // reload, resize — and on nothing else.
+    // Declared without a value: the first `apply_lens!` below sets it, and
+    // seeding it with an epoch the lens has not been applied for would be a
+    // lie the guard below then believes.
+    let mut lens_epoch: u32;
     macro_rules! apply_lens {
         () => {{
             let t = nacelle::theme::resolved();
+            lens_epoch = nacelle::theme::epoch();
             if let Some(id) = nacelle::theme::id("render.text_gamma") {
                 let g = t.px(id);
                 for sc in screens.iter_mut() {
@@ -598,6 +645,7 @@ fn main() {
     const CMD_INPUT_PASTE: u32 = 12;
     const CMD_INPUT_SELECT_ALL: u32 = 13;
     const CMD_OPEN_MENU: u32 = 14;
+    const CMD_MOOD_CYCLE: u32 = 15;
     let shortcuts = {
         use nacelle::focus::{Scope, ShortcutFlags, ShortcutMap};
         let mut m = ShortcutMap::new();
@@ -605,6 +653,15 @@ fn main() {
         m.bind(Scope::Global, "ctrl+shift+v", CMD_PASTE, ShortcutFlags::OVER_GREEDY);
         m.bind(Scope::Global, "shift+f10", CMD_OPEN_MENU, ShortcutFlags::OVER_GREEDY);
         m.bind(Scope::Global, "menu", CMD_OPEN_MENU, ShortcutFlags::OVER_GREEDY);
+        // §5.24's first trigger, "the explicit API", finally with a caller.
+        // The engine has resolved and baked the alarm skin since it was
+        // written and nothing in this program ever asked for it; image 5's
+        // SYSTEM LOCKDOWN is a launcher entry that does not exist yet, and a
+        // mood nobody can reach is a mood nobody can check. OVER_GREEDY for
+        // the same reason copy and paste are: the terminal eats plain chords
+        // as bytes, and an alarm the user cannot raise while a shell has the
+        // keyboard is not much of an alarm.
+        m.bind(Scope::Global, "ctrl+shift+m", CMD_MOOD_CYCLE, ShortcutFlags::OVER_GREEDY);
         // The field chords live in `text_input::key_msg`; they are
         // REGISTERED here as Scope::Focused so the input menu's hints
         // come from the one registry (§4.6: hints from ShortcutMap,
@@ -660,6 +717,10 @@ fn main() {
             let (new_cfg, warn) = config::resolve();
             // Sizes travel with the layout, so a new layout brings its own.
             nacelle::base::set_panel_sizes(&new_cfg.layout.sizes);
+            // A new theme brings its own moods and its own `when` rules, and
+            // the load lands on the plain sibling — so the arbiter re-reads
+            // both and decides again from the next tick (§5.24).
+            mood.on_theme_reload();
             // A new look or sound set means new clips.
             if let (Some(a), Some(dir)) = (audio.as_mut(), config::active_sounds_dir()) {
                 a.load_theme(&dir);
@@ -2294,6 +2355,21 @@ fn main() {
                             use nacelle::clipboard::Board;
                             use nacelle::focus::Scope;
                             match shortcuts.lookup_over_greedy(&[Scope::Global], kev) {
+                                Some(CMD_MOOD_CYCLE) => {
+                                    // A latch, so the theme's own rules go
+                                    // on deciding underneath it and hand
+                                    // the screen back the moment the cycle
+                                    // reaches the end (§5.24).
+                                    match mood.cycle_host() {
+                                        Some(n) => eprintln!(
+                                            "nacelle-desktop: mood \"{n}\" held by the host"
+                                        ),
+                                        None => eprintln!(
+                                            "nacelle-desktop: the host lets go of the mood"
+                                        ),
+                                    }
+                                    return;
+                                }
                                 Some(CMD_COPY) => {
                                     let text = sessions[active]
                                         .as_ref()
@@ -2473,6 +2549,12 @@ fn main() {
                             term_font_scale: font_scale,
                             ui_font_scale,
                             frost_wash,
+                            // Asked on the frame clock, so an armed guard
+                            // run measures the fade and not the machine.
+                            // An idle frame costs one atomic load: the
+                            // engine's epoch has not moved and there is no
+                            // wash in flight.
+                            mood_wash: wash.at(clock),
                             t: clock,
                         };
                         // The application's own interface is drawn on
@@ -2618,6 +2700,22 @@ fn main() {
                     // asking for a redraw the moment the last one landed
                     // is what made an idle desktop cost a whole core.
                     let now = Instant::now();
+                    // The theme's own `when` rules (§5.24), against the
+                    // telemetry the collector publishes at 1 Hz. Asked every
+                    // frame, answered once a second: a mood is a pre-resolved
+                    // sibling so that having moods costs nothing per frame,
+                    // and deciding one per frame would spend exactly what
+                    // that design saved.
+                    mood.tick(now, &sys);
+                    // A sibling swap re-skins everything that reads its
+                    // tokens while drawing, which is everything except the
+                    // one value the renderer holds. The epoch says when
+                    // that value can have changed — a mood, a variant, a
+                    // reload, a resize — and it is one atomic load on every
+                    // other frame of the session.
+                    if nacelle::theme::epoch() != lens_epoch {
+                        apply_lens!();
+                    }
                     if now >= next_frame {
                         // Catching up frame by frame after a stall would
                         // burn through the backlog at full speed; the
@@ -2800,6 +2898,14 @@ fn draw_screen(
             // its last content row BELOW the title band instead of
             // losing a band's worth of content to it.
             let mut chrome_px: Vec<f32> = Vec::new();
+            // What the panels think of their own data (u2 §4: `Chrome`
+            // carries a severity), gathered from the chrome this pass is
+            // ALREADY asking every widget for. §5.24's two severity forms
+            // judge the interface rather than the machine, and this is the
+            // one place the interface says what it thinks; the alarm does
+            // not get a second collection of its own, and no widget is run
+            // an extra time for it.
+            let mut sevs: Vec<u16> = Vec::new();
             for p in widgets::Panel::all() {
                 // Every placement of this widget that is actually on
                 // screen — here first, and on the board riding along
@@ -2834,15 +2940,27 @@ fn draw_screen(
                 // own size and not a reflection of the box it happens
                 // to be in this frame.
                 ctx.panel_scale = 1.0;
-                let (sizing, titled, scales) = sc
+                let (sizing, titled, scales, sev) = sc
                     .widgets
                     .get_mut(first.id)
                     .map(|wg| {
                         let s = wg.sizing(&mut ctx, host);
                         let c = wg.chrome(&mut ctx, host);
-                        (s, c.title.is_some() || c.right.is_some(), wg.scales_with_panel())
+                        (
+                            s,
+                            c.title.is_some() || c.right.is_some(),
+                            wg.scales_with_panel(),
+                            c.severity,
+                        )
                     })
-                    .unwrap_or((widgets::Sizing::Reference, false, true));
+                    .unwrap_or((widgets::Sizing::Reference, false, true, None));
+                // A severity is an index into §5.10's closed set of seven.
+                // One from outside it — a plugin sending a number over the
+                // ABI — is pinned to an index no role has, so it counts as
+                // nothing rather than wrapping onto somebody else's rung.
+                if let Some(s) = sev {
+                    sevs.push(u16::try_from(s).unwrap_or(u16::MAX));
+                }
                 // What the container will draw around the content:
                 // border, padding, and the title band when the widget
                 // declares one. A Content panel is made tall enough for
@@ -2902,6 +3020,11 @@ fn draw_screen(
             if !sc.editor.active {
                 nacelle::base::set_panel_intrinsic(&wants);
                 nacelle::base::set_panel_chrome(&chrome_px);
+                // The editor's probe is not the picture, so it does not get
+                // to raise an alarm either. With several screens the last
+                // one drawn is the one that spoke — a mood is global, and
+                // one screen's alarm is every screen's.
+                crate::mood::note_severities(&sevs);
             }
         }
         // The editor shows its edited rectangles (WYSIWYG). Widgets
@@ -3174,6 +3297,24 @@ fn draw_screen(
         if let Some(id) = sc.overlay_id() {
             ctx.dl.image(0.0, 0.0, w, h, id, white);
         }
+    }
+    // …and after even that, §5.24's mood wash: ONE full-screen quad, the
+    // entered mood's own tint, fading from its declared alpha to zero over
+    // motion.mood_change. Drawn last because it is the announcement and not
+    // part of the scene — it covers the overlay plate as it covers
+    // everything else, for a quarter of a second.
+    //
+    // It is also the ONLY thing a mood change costs to draw. The re-skin
+    // itself is an index swap, and every token the picture reads it reads
+    // while drawing, which is exactly why this is needed: without it the
+    // interface simply IS a different colour on the next frame, and a
+    // console that changes colour with no transition reads as broken, not
+    // as alarmed.
+    //
+    // Outside the boot block on purpose: a machine that alarms while the
+    // boot sequence is still typing has more to say than the boot sequence.
+    if let Some(c) = prefs.mood_wash {
+        ctx.dl.rect(0.0, 0.0, w, h, c);
     }
     drop(ctx);
 
