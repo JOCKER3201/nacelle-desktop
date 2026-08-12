@@ -7,7 +7,6 @@
 //! the user ever sees was the one screen a theme could not touch.
 
 use super::Ctx;
-use crate::font::{FONT_MONO, FONT_UI};
 use nacelle::theme::{self, TokenId};
 use nacelle::ui;
 use std::sync::OnceLock;
@@ -90,13 +89,18 @@ fn draw_log(ctx: &mut Ctx, at: f64) {
         / 1000.0
         / BOOT_LOG.len() as f64;
     let shown = (at * BOOT_LOG.len() as f64) as usize;
-    // The role names one of the theme's eight face slots and the font
-    // system holds two, so the face is the one part of the binding that
-    // still cannot be routed.
+    // The role's OWN face. This used to be `FONT_MONO` written here,
+    // under a note saying the face was the one part of a binding that
+    // could not be routed — so the screen was monospace while
+    // `boot.line_role` named a role whose face is `ui`, and the two
+    // could not be told apart from either end. `Role::font` routes it,
+    // and the master now binds the log to `data`, which IS the mono
+    // face: the key says what the screen shows.
+    let face = role.font();
     for (i, line) in BOOT_LOG.iter().take(shown + 1).enumerate() {
         ctx.dl.text(
             ctx.fonts,
-            FONT_MONO,
+            face,
             px,
             x,
             y,
@@ -121,7 +125,7 @@ fn draw_logo(ctx: &mut Ctx) {
     let y = ctx.h * th.px(tok(&LOGO_Y, "boot.logo_y_frac"));
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        logo.font(),
         big,
         ctx.w / 2.0,
         y,
@@ -138,7 +142,7 @@ fn draw_logo(ctx: &mut Ctx) {
     let blink = ui::blink_factor("boot_sub_blink", ctx.t);
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        sub.font(),
         px,
         ctx.w / 2.0,
         y + th.px(tok(&SUB_GAP, "boot.sub_gap")),
@@ -318,12 +322,12 @@ mod tests {
         let t = during_log();
         let by_master = frame(&mut fonts, t).1;
         let (pad_x, pad_top, leading) =
-            (px("boot.pad_x"), px("boot.pad_top"), px("type.body.leading"));
+            (px("boot.pad_x"), px("boot.pad_top"), px("type.data.leading"));
 
-        install("[boot]\npad_top = 20u\npad_x = 30u\n\n[type]\nbody.leading = 1.90");
+        install("[boot]\npad_top = 20u\npad_x = 30u\n\n[type]\ndata.leading = 1.90");
         let moved = frame(&mut fonts, t).1;
         let (pad_x2, pad_top2, leading2) =
-            (px("boot.pad_x"), px("boot.pad_top"), px("type.body.leading"));
+            (px("boot.pad_x"), px("boot.pad_top"), px("type.data.leading"));
         master();
 
         assert_eq!((by_master[0].x, by_master[0].y), (pad_x, pad_top));
@@ -350,6 +354,7 @@ mod tests {
         let logo_frame = frame(&mut fonts, during_logo()).1;
         let (logo, sub) = (logo_frame[0].clone(), logo_frame[1].clone());
         let hero_track = px("type.display.hero.tracking");
+        let data_px = px("type.data.size").max(px("type.data.min_px"));
         let body_px = px("type.body.size").max(px("type.body.min_px"));
         let hero_px = px("type.display.hero.size").max(px("type.display.hero.min_px"));
         let caption_px = px("type.caption.size").max(px("type.caption.min_px"));
@@ -359,7 +364,7 @@ mod tests {
         let rebound_logo = frame(&mut fonts, during_logo()).1;
         master();
 
-        assert_eq!(line.px, body_px, "the log line is not its bound role's size");
+        assert_eq!(line.px, data_px, "the log line is not its bound role's size");
         assert_eq!(logo.px, hero_px, "the logo is not its bound role's size");
         assert_eq!(sub.px, caption_px, "the sub-line is not its bound role's size");
         assert!(
@@ -385,7 +390,7 @@ mod tests {
         let line = frame(&mut fonts, during_log()).1.remove(0);
         let logo_frame = frame(&mut fonts, during_logo()).1;
         let th = theme::resolved();
-        let body = th.color(theme::id("type.body.fg").expect("the master declares it"));
+        let data = th.color(theme::id("type.data.fg").expect("the master declares it"));
         let hero = th.color(theme::id("type.display.hero.fg").expect("the master declares it"));
         let caption = th.color(theme::id("type.caption.fg").expect("the master declares it"));
 
@@ -395,7 +400,7 @@ mod tests {
             theme::resolved().color(theme::id("type.caption.fg").expect("the master declares it"));
         master();
 
-        assert_eq!(line.color, body);
+        assert_eq!(line.color, data);
         assert_eq!(logo_frame[0].color, hero);
         assert_eq!(logo_frame[1].color, caption);
         assert_ne!(hero, caption, "two of the three texts share one ink");

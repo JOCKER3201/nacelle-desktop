@@ -8,7 +8,6 @@
 //! object with a different job.
 
 use super::{Ctx, Rect};
-use crate::font::FONT_UI;
 use nacelle::object::toaster::{Toast, Toaster};
 use nacelle::theme::{self, bake::StateStyle, parse::State, Color, TokenId};
 use std::sync::OnceLock;
@@ -22,65 +21,53 @@ fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
-/// One type role's hot ids, resolved once. Size is the theme's px times
-/// the user's font preference, floored by the role's `min_px`; tracking
-/// is the role's em value multiplied out per run — the same arithmetic
-/// the object layer uses.
-struct Role {
-    name: &'static str,
-    size: OnceLock<TokenId>,
-    min: OnceLock<TokenId>,
-    track: OnceLock<TokenId>,
-    lead: OnceLock<TokenId>,
+// The role each of this file's three runs is set in, named by the TOKEN
+// that binds it and never by the role itself.
+//
+// A local `Role` stood here: three `type.<name>.*` families resolved from
+// a name spelled out in this file, which read `title.window`, `body` and
+// `button` while the master's own `dialog.title.role`, `dialog.body.role`
+// and `button.role` sat there with no reader — the comment above the
+// statics even said the dialog bound its text through them. It also read
+// half a ladder: the role's `min_px` but not the global `type.min_px`
+// under it, no `max_px` ceiling at all, and neither the role's ink nor
+// its figure box. A theme capping `type.body.max_px` capped every line in
+// the program except this dialog's.
+//
+// [`nacelle::ui::bound_role`] is the toolkit's own reader — the menu, the
+// toaster, the tooltip and the settings window all go through it — so
+// there is now one answer to "how big is this role", and it is the whole
+// ladder.
+static ROLE_DIALOG_TITLE: OnceLock<TokenId> = OnceLock::new();
+static ROLE_DIALOG_BODY: OnceLock<TokenId> = OnceLock::new();
+static ROLE_BUTTON: OnceLock<TokenId> = OnceLock::new();
+
+fn role_dialog_title() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_DIALOG_TITLE, "dialog.title.role")
 }
 
-impl Role {
-    const fn new(name: &'static str) -> Self {
-        Role {
-            name,
-            size: OnceLock::new(),
-            min: OnceLock::new(),
-            track: OnceLock::new(),
-            lead: OnceLock::new(),
-        }
-    }
-    fn px(&self, ctx: &Ctx) -> f32 {
-        let t = theme::resolved();
-        let s = *self.size.get_or_init(|| {
-            theme::id(&format!("type.{}.size", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        let m = *self.min.get_or_init(|| {
-            theme::id(&format!("type.{}.min_px", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        // `ui_font_scale` is NOT a factor here: the user's interface scale
-        // is `metric.ui_scale`, the viewport multiplies u by it, and
-        // `type.<role>.size` is written in u — so `t.px(s)` already grew.
-        // The panel shrink is the one factor left, because it is runtime
-        // geometry no bake can know.
-        (t.px(s) * ctx.panel_scale).max(t.px(m))
-    }
-    fn tracking(&self, px: f32) -> f32 {
-        let t = theme::resolved();
-        let k = *self.track.get_or_init(|| {
-            theme::id(&format!("type.{}.tracking", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        px * t.px(k)
-    }
-    /// The role's line height as a multiple of its px — the height a
-    /// line of it OCCUPIES, which is what a box centres.
-    fn leading(&self) -> f32 {
-        let t = theme::resolved();
-        let l = *self.lead.get_or_init(|| {
-            theme::id(&format!("type.{}.leading", self.name)).unwrap_or(TokenId::MISSING)
-        });
-        t.px(l)
-    }
+fn role_dialog_body() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_DIALOG_BODY, "dialog.body.role")
 }
 
-// The dialog binds its text through `dialog.title.role` / `dialog.body.role`.
-static ROLE_DIALOG_TITLE: Role = Role::new("title.window");
-static ROLE_DIALOG_BODY: Role = Role::new("body");
-static ROLE_BUTTON: Role = Role::new("button");
+/// The OK button's label. `object::button` reads the same binding for
+/// every other button on screen; this dialog letters its own because it
+/// draws before the object layer can be reached.
+fn role_button() -> nacelle::ui::Role {
+    nacelle::ui::bound_role(&ROLE_BUTTON, "button.role")
+}
+
+/// A role's px for this frame.
+///
+/// `ui_font_scale` is NOT a factor: the user's interface scale is
+/// `metric.ui_scale`, the viewport multiplies u by it, and every
+/// `type.<role>.size` is written in u — so the baked px already grew.
+/// The shrink argument is 1.0 because there is no widget stack here to
+/// shrink for; `ctx.panel_scale` rides inside [`nacelle::ui::Role::px`],
+/// which is exactly what this file's own reader multiplied by.
+fn px_of(role: nacelle::ui::Role, ctx: &Ctx) -> f32 {
+    role.px(ctx, 1.0)
+}
 
 /// The desktop's warning notices: the toolkit's toaster, spoken to in
 /// the desktop's own words.
@@ -157,7 +144,6 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
     static TITLE_C: OnceLock<TokenId> = OnceLock::new();
     static BODY_Y: OnceLock<TokenId> = OnceLock::new();
     static BODY_GAP: OnceLock<TokenId> = OnceLock::new();
-    static BODY_C: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let (w, h) = (ctx.w, ctx.h);
     let d = dialog_rect(w, h);
@@ -172,39 +158,45 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
         col(t.color(tok(&RING_C, "border.default"))),
     );
 
-    let title_px = ROLE_DIALOG_TITLE.px(ctx);
+    let title = role_dialog_title();
+    let title_px = px_of(title, ctx);
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        title.font(),
         title_px,
         w / 2.0,
         d.y + d.h * t.px(tok(&TITLE_Y, "dialog.title_y_frac")),
         "WARNING",
+        // The one ink NOT taken from the role: a warning is a SEVERITY,
+        // and the severity is what this word is here to say.
         col(t.color(tok(&TITLE_C, "severity.warning.text"))),
-        ROLE_DIALOG_TITLE.tracking(title_px),
+        title.tracking_px(title_px),
     );
-    let px = ROLE_DIALOG_BODY.px(ctx);
-    let body_c = col(t.color(tok(&BODY_C, "type.body.fg")));
+    let body = role_dialog_body();
+    let px = px_of(body, ctx);
+    // The role's own `fg` at its own alpha, which is what `type.body.fg`
+    // spelled out by name could not follow past a re-binding.
+    let body_c = body.color();
     let body_y = d.y + d.h * t.px(tok(&BODY_Y, "dialog.body_y_frac"));
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        body.font(),
         px,
         w / 2.0,
         body_y,
         &format!("Monitor resolution {mw}x{mh} is too small"),
         body_c,
-        ROLE_DIALOG_BODY.tracking(px),
+        body.tracking_px(px),
     );
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        body.font(),
         px,
         w / 2.0,
         body_y + d.h * t.px(tok(&BODY_GAP, "dialog.body_line_gap")),
         "nacelle-desktop requires a resolution of at least 1280x720",
         body_c,
-        ROLE_DIALOG_BODY.tracking(px),
+        body.tracking_px(px),
     );
 
     // OK button — a parallelogram like the control panel buttons; its
@@ -229,17 +221,20 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
     if edge_w > 0.0 {
         ctx.dl.ring(br, &corners, seg, edge_w, col(st.edge));
     }
-    let bpx = ROLE_BUTTON.px(ctx);
+    let button = role_button();
+    let bpx = px_of(button, ctx);
     let ty = ok_label_y(br, bpx);
     ctx.dl.text_center(
         ctx.fonts,
-        FONT_UI,
+        button.font(),
         bpx,
         br.cx(),
         ty,
         "OK",
+        // The class ladder's ink, not the role's: a button's text colour
+        // is a rung of `button`'s state matrix and moves with the hover.
         col(st.text),
-        ROLE_BUTTON.tracking(bpx),
+        button.tracking_px(bpx),
     );
 }
 
@@ -248,7 +243,7 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
 /// centres optically — said in the one place the rest of this crate's
 /// chrome says it now.
 fn ok_label_y(br: Rect, px: f32) -> f32 {
-    super::center_line_y(br.y, br.h, px, ROLE_BUTTON.leading())
+    super::center_line_y(br.y, br.h, px, role_button().leading())
 }
 
 #[cfg(test)]
@@ -268,7 +263,7 @@ mod tests {
         let _theme = crate::widgets::theme_test_lock();
         let br = Rect::new(0.0, 200.0, 300.0, 60.0);
         let px = 18.0;
-        let line = br.y + (br.h - px * ROLE_BUTTON.leading()) / 2.0;
+        let line = br.y + (br.h - px * role_button().leading()) / 2.0;
         let optical = ok_label_y(br, px);
         let bias = token_px("rhythm.cap_center_bias");
         assert!(
