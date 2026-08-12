@@ -25,13 +25,25 @@ offered.
 
 Everything is read from three directories, searched in this order:
 
-    ~/.local/share/nacelle-desktop      your own
-    /usr/local/share/nacelle-desktop    sudo make install
-    /usr/share/nacelle-desktop          a distribution package
+    ~/.local/share/nacelle      your own
+    /usr/local/share/nacelle    sudo make install
+    /usr/share/nacelle          a distribution package
 
 The first copy of a given name wins, so anything you install for
 yourself shadows a packaged one without either being touched — and
 without needing root to change a theme.
+
+The folder is named after the nacelle FAMILY rather than after this
+program, because the themes, sounds, layauts and addons belong to the
+environment and not to one binary — `nacelle-ai` reads the same
+directories. The file inside says which program the settings are for:
+`nacelle/nacelle-desktop.conf`.
+
+If you already have a `nacelle-desktop` folder from an earlier version,
+leave it where it is. Both names are searched, the new one first, so
+everything installed under the old name goes on working; only new
+settings and saved layauts are written to `nacelle`. Nothing is moved
+or deleted, and you can move the folder yourself whenever you like.
 
 ## Widgets
 

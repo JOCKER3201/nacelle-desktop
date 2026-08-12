@@ -40,9 +40,14 @@ ICON_SIZES = 48 64 128 256 512
 # ~/.config. With no template the cascade simply has nothing on its
 # system end and the program uses what is built into it — the same
 # thing GTK does with no /etc/xdg/gtk-3.0/settings.ini.
+#
+# The directory is named after the FAMILY, not after this program: the
+# folder says whose environment it is and the file inside says which
+# program the settings belong to, so nacelle-ai — which already reads
+# these very directories — has somewhere of its own to put a file.
 HOMEDIR    := $(if $(HOME),$(HOME),/nonexistent)
 HOMEPREFIX := $(patsubst $(HOMEDIR)/%,inside,$(PREFIX)/)
-XDGCONFDIR := $(if $(filter inside,$(HOMEPREFIX)),,$(DESTDIR)/etc/xdg/nacelle-desktop)
+XDGCONFDIR := $(if $(filter inside,$(HOMEPREFIX)),,$(DESTDIR)/etc/xdg/nacelle)
 
 .PHONY: all build install uninstall clean
 
@@ -94,7 +99,7 @@ install:
 uninstall:
 	rm -f "$(BINDIR)/nacelle-desktop"
 	rm -rf "$(FONTDIR)"
-	@# $(PREFIX)/share/nacelle-desktop is deliberately NOT removed: it
+	@# $(PREFIX)/share/nacelle is deliberately NOT removed: it
 	@# holds the widgets and themes, which are installed from their own
 	@# repositories and may have been edited. Uninstalling the program
 	@# must not delete them — use their own `make uninstall`.
