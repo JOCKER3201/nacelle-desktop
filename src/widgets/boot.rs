@@ -71,10 +71,13 @@ fn draw_log(ctx: &mut Ctx, at: f64) {
     static LOG_DURATION: OnceLock<TokenId> = OnceLock::new();
     let th = theme::resolved();
     let role = ui::bound_role(&LINE_ROLE, "boot.line_role");
-    // UIFontSize= is runtime state the bake cannot carry, so it rides in
-    // as the role's runtime factor — inside the role, where its min_px
-    // floor still gets the last word.
-    let px = role.px(ctx, ctx.ui_font_scale);
+    // No runtime factor: UIFontSize= is `metric.ui_scale` and the bake
+    // carries it into every role's size. Passing `ctx.ui_font_scale` here
+    // — which this line did while the viewport was told a literal 1.0 —
+    // now applies the user's scale a second time, and 125 % draws at
+    // 156 %. The shrink argument is for a stack that is squeezing its own
+    // text, and the boot screen squeezes nothing.
+    let px = role.px(ctx, 1.0);
     let ink = role.color();
     let track = role.tracking_px(px);
     let step = px * role.leading();
@@ -113,7 +116,8 @@ fn draw_logo(ctx: &mut Ctx) {
     static SUB_GAP: OnceLock<TokenId> = OnceLock::new();
     let th = theme::resolved();
     let logo = ui::bound_role(&LOGO_ROLE, "boot.logo_role");
-    let big = logo.px(ctx, ctx.ui_font_scale);
+    // 1.0 for the same reason as the log above: the scale is in the bake.
+    let big = logo.px(ctx, 1.0);
     let y = ctx.h * th.px(tok(&LOGO_Y, "boot.logo_y_frac"));
     ctx.dl.text_center(
         ctx.fonts,
@@ -126,7 +130,7 @@ fn draw_logo(ctx: &mut Ctx) {
         logo.tracking_px(big),
     );
     let sub = ui::bound_role(&SUB_ROLE, "boot.sub_role");
-    let px = sub.px(ctx, ctx.ui_font_scale);
+    let px = sub.px(ctx, 1.0);
     // The sub-line blinked on a period, a duty and a floor written here;
     // the theme's [motion.*_blink] family owns all three, and has no
     // entry for this screen, so the line stands still and the effect is

@@ -52,7 +52,12 @@ impl Role {
         let m = *self.min.get_or_init(|| {
             theme::id(&format!("type.{}.min_px", self.name)).unwrap_or(TokenId::MISSING)
         });
-        (t.px(s) * ctx.ui_font_scale * ctx.panel_scale).max(t.px(m))
+        // `ui_font_scale` is NOT a factor here: the user's interface scale
+        // is `metric.ui_scale`, the viewport multiplies u by it, and
+        // `type.<role>.size` is written in u — so `t.px(s)` already grew.
+        // The panel shrink is the one factor left, because it is runtime
+        // geometry no bake can know.
+        (t.px(s) * ctx.panel_scale).max(t.px(m))
     }
     fn tracking(&self, px: f32) -> f32 {
         let t = theme::resolved();
