@@ -164,8 +164,13 @@ fn panel_scale(
 /// desktop that is the neighbour's number, and it changes as the
 /// neighbour draws. The user's `GridPadding=` is not a u and rides past
 /// the bake untouched, which is why it travels as a plain override.
-fn screen_gutter(h: f32, over: Option<u32>) -> f32 {
-    nacelle::theme::set_viewport(h, 1.0);
+///
+/// `uscale` is `UIFontSize=/100` and belongs to the SAME bake: a viewport
+/// is a height and a user scale, and setting one of the two here while the
+/// frame sets both would make the engine re-bake twice a frame and hand
+/// this gutter the unscaled u.
+fn screen_gutter(h: f32, uscale: f32, over: Option<u32>) -> f32 {
+    nacelle::theme::set_viewport(h, uscale);
     config::panel_gutter(over)
 }
 
@@ -286,6 +291,11 @@ impl Session {
 #[derive(Clone, Copy)]
 struct Prefs {
     term_font_scale: f32,
+    /// `UIFontSize=/100`. Handed to the theme engine as the viewport's
+    /// `metric.ui_scale`, which is where it reaches the interface: every
+    /// length the master writes is a multiple of u, and u carries this.
+    /// It rides on to `Ctx` as well, for the ONE reading that is not a
+    /// token — `Ctx::font_px`, the plugin ABI's vh-based size.
     ui_font_scale: f32,
     /// The user's scale over the alpha of the theme's own glass wash.
     frost_wash: f32,
@@ -510,7 +520,14 @@ fn main() {
     // drawn, and deduplicated inside on a height that lands on the same
     // u — which is what lets two screens of two heights each get their
     // own bake without either paying for the other's.
-    nacelle::theme::set_viewport(screens[0].size().1, 1.0);
+    //
+    // The second number is `UIFontSize=/100` — `metric.ui_scale`, the token
+    // that exists to carry exactly this. Handing it a literal 1.0 is what
+    // made the setting a dead letter everywhere but the four widgets that
+    // had reached for it by hand: u is the root of every length in the
+    // master, so the user's scale reaches the whole interface through here
+    // and through nowhere else.
+    nacelle::theme::set_viewport(screens[0].size().1, ui_font_scale);
 
     // The colour pipeline: only a native Wayland session has a
     // compositor to discuss colour with. Everywhere else this stays
@@ -830,7 +847,7 @@ fn main() {
     macro_rules! apply_gutter {
         () => {{
             for sc in screens.iter_mut() {
-                sc.pad = screen_gutter(sc.size().1, pad_override);
+                sc.pad = screen_gutter(sc.size().1, ui_font_scale, pad_override);
             }
         }};
     }
@@ -848,7 +865,7 @@ fn main() {
                 // The solve about to run reads `sc.pad`, so the gutter is
                 // refreshed under this screen's own height first — the same
                 // reason `apply_gutter!` asks inside its loop.
-                sc.pad = screen_gutter(sc.size().1, pad_override);
+                sc.pad = screen_gutter(sc.size().1, ui_font_scale, pad_override);
                 sc.reload_layaut();
             }
         }};
@@ -2790,7 +2807,7 @@ fn main() {
                             }
                         }
 
-                        // 4. Sound preferences changed in the SOUND view
+                        // 4. Sound preferences changed in the SOUND LEVELS view
                         // apply immediately, so dragging the volume
                         // slider is audible while dragging.
                         if settings.color_dirty {
@@ -2963,7 +2980,14 @@ fn draw_screen(
     // two monitors are two heights and one global bake cannot be both;
     // a height that lands on the same u is deduplicated inside, so a
     // one-screen desktop pays nothing for the call.
-    nacelle::theme::set_viewport(h, 1.0);
+    //
+    // With the user's interface scale, because that is the OTHER half of a
+    // viewport: `metric.ui_scale` multiplies u after its clamp, so one bake
+    // per (height, scale) pair is what puts `UIFontSize=` on every length
+    // the master derives — type, rows, gaps and control heights alike. A
+    // slider under the hand moves this through `Prefs`, so the preview is
+    // the same code path as the saved setting.
+    nacelle::theme::set_viewport(h, prefs.ui_font_scale);
     // The gutter belongs to the bake the line above just published, so it
     // is taken here rather than broadcast from the event loop: this is the
     // one place in the program that is certain to be looking at THIS
@@ -2972,7 +2996,7 @@ fn draw_screen(
     // pointer. Through the same function the event loop uses, so there is
     // one place that knows a gutter belongs to a height — the viewport it
     // sets is the one set just above, and the engine drops a repeat.
-    sc.pad = screen_gutter(h, prefs.grid_pad);
+    sc.pad = screen_gutter(h, prefs.ui_font_scale, prefs.grid_pad);
     // The decoration plate follows the theme and the surface, never the
     // frame: a rebake is kicked when either changes and collected
     // whenever it lands.
@@ -3007,6 +3031,12 @@ fn draw_screen(
         t: prefs.t,
         mouse: sc.mouse,
         term_font_scale: prefs.term_font_scale,
+        // The same number the viewport above was told, and NOT a second
+        // chance to apply it: everything a role or a metric token answers
+        // already carries it. What is left for this field is `font_px`,
+        // the vh-based size the plugin ABI hands a script, which no bake
+        // can reach. Multiplying a token by it again is the doubling this
+        // field cost the interface for as long as it was the only route.
         ui_font_scale: prefs.ui_font_scale,
         panel_scale: 1.0,
         // The desktop's one chain (F1 §1.2) belongs to the screen the
@@ -3944,6 +3974,74 @@ mod tests {
         );
     }
 
+    /// `UIFontSize=` moves the WHOLE interface, and moves it once.
+    ///
+    /// The setting used to reach four files and no further: those four
+    /// multiplied a role's px by `Ctx::ui_font_scale` themselves, and the
+    /// viewport — `metric.ui_scale`, the token the master wrote for
+    /// exactly this — was handed a literal 1.0 at all three production
+    /// sites. So the boot screen, the dialogs and the settings window
+    /// grew while the buttons, menus, tooltips, toasts, tabs, fields and
+    /// every panel around them did not.
+    ///
+    /// Feeding the viewport the real scale fixes that and opens the
+    /// opposite hole in the same stroke: a drawer that ALSO multiplies by
+    /// hand now applies the setting twice, and 125 % draws at 156 %. That
+    /// is invisible in a screenshot and invisible to every other test in
+    /// this crate — a bigger interface is what both look like. It is
+    /// visible here, because a ratio can only be one of the two.
+    ///
+    /// Measured off the drawing itself (the command register), not off
+    /// the arithmetic that produced it, so it holds whatever route a
+    /// widget takes to its px.
+    #[test]
+    fn the_interface_scale_reaches_the_whole_interface_exactly_once() {
+        let _theme = widgets::theme_test_lock();
+        // 1080 for the reference u (5.4 px), 2160 for a u pinned at its
+        // ceiling: `metric.ui_scale` multiplies AFTER the clamp, so the
+        // scale must survive a viewport that is already clamped.
+        for h in [1080.0f32, 2160.0] {
+            // boot.rs, the log: the mono role bound by `boot.line_role`.
+            widgets::assert_scales_once("the boot log", h, 0.0, |ctx| {
+                widgets::boot::draw(ctx);
+            });
+            // boot.rs, the logo: a different pair of roles, reached only
+            // once the log has had its window.
+            let after_log = widgets::token_px("boot.log_duration_ms") as f64 / 1000.0;
+            widgets::assert_scales_once("the boot logo", h, after_log + 0.001, |ctx| {
+                widgets::boot::draw(ctx);
+            });
+            // popup.rs, through its own role table.
+            widgets::assert_scales_once("the resolution dialog", h, 0.0, |ctx| {
+                widgets::popup::draw_resolution_dialog(ctx, 1920, 1080);
+            });
+            // editor.rs — and with it `nacelle::object::button`, which is
+            // the toolkit half of the same question: the editor's buttons
+            // are drawn by the library, not by the desktop.
+            widgets::assert_scales_once("the editor's button stack", h, 0.0, |ctx| {
+                let mut ed = widgets::editor::Editor::new(screen::Gutter::of_test(8.0));
+                ed.draw_buttons(ctx);
+            });
+        }
+
+        // Type is not the whole interface. A control's HEIGHT and the gaps
+        // between rows are u as well, and the setting reaches them by the
+        // same one route — which is what "the whole interface" means and
+        // what the hand-applied factor could never do.
+        for name in ["button.h", "modal.row_gap", "checkbox.row_h", "panel.title.block_h"] {
+            nacelle::theme::set_viewport(1080.0, 1.0);
+            let plain = widgets::token_px(name);
+            nacelle::theme::set_viewport(1080.0, 1.25);
+            let big = widgets::token_px(name);
+            assert!(
+                (big / plain - 1.25).abs() < 0.005,
+                "{name} is {plain} px at 100 % and {big} px at 125 %: a length in u \
+                 must follow the interface scale like the type does"
+            );
+        }
+        nacelle::theme::set_viewport(1080.0, 1.0);
+    }
+
     /// Every screen's gutter is asked under that screen's own height.
     ///
     /// This is the one thing `screen_gutter` exists to guarantee, and the
@@ -3964,21 +4062,21 @@ mod tests {
         // the same pixel by accident.
         let _wide = widgets::Themed::new("gutter-two", "[layout]\npanel_gutter = 9u\n");
 
-        let short = screen_gutter(1080.0, None);
-        let tall = screen_gutter(2160.0, None);
+        let short = screen_gutter(1080.0, 1.0, None);
+        let tall = screen_gutter(2160.0, 1.0, None);
         assert!(
             tall > short,
             "a taller screen must get a wider gutter, or the gutter is not a u: \
              {short} -> {tall}"
         );
         // The neighbour drew last, and this screen's answer is unmoved.
-        assert_eq!(screen_gutter(1080.0, None), short, "the height decides, not the order");
-        assert_eq!(screen_gutter(2160.0, None), tall);
+        assert_eq!(screen_gutter(1080.0, 1.0, None), short, "the height decides, not the order");
+        assert_eq!(screen_gutter(2160.0, 1.0, None), tall);
 
         // The user's override is not a u: it is the same length on every
         // screen, which is why it may travel on the frame.
-        assert_eq!(screen_gutter(1080.0, Some(31)), 31.0);
-        assert_eq!(screen_gutter(2160.0, Some(31)), 31.0);
+        assert_eq!(screen_gutter(1080.0, 1.0, Some(31)), 31.0);
+        assert_eq!(screen_gutter(2160.0, 1.0, Some(31)), 31.0);
 
         nacelle::theme::set_viewport(1080.0, 1.0);
     }
