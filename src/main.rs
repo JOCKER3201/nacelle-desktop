@@ -177,6 +177,10 @@ struct Prefs {
 }
 
 fn main() {
+    // The pixel guard, before anything is built: `cmds` needs the
+    // toolkit's command register switched on, and a draw list made
+    // while it was off records nothing. Off, this reads one env var.
+    hashframe::arm();
     // The two layout aids run and leave before any window exists —
     // they are for the user whose layout is broken enough that the
     // settings window may not be reachable (u1 §5.3).
