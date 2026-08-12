@@ -534,23 +534,28 @@ fn main() {
     // the user of this screen sees no part of a changed default — and
     // panels the section does not name land wherever the NEW base puts
     // them, on top of whatever was pinned. Nothing is migrated or
-    // rewritten behind the user's back (u1 §5.3): it is told, once,
-    // with the way out named. The same line goes to stderr so it
-    // survives a headless start.
+    // rewritten behind the user's back (u1 §5.3).
+    //
+    // Said to the LOG and nowhere else. It used to raise a window and
+    // an alert sound at every start, which was right when a stale
+    // section was rare and wrong the moment it stopped being: installing
+    // an addon changes what the default names, so anybody with a saved
+    // arrangement met the same window every morning and learned to
+    // dismiss it without reading. A notice nobody reads is worse than
+    // silence, because it also trains the next one to be ignored. The
+    // line survives for a headless start and for anybody wondering why
+    // a new widget did not appear.
     if let Some((pinned, placed)) =
         config::stale_screen_section(screens[0].spec(), screens[0].key)
     {
         let key = screens[0].key;
         let lname = screens[0].layaut.clone();
-        let msg = format!(
-            "Layaut '{lname}' pins {pinned} of {placed} panels for {}x{}@{}. \
-             The default arrangement changed; this screen still shows the saved \
-             one. Settings \u{2192} Themes \u{2192} Layauts \u{2192} RESET THIS SCREEN.",
+        eprintln!(
+            "nacelle-desktop: layaut '{lname}' pins {pinned} of {placed} panels for \
+             {}x{}@{}; this screen keeps the saved arrangement. \
+             Settings \u{2192} Themes \u{2192} Layauts \u{2192} RESET THIS SCREEN undoes it.",
             key.0, key.1, key.2
         );
-        eprintln!("nacelle-desktop: {msg}");
-        nacelle::sound::emit(nacelle::sound::Event::Alert);
-        popup.show(msg);
     }
 
     let mut mods = ModifiersState::empty();
