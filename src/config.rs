@@ -7,11 +7,18 @@
 //! can change a default without anything being copied into anybody's
 //! home directory.
 //!
-//!   $XDG_CONFIG_HOME/nacelle-desktop/nacelle-desktop.conf  — the user's own (Key=Value)
-//!       (~/.config/nacelle-desktop/… when the variable is unset)
-//!   $XDG_CONFIG_DIRS/nacelle-desktop/nacelle-desktop.conf  — the system defaults
-//!       (/etc/xdg/nacelle-desktop/… when the variable is unset)
+//!   $XDG_CONFIG_HOME/nacelle/nacelle-desktop.conf  — the user's own (Key=Value)
+//!       (~/.config/nacelle/… when the variable is unset)
+//!   $XDG_CONFIG_DIRS/nacelle/nacelle-desktop.conf  — the system defaults
+//!       (/etc/xdg/nacelle/… when the variable is unset)
 //!   <either of those>/shellrc                     — bash startup file, first one found
+//!
+//! The FOLDER is the family and the FILE is the program: `nacelle-ai`
+//! reads these very directories, so naming them after one member was an
+//! accident rather than a design, and `nacelle/nacelle-ai.conf` can
+//! stand beside `nacelle/nacelle-desktop.conf` the day it is needed.
+//! Both search paths still carry the folder's old name one rung lower —
+//! see [`FAMILY_DIR`] and [`LEGACY_FAMILY_DIR`].
 //!
 //! Writes go to the user's directory and nowhere else, and only when
 //! the user changes something: the program creates no directory and
@@ -19,8 +26,8 @@
 //!
 //! Everything a theme is made of is DATA, not configuration, so it lives
 //! under XDG_DATA_HOME:
-//!   ~/.local/share/nacelle-desktop/layauts/       — custom layout files (*.layaut)
-//!   ~/.local/share/nacelle-desktop/sounds/<set>/  — sound themes, one directory
+//!   ~/.local/share/nacelle/layauts/               — custom layout files (*.layaut)
+//!   ~/.local/share/nacelle/sounds/<set>/          — sound themes, one directory
 //!       each; the DIRECTORY NAME is the theme name. Inside, a "meta"
 //!       file maps every interface event to the sound file that plays
 //!       for it, next to the audio files themselves.
@@ -140,7 +147,7 @@ pub fn widget_factory() -> &'static nacelle::widget::factory::WidgetFactory {
         LINKED
             .into_iter()
             .fold(
-                nacelle::widget::factory::WidgetFactory::new(AssetRoots::xdg("nacelle-desktop")),
+                nacelle::widget::factory::WidgetFactory::new(asset_roots()),
                 |f, w| f.with_builtin(w),
             )
             .plugins_enabled(!crate::plugins::disabled())
@@ -149,7 +156,7 @@ pub fn widget_factory() -> &'static nacelle::widget::factory::WidgetFactory {
 
 /// The toolkit's layaut store over this application's XDG roots.
 fn store() -> LayautStore {
-    LayautStore::new(AssetRoots::xdg("nacelle-desktop"))
+    LayautStore::new(asset_roots())
 }
 
 pub struct Config {
@@ -159,13 +166,17 @@ pub struct Config {
 pub fn load() -> (Config, Option<String>) {
     // The dead Look=/Style= keys retire on sight — before anything
     // reads the layout or the theme (u3 §6.3).
-    migrate_look_style_in(
-        &config_dir().join(CONF_FILE),
-        &AssetRoots::xdg("nacelle-desktop"),
-    );
+    //
+    // The file named is the one under the family directory, and only
+    // that one. A configuration still sitting under the folder's old
+    // name is READ and never rewritten, so on such a machine this
+    // rewrite simply does not happen: the keys stay in the file,
+    // harmlessly, since nothing else reads them. Retiring them would
+    // mean editing a file this change promised not to touch.
+    migrate_look_style_in(&config_dir().join(CONF_FILE), &asset_roots());
     // The registry must exist before anything parses a layout: panels
     // are resolved by name against it.
-    let roots = AssetRoots::xdg("nacelle-desktop");
+    let roots = asset_roots();
     migrate_widgets_to_addons(&roots);
     let scanned = nacelle::widget::registry::scan(&roots).len();
     let regs = widget_factory().registry();
@@ -876,6 +887,30 @@ fn find_asset(sub: &str, rel: &str) -> Option<PathBuf> {
 /// Name of the main configuration file.
 const CONF_FILE: &str = "nacelle-desktop.conf";
 
+/// The directory the nacelle FAMILY keeps its configuration and its
+/// data in, under every XDG root — `~/.config/nacelle`,
+/// `~/.local/share/nacelle`, `/etc/xdg/nacelle`, `/usr/share/nacelle`.
+///
+/// The folder is the family, the file inside it is the program. The
+/// themes, the sounds, the layauts and the addons belong to the
+/// environment rather than to one binary, and `nacelle-ai` already
+/// reads these directories, so a folder named after a single member was
+/// an accident that happened to work.
+const FAMILY_DIR: &str = "nacelle";
+
+/// What that directory was called before — the desktop's own name.
+///
+/// Nothing on disk is moved. Every search path carries this name
+/// directly BEHIND its new-named counterpart at the same level, so a
+/// machine that has `~/.config/nacelle-desktop` or
+/// `~/.local/share/nacelle-desktop` keeps reading it: the settings, the
+/// sound sets and the layauts installed under the old name go on
+/// working, and a user's old file still outranks the system defaults.
+/// Only writes have moved, which is what makes this reversible — the
+/// whole change can be undone by dropping a branch, because it deleted
+/// nothing.
+const LEGACY_FAMILY_DIR: &str = "nacelle-desktop";
+
 
 
 
@@ -1416,83 +1451,190 @@ fn set_kv_in_text(text: &str, key: &str, value: &str) -> String {
     out
 }
 
-/// The one configuration directory anything is ever WRITTEN to:
-/// `$XDG_CONFIG_HOME/nacelle-desktop`, or `~/.config/nacelle-desktop`.
-fn config_dir() -> PathBuf {
+/// One level of a search path: `<base>/nacelle` and, directly behind
+/// it, `<base>/nacelle-desktop`.
+///
+/// The pair is kept together at EVERY level rather than all the legacy
+/// directories being appended at the end, and that is the whole
+/// correctness of the fallback. Both trees merge by precedence — the
+/// configuration key by key, the data file by file — so the user's own
+/// old-named directory has to keep outranking the system defaults.
+/// Appending would quietly reverse that and let a distribution's
+/// `/etc/xdg` answer a key the user had set years ago.
+fn push_level(out: &mut Vec<PathBuf>, base: &Path) {
+    for name in [FAMILY_DIR, LEGACY_FAMILY_DIR] {
+        let dir = base.join(name);
+        if !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+}
+
+/// Where the user's own configuration lives: `$XDG_CONFIG_HOME`, or
+/// `~/.config`. The BASE, without the family directory — the search
+/// path needs it to build both names.
+fn config_home() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("nacelle-desktop");
+            return PathBuf::from(xdg);
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config").join("nacelle-desktop")
+    PathBuf::from(home).join(".config")
+}
+
+/// The one configuration directory anything is ever WRITTEN to:
+/// `$XDG_CONFIG_HOME/nacelle`, or `~/.config/nacelle`.
+///
+/// The new name only. The old one is read and never written, so a
+/// machine keeps exactly the files it had and gains one directory the
+/// first time a setting is changed.
+fn config_dir() -> PathBuf {
+    config_home().join(FAMILY_DIR)
 }
 
 /// Every directory the configuration is READ from, most specific
 /// first: the user's own, then the system ones from `XDG_CONFIG_DIRS`
-/// (or `/etc/xdg` when it is unset).
+/// (or `/etc/xdg` when it is unset), each of them under the family name
+/// and then under the old one.
 ///
 /// The counterpart of [`data_dirs`] for configuration, and the reason
 /// a package can ship defaults: they are read where they are
 /// installed, never copied to the user.
 fn config_dirs() -> Vec<PathBuf> {
-    config_search_path(
-        config_dir(),
+    let dirs = config_search_path(
+        &config_home(),
         std::env::var("XDG_CONFIG_DIRS").ok().as_deref(),
-    )
+    );
+    warn_once_about_legacy("configuration", &dirs, &LEGACY_CONFIG_SAID);
+    dirs
 }
 
-/// [`config_dirs`] without the environment: the user's directory
-/// first, then `system` split on ':' and joined with the application
-/// name, duplicates dropped. An unset or empty value means the
-/// standard `/etc/xdg`, as the XDG base directory specification says.
-fn config_search_path(user: PathBuf, system: Option<&str>) -> Vec<PathBuf> {
-    let mut out = vec![user];
+/// [`config_dirs`] without the environment: the user's base first, then
+/// `system` split on ':', every one of them contributing the pair of
+/// directories [`push_level`] builds, duplicates dropped. An unset or
+/// empty value means the standard `/etc/xdg`, as the XDG base directory
+/// specification says.
+fn config_search_path(user: &Path, system: Option<&str>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    push_level(&mut out, user);
     let system = system.filter(|v| !v.is_empty()).unwrap_or("/etc/xdg");
     for base in system.split(':').filter(|b| !b.is_empty()) {
-        let dir = PathBuf::from(base).join("nacelle-desktop");
-        if !out.contains(&dir) {
-            out.push(dir);
-        }
+        push_level(&mut out, Path::new(base));
     }
     out
 }
 
-/// Data directory: ~/.local/share/nacelle-desktop. Holds everything a theme is
-/// made of (look/, style/, layauts/, sounds/) — those are data, not
-/// configuration, so they belong under XDG_DATA_HOME while nacelle-desktop.conf
-/// stays in the config directory.
-fn data_dir() -> PathBuf {
+/// Where the user's own data lives: `$XDG_DATA_HOME`, or
+/// `~/.local/share`. The BASE, as [`config_home`] is for configuration.
+fn data_home() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("nacelle-desktop");
+            return PathBuf::from(xdg);
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".local").join("share").join("nacelle-desktop")
+    PathBuf::from(home).join(".local").join("share")
+}
+
+/// Data directory: `~/.local/share/nacelle`. Holds everything a theme is
+/// made of (layauts/, sounds/, addons/) — those are data, not
+/// configuration, so they belong under XDG_DATA_HOME while
+/// nacelle-desktop.conf stays in the config directory. The one data
+/// directory written to, and the new name only.
+fn data_dir() -> PathBuf {
+    data_home().join(FAMILY_DIR)
 }
 
 /// Every directory assets are READ from, most specific first: the
 /// user's own, then the system ones from XDG_DATA_DIRS (or the two
-/// standard prefixes when it is unset).
+/// standard prefixes when it is unset), each under the family name and
+/// then under the old one.
 ///
 /// This is what makes `sudo make install` and a distribution package
 /// mean something, while a user install still shadows both: the first
 /// directory holding a given name wins, and nothing has to be copied
-/// anywhere for that to work.
+/// anywhere for that to work. A sound set or a layaut installed under
+/// the old name is found by the same rule, one place further down.
 fn data_dirs() -> Vec<PathBuf> {
-    let mut out = vec![data_dir()];
-    let system = std::env::var("XDG_DATA_DIRS")
-        .ok()
+    let dirs = data_search_path(&data_home(), std::env::var("XDG_DATA_DIRS").ok().as_deref());
+    warn_once_about_legacy("data", &dirs, &LEGACY_DATA_SAID);
+    dirs
+}
+
+/// [`data_dirs`] without the environment, so a test can read it.
+fn data_search_path(user: &Path, system: Option<&str>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    push_level(&mut out, user);
+    let system = system
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+        .unwrap_or("/usr/local/share:/usr/share");
     for base in system.split(':').filter(|b| !b.is_empty()) {
-        let dir = PathBuf::from(base).join("nacelle-desktop");
-        if !out.contains(&dir) {
-            out.push(dir);
-        }
+        push_level(&mut out, Path::new(base));
     }
     out
+}
+
+/// The data tree as the toolkit sees it: every directory it may READ —
+/// both names, user before system — and the single new-named directory
+/// it WRITES to.
+///
+/// `AssetRoots::xdg` cannot serve here any more. It builds a search
+/// path from ONE name, and the point of this arrangement is that a
+/// machine which installed its sounds and its layauts under the old
+/// name keeps them without moving a file.
+fn asset_roots() -> AssetRoots {
+    AssetRoots::new(data_dirs(), data_dir())
+}
+
+/// Whether a search-path directory is one under the folder's old name.
+fn is_legacy_dir(dir: &Path) -> bool {
+    dir.file_name().and_then(|n| n.to_str()) == Some(LEGACY_FAMILY_DIR)
+}
+
+/// Said once per tree, and that is the requirement rather than a
+/// nicety: [`config_dirs`] and [`data_dirs`] are called on every read,
+/// so a line printed unguarded would be a line per settings click and
+/// per frame that asks for a sound.
+static LEGACY_CONFIG_SAID: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static LEGACY_DATA_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Names the first old-named directory on `path` that actually exists
+/// and says where it belongs from now on — once.
+///
+/// The flag is claimed BEFORE the filesystem is touched, so the whole
+/// question is asked once per process and every later call is one
+/// atomic read: `find_asset` is on the path of a settings page that
+/// redraws every frame, and a stat per root per frame would be a cost
+/// paid for a sentence already printed. What that trades away is
+/// noticing an old directory CREATED mid-session, which cannot happen
+/// to a directory that only exists from before the rename.
+///
+/// Returns whether it printed, which is what a test can count: stderr
+/// is not capturable from here, and the failure worth catching is not
+/// the wording but a warning that comes back every frame.
+fn warn_once_about_legacy(
+    tree: &str,
+    path: &[PathBuf],
+    said: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    if said.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    let Some(old) = path.iter().find(|d| is_legacy_dir(d) && d.is_dir()) else {
+        return false;
+    };
+    eprintln!(
+        "nacelle-desktop: reading {tree} from {} \u{2014} the folder's old name. \
+         Nothing has been moved and nothing has to be: it goes on being read \
+         there. Its place from now on is {}, one folder for the whole nacelle \
+         family",
+        old.display(),
+        old.with_file_name(FAMILY_DIR).display()
+    );
+    true
 }
 
 /// Merges Key=Value files given MOST SPECIFIC FIRST: an earlier file
@@ -1605,7 +1747,7 @@ mod tests {
 
         let crimson = colour_of("crimson");
         assert!(
-            dir.join("nacelle-desktop").join(CONF_FILE).is_file(),
+            dir.join(FAMILY_DIR).join(CONF_FILE).is_file(),
             "the first settings change must create the user's configuration file"
         );
         let azure = colour_of("azure");
@@ -1768,8 +1910,8 @@ mod tests {
         let base =
             std::env::temp_dir().join(format!("nacelle-conf-cascade-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let system = base.join("etc/xdg/nacelle-desktop");
-        let user = base.join("config/nacelle-desktop");
+        let system = base.join("etc/xdg").join(FAMILY_DIR);
+        let user = base.join("config").join(FAMILY_DIR);
         std::fs::create_dir_all(&system).unwrap();
         std::fs::create_dir_all(&user).unwrap();
         std::fs::write(
@@ -1813,33 +1955,324 @@ mod tests {
     /// The search path itself: the user's directory first — it is also
     /// the only one written to — then XDG_CONFIG_DIRS in its own
     /// order, `/etc/xdg` when it is unset or empty, and no directory
-    /// twice.
+    /// twice. Every level carries the folder's old name directly behind
+    /// its new one, so nothing installed under `nacelle-desktop` falls
+    /// off the path.
     #[test]
     fn the_configuration_search_path_follows_xdg() {
         fixture_registry();
-        let user = PathBuf::from("/home/somebody/.config/nacelle-desktop");
-        let etc = PathBuf::from("/etc/xdg/nacelle-desktop");
+        let home = PathBuf::from("/home/somebody/.config");
+        let user = home.join(FAMILY_DIR);
+        let user_old = home.join(LEGACY_FAMILY_DIR);
+        let etc = PathBuf::from("/etc/xdg").join(FAMILY_DIR);
+        let etc_old = PathBuf::from("/etc/xdg").join(LEGACY_FAMILY_DIR);
         for unset in [None, Some(""), Some("/etc/xdg")] {
             assert_eq!(
-                config_search_path(user.clone(), unset),
-                vec![user.clone(), etc.clone()],
+                config_search_path(&home, unset),
+                vec![user.clone(), user_old.clone(), etc.clone(), etc_old.clone()],
                 "{unset:?} must resolve to the standard /etc/xdg"
             );
         }
         assert_eq!(
-            config_search_path(user.clone(), Some("/opt/site/etc:/etc/xdg:/opt/site/etc")),
+            config_search_path(&home, Some("/opt/site/etc:/etc/xdg:/opt/site/etc")),
             vec![
                 user.clone(),
-                PathBuf::from("/opt/site/etc/nacelle-desktop"),
-                etc,
+                user_old.clone(),
+                PathBuf::from("/opt/site/etc").join(FAMILY_DIR),
+                PathBuf::from("/opt/site/etc").join(LEGACY_FAMILY_DIR),
+                etc.clone(),
+                etc_old,
             ],
             "the order of the variable is kept and duplicates drop"
         );
         assert_eq!(
-            config_search_path(user.clone(), Some("/opt/site/etc"))[0],
+            config_search_path(&home, Some("/opt/site/etc"))[0],
             user,
             "the write target is always the head of the read path"
         );
+        // The user's OLD directory outranks the system's new one: the
+        // cascade merges key by key, and a setting somebody made years
+        // ago may not be overruled by a distribution default just
+        // because the folder has been renamed since.
+        let path = config_search_path(&home, Some("/etc/xdg"));
+        let at = |p: &PathBuf| path.iter().position(|d| d == p).expect("on the path");
+        assert!(at(&user_old) < at(&etc), "{path:?}");
+    }
+
+    /// The data path is the configuration path's twin, down to the two
+    /// standard prefixes XDG names when the variable is unset — so a
+    /// sound set or a layaut installed under either name is found, and
+    /// a user install still shadows a system one.
+    #[test]
+    fn the_data_search_path_carries_both_names_at_every_level() {
+        fixture_registry();
+        let home = PathBuf::from("/home/somebody/.local/share");
+        for unset in [None, Some("")] {
+            assert_eq!(
+                data_search_path(&home, unset),
+                vec![
+                    home.join(FAMILY_DIR),
+                    home.join(LEGACY_FAMILY_DIR),
+                    PathBuf::from("/usr/local/share").join(FAMILY_DIR),
+                    PathBuf::from("/usr/local/share").join(LEGACY_FAMILY_DIR),
+                    PathBuf::from("/usr/share").join(FAMILY_DIR),
+                    PathBuf::from("/usr/share").join(LEGACY_FAMILY_DIR),
+                ],
+                "{unset:?} must resolve to the two standard prefixes"
+            );
+        }
+        assert_eq!(
+            data_search_path(&home, Some("/usr/share:/usr/share")),
+            vec![
+                home.join(FAMILY_DIR),
+                home.join(LEGACY_FAMILY_DIR),
+                PathBuf::from("/usr/share").join(FAMILY_DIR),
+                PathBuf::from("/usr/share").join(LEGACY_FAMILY_DIR),
+            ],
+            "duplicates drop on the data side too"
+        );
+    }
+
+    /// The ordinary machine's shape: no `XDG_*` variables at all, just
+    /// `HOME`. That is the case the owner's own machine is in, and the
+    /// one every path here is really built from.
+    #[test]
+    fn with_only_home_set_both_folder_names_stand_under_the_dot_directories() {
+        fixture_registry();
+        let _env = env_lock();
+        let home_was = std::env::var("HOME").ok();
+        let root = scratch("home-only");
+        std::env::set_var("HOME", &root);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_DATA_DIRS");
+
+        assert_eq!(config_dir(), root.join(".config").join(FAMILY_DIR));
+        assert_eq!(data_dir(), root.join(".local/share").join(FAMILY_DIR));
+        assert_eq!(
+            config_dirs()[..2],
+            [
+                root.join(".config").join(FAMILY_DIR),
+                root.join(".config").join(LEGACY_FAMILY_DIR),
+            ],
+            "the user's two folders, new name first"
+        );
+        assert_eq!(
+            data_dirs()[..2],
+            [
+                root.join(".local/share").join(FAMILY_DIR),
+                root.join(".local/share").join(LEGACY_FAMILY_DIR),
+            ],
+            "and the same pair on the data side"
+        );
+        // The toolkit is handed exactly that path, and writes to the
+        // head of it and nowhere else.
+        let roots = asset_roots();
+        assert_eq!(roots.read, data_dirs());
+        assert_eq!(roots.write, data_dir());
+
+        match home_was {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory of this test's own, emptied first.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nacelle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch tree must be writable");
+        dir
+    }
+
+    /// The four states a machine can be in the day the folder changes
+    /// name, on the CONFIGURATION side.
+    ///
+    /// The one that matters is OLD ONLY: that is every machine that ran
+    /// this program before the rename, and its settings have to go on
+    /// being read where they lie. Nothing here moves, renames or
+    /// deletes a file.
+    #[test]
+    fn the_new_configuration_folder_wins_and_the_old_one_is_still_read() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("config-fallback");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        // A system end of the cascade that exists and is empty, so this
+        // test says nothing about the machine it runs on.
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+
+        // NEITHER: an ordinary first run. Not an error, not a directory
+        // created — the program simply uses what is built into it.
+        assert!(conf_kv().is_empty(), "an empty home carries no settings");
+        assert!(!root.join(FAMILY_DIR).exists(), "reading creates nothing");
+
+        // OLD ONLY: the file is read under the folder's old name.
+        let old = root.join(LEGACY_FAMILY_DIR);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(CONF_FILE), "Theme=crimson\nLayaut=console\n").unwrap();
+        let kv = conf_kv();
+        assert_eq!(
+            kv.get("Theme").map(String::as_str),
+            Some("crimson"),
+            "a machine that never moved anything must keep its settings"
+        );
+
+        // BOTH: the new name wins key by key, and a key only the old
+        // file carries is still answered. One cascade, one rung apart.
+        let new = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join(CONF_FILE), "Theme=azure\n").unwrap();
+        let kv = conf_kv();
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"), "the new folder wins");
+        assert_eq!(
+            kv.get("Layaut").map(String::as_str),
+            Some("console"),
+            "a key only the old file has is inherited, not lost"
+        );
+
+        // NEW ONLY: what a machine looks like once the user has moved
+        // the folder themselves.
+        std::fs::remove_dir_all(&old).unwrap();
+        let kv = conf_kv();
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
+        assert_eq!(kv.get("Layaut"), None);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same four states on the DATA side: a sound set installed
+    /// under the old name goes on playing, and one under the new name
+    /// shadows it exactly as a user install shadows a system one.
+    #[test]
+    fn a_sound_set_installed_under_the_old_name_is_still_found() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("data-fallback");
+        std::env::set_var("XDG_DATA_HOME", &root);
+        // Keeps the real /usr/share off this test's search path.
+        std::env::set_var("XDG_DATA_DIRS", root.join("usr/share"));
+
+        // NEITHER.
+        assert!(find_asset("sounds", "classic").is_none());
+        assert!(asset_dirs("sounds").is_empty());
+
+        // OLD ONLY.
+        let old = root.join(LEGACY_FAMILY_DIR).join("sounds").join("classic");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("meta"), "click=click.wav\n").unwrap();
+        assert_eq!(
+            find_asset("sounds", "classic").as_ref(),
+            Some(&old),
+            "a set installed under the old name must still be found"
+        );
+        assert!(list_sound_themes().iter().any(|n| n == "classic"));
+
+        // BOTH: the new folder shadows the old one, and the set is
+        // listed once rather than twice.
+        let new = root.join(FAMILY_DIR).join("sounds").join("classic");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("meta"), "click=click.wav\n").unwrap();
+        assert_eq!(
+            find_asset("sounds", "classic").as_ref(),
+            Some(&new),
+            "the new folder wins when both hold the same name"
+        );
+        assert_eq!(
+            list_sound_themes().iter().filter(|n| *n == "classic").count(),
+            1,
+            "one set, listed once"
+        );
+        assert_eq!(asset_dirs("sounds").len(), 2, "both folders take part");
+
+        // NEW ONLY.
+        std::fs::remove_dir_all(root.join(LEGACY_FAMILY_DIR)).unwrap();
+        assert_eq!(find_asset("sounds", "classic").as_ref(), Some(&new));
+
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_DATA_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Writing goes to the new folder and ONLY there: the old file is
+    /// left byte for byte as it was found.
+    ///
+    /// This is what makes the change reversible — a mistake costs the
+    /// user nothing, because nothing of theirs was touched.
+    #[test]
+    fn a_setting_is_written_to_the_new_folder_and_the_old_file_is_untouched() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("write-target");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+
+        let old = root.join(LEGACY_FAMILY_DIR);
+        std::fs::create_dir_all(&old).unwrap();
+        let before = "# somebody's own file\nTheme=crimson\nSounds=classic\n";
+        std::fs::write(old.join(CONF_FILE), before).unwrap();
+
+        set_conf_kv("Theme", "azure");
+
+        let new = root.join(FAMILY_DIR).join(CONF_FILE);
+        assert!(new.is_file(), "the write must land in the new folder");
+        assert!(
+            std::fs::read_to_string(&new).unwrap().contains("Theme=azure"),
+            "the value must be in the file that was written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join(CONF_FILE)).unwrap(),
+            before,
+            "the user's old file may not be touched, moved or rewritten"
+        );
+        // And the program now reads the new value while the rest of the
+        // old file still answers for everything it alone carries.
+        let kv = conf_kv();
+        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
+        assert_eq!(kv.get("Sounds").map(String::as_str), Some("classic"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The warning is said ONCE. `config_dirs` and `data_dirs` are
+    /// called on every read, so the failure this guards against is not
+    /// a wrong sentence but a right one printed per frame.
+    ///
+    /// Hermetic: its own flag and its own directory, no process-wide
+    /// state and no environment.
+    #[test]
+    fn the_warning_about_the_old_folder_is_said_once_and_not_every_frame() {
+        use std::sync::atomic::AtomicBool;
+        let root = scratch("legacy-warning");
+        let path = vec![root.join(FAMILY_DIR), root.join(LEGACY_FAMILY_DIR)];
+        std::fs::create_dir_all(root.join(FAMILY_DIR)).unwrap();
+        std::fs::create_dir_all(root.join(LEGACY_FAMILY_DIR)).unwrap();
+
+        // The first read that can land in the old folder says so.
+        let said = AtomicBool::new(false);
+        assert!(warn_once_about_legacy("data", &path, &said), "the first read must say it");
+
+        // Every read after it is silent — this is the whole assertion.
+        for _ in 0..1000 {
+            assert!(
+                !warn_once_about_legacy("data", &path, &said),
+                "the warning came back a second time"
+            );
+        }
+
+        // A machine with no old folder on its path is told nothing at
+        // all, however often it is asked.
+        let quiet = AtomicBool::new(false);
+        assert!(!warn_once_about_legacy("configuration", &path[..1], &quiet));
+        assert!(!warn_once_about_legacy("configuration", &path[..1], &quiet));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The registry the tests resolve names against.
@@ -2394,7 +2827,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _env = env_lock();
         std::env::set_var("XDG_DATA_HOME", &dir);
-        let ldir = dir.join("nacelle-desktop").join("layauts");
+        let ldir = dir.join(FAMILY_DIR).join("layauts");
         std::fs::create_dir_all(&ldir).unwrap();
         let text = "screen = 1920x1080@27\nclock = 1.00 2.00 10.00 10.00\n\n\
                     [1280x720@7]\nclock = 5.00 5.00 20.00 20.00\n\n\
