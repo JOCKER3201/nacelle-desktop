@@ -719,9 +719,18 @@ fn main() {
         let key = screens[0].key;
         let lname = screens[0].layaut.clone();
         eprintln!(
+            // The route named here is the COMMAND LINE and not the
+            // settings window, deliberately. The window's own reset is
+            // LOOK AND FEEL RESET, and it clears the theme, the layaut,
+            // every screen's own layaut, the sound set and the fonts as
+            // well as this pinned section — sending somebody there to
+            // undo one screen's arrangement would take five other
+            // things with it. `--reset-screen-layaut` is the narrow
+            // door, and after the settings window was rebuilt it is the
+            // only one.
             "nacelle-desktop: layaut '{lname}' pins {pinned} of {placed} panels for \
              {}x{}@{}; this screen keeps the saved arrangement. \
-             Settings \u{2192} Themes \u{2192} Layauts \u{2192} RESET THIS SCREEN undoes it.",
+             Run with --reset-screen-layaut to undo it for this screen alone.",
             key.0, key.1, key.2
         );
     }
@@ -1394,15 +1403,16 @@ fn main() {
     // for — one body behind both ways of pressing a control (mouse
     // click and the F1 §1.5 Enter/Space), so the keyboard cannot reach
     // a control whose consequences only the mouse path knows. It acts
-    // on the screen the window is being shown on: RESET THIS SCREEN
-    // means THIS one, and going to a board turns the monitor in front
-    // of the user.
+    // on the screen the window is being shown on: the reset means THIS
+    // one, and going to a board turns the monitor in front of the user.
     macro_rules! settings_after {
         () => {{
             let si = ui_screen.min(screens.len() - 1);
-            // RESET THIS SCREEN (the LAYAUTS view): the window cannot
-            // clear the section itself — only the application knows
-            // which screen this is — so it asks, like the boards do.
+            // The pinned-section half of LOOK AND FEEL RESET: the
+            // window cannot clear the section itself — only the
+            // application knows which screen this is — so it asks, like
+            // the boards do. The other five things that reset clears
+            // are the window's own to write.
             if settings.reset_screen {
                 settings.reset_screen = false;
                 let name = screens[si].layaut.clone();
@@ -1410,8 +1420,18 @@ fn main() {
                 match config::clear_screen_section(&name, key) {
                     Ok(()) => {
                         nacelle::sound::emit(nacelle::sound::Event::Save);
+                        // Names the WHOLE reset, not the half this
+                        // branch performed. The window cleared the
+                        // theme, the layaut and every screen's own, the
+                        // sound set and the fonts before asking for
+                        // this section, and a message that mentions
+                        // only the section tells the user less was
+                        // destroyed than was — which is the wrong
+                        // direction for a message about somebody's
+                        // configuration.
                         popup.show(format!(
-                            "Cleared the {}x{}@{} section of layaut '{}'",
+                            "Look and feel reset: theme, layauts, sounds, fonts, \
+                             and the {}x{}@{} section of layaut '{}'",
                             key.0, key.1, key.2, name
                         ));
                     }
