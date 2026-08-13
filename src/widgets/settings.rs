@@ -3643,11 +3643,19 @@ mod tests {
         // token and not as the 8.35 px it currently bakes to: a theme that
         // moves the pad moves this gap, and a number here would turn that
         // into a failure instead of a following.
-        let pad = nacelle::theme::resolved()
-            .px(nacelle::theme::id("menu.pad").expect("menu.pad must exist"));
+        // Two terms, and both are the toolkit's: `menu.anchor_gap` is the air
+        // between the door and the box (libnacelle d7e7f54 — flush, the two
+        // frames shared an edge and each one's rounding cancelled the
+        // other's), and `menu.pad` is the box's own inside. Written as the
+        // tokens: a theme that moves either moves this gap, and a number here
+        // would turn that into a failure instead of a following.
+        let t = nacelle::theme::resolved();
+        let px = |n: &str| t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("{n} must exist")));
+        let want = px("menu.anchor_gap") + px("menu.pad");
         assert!(
-            (first.y - door.bottom() - pad).abs() < 0.51,
-            "the first theme hangs {} px under the door, not the box's pad of {pad} px",
+            (first.y - door.bottom() - want).abs() < 0.51,
+            "the first theme hangs {} px under the door, not the {want} px of \
+             air plus the box's own pad",
             first.y - door.bottom()
         );
         assert!(
