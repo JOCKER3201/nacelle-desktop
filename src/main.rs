@@ -3022,13 +3022,19 @@ fn draw_screen(
     // Rings are withheld while board rects are mid-flight (the cube
     // ride) — set before any registration is answered this frame.
     focus_ctl.set_ring_suppressed(sc.cube.is_some());
+    // The frame opens at the pointer's current position, carrying what
+    // was drawn over it last frame — which is what lets a widget under
+    // the settings window be told that it is under the settings window.
+    // Taken out of the screen for the frame exactly as the draw list is,
+    // and put back below.
+    sc.pointer.begin(sc.mouse);
     let mut ctx = widgets::Ctx {
         dl: &mut dl,
         fonts,
         w,
         h,
         t: prefs.t,
-        mouse: sc.mouse,
+        mouse: std::mem::take(&mut sc.pointer),
         term_font_scale: prefs.term_font_scale,
         // The same number the viewport above was told, and NOT a second
         // chance to apply it: everything a role or a metric token answers
@@ -3529,6 +3535,9 @@ fn draw_screen(
     if let Some(c) = prefs.mood_wash {
         ctx.dl.rect(0.0, 0.0, w, h, c);
     }
+    // What this frame drew over the pointer goes back to the screen: it
+    // is what the NEXT frame answers "is anything standing over me" with.
+    sc.pointer = std::mem::take(&mut ctx.mouse);
     drop(ctx);
 
     // The pixel guard, before a triangle leaves for the GPU: unarmed it
@@ -3668,7 +3677,10 @@ fn run_resolution_dialog(
                             w,
                             h,
                             t: 0.0,
-                            mouse,
+                            // One dialog and nothing else on the screen,
+                            // so nothing can be standing over anything:
+                            // a plain pointer with no covers.
+                            mouse: nacelle::pointer::Pointer::new(mouse.0, mouse.1),
                             term_font_scale: 1.0,
                             ui_font_scale: 1.0,
                             panel_scale: 1.0,

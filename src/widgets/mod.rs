@@ -155,7 +155,7 @@ pub(crate) fn drawn_text(
             // Off the window, so nothing is drawn in its hover look: a
             // hovered control may swap the role it draws in, and this
             // measurement compares two runs string for string.
-            mouse: (-1.0, -1.0),
+            mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale: uscale,
             panel_scale: 1.0,
