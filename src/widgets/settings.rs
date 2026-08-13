@@ -3636,26 +3636,22 @@ mod tests {
         // Flush under the anchor, and the names start under the DOOR —
         // one column, in the order the decision names.
         assert!(door.y < first.y, "the door does not stand above the themes");
-        // The list is a FRAMED box now (libnacelle 0acb873: it stands on
-        // elev.popover, bedded and ringed like the window). The box still
-        // hangs from the door's edge; the first name hangs from the BOX's
-        // inner edge, which is the box's own pad below it. Written as the
-        // token and not as the 8.35 px it currently bakes to: a theme that
-        // moves the pad moves this gap, and a number here would turn that
-        // into a failure instead of a following.
-        // Two terms, and both are the toolkit's: `menu.anchor_gap` is the air
-        // between the door and the box (libnacelle d7e7f54 — flush, the two
-        // frames shared an edge and each one's rounding cancelled the
-        // other's), and `menu.pad` is the box's own inside. Written as the
-        // tokens: a theme that moves either moves this gap, and a number here
-        // would turn that into a failure instead of a following.
+        // ONE term, and it is the toolkit's. There is no box any more
+        // (libnacelle a449763: a drop-down is a column of anchor-dressed
+        // elements on a blind, not a container with rows inside), so there
+        // is no inner pad to add — the first element simply hangs
+        // `menu.anchor_gap` under the door, the same air that stands
+        // between every pair of elements below it.
+        //
+        // Written as the token and not as the 2.7 px it bakes to: a theme
+        // that widens the air widens this gap, and a number here would turn
+        // that into a failure instead of a following.
         let t = nacelle::theme::resolved();
         let px = |n: &str| t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("{n} must exist")));
-        let want = px("menu.anchor_gap") + px("menu.pad");
+        let want = px("menu.anchor_gap");
         assert!(
             (first.y - door.bottom() - want).abs() < 0.51,
-            "the first theme hangs {} px under the door, not the {want} px of \
-             air plus the box's own pad",
+            "the first theme hangs {} px under the door, not the {want} px of air",
             first.y - door.bottom()
         );
         assert!(
