@@ -1125,7 +1125,10 @@ impl Editor {
     /// editor, so the buttons share the window's plane.
     pub fn draw_buttons(&mut self, ctx: &mut Ctx) {
         let (w, h) = (ctx.w, ctx.h);
-        let (mx, my) = ctx.mouse;
+        // The pointer AS THIS PLANE SEES IT: with the settings window
+        // open over the editor these buttons are drawn onto the window's
+        // own plane and keep it; drawn under something else they do not.
+        let (mx, my) = ctx.mouse.at();
         let now = Instant::now();
         let btns = Self::save_buttons(w, h);
         let labels = ["SETTINGS", "ADD WIDGET", "SAVE", "SAVE AS", "CANCEL", "EXIT"];
@@ -1152,7 +1155,7 @@ impl Editor {
     pub fn draw<F: FnMut(&mut Ctx, Panel, Rect)>(&mut self, ctx: &mut Ctx, mut mini: F) {
         let t = theme::resolved();
         let (w, h) = (ctx.w, ctx.h);
-        let (mx, my) = ctx.mouse;
+        let (mx, my) = ctx.mouse.at();
 
         // ADD WIDGET hold finished -> a new instance pulls out of the
         // window (it starts at its miniature size and grows under the
@@ -1175,7 +1178,10 @@ impl Editor {
                     });
                 self.adding = None;
                 self.add_open = false;
-                self.pull_out(widget, (mw, mh), (mx, my), w, h);
+                // PLACEMENT — where the hand is, not what it is over:
+                // the new instance appears under the cursor and is
+                // dragged from there.
+                self.pull_out(widget, (mw, mh), ctx.mouse.raw(), w, h);
             }
         }
 
@@ -1353,6 +1359,11 @@ impl Editor {
             let (win, items) = self.add_list_rects(w, h);
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
             nacelle::object::window::frame(ctx, win);
+            // Read again, on THIS plane: `mx, my` above belongs to the
+            // grid under this window, and under this window there is no
+            // pointer. The tiles are on the window, so they get the
+            // window's answer.
+            let (mx, my) = ctx.mouse.at();
             let list_title = role_list_title();
             let tpx = px_of(list_title, ctx);
             ctx.dl.text_center(

@@ -204,7 +204,7 @@ pub fn draw_resolution_dialog(ctx: &mut Ctx, mw: u32, mh: u32) {
     static BORDER: OnceLock<TokenId> = OnceLock::new();
     static CLASS: OnceLock<Option<u16>> = OnceLock::new();
     let br = resolution_dialog_ok_rect(w, h);
-    let hover = br.contains(ctx.mouse.0, ctx.mouse.1);
+    let hover = ctx.mouse.over(br);
     let class = *CLASS.get_or_init(|| theme::class_id("button"));
     let st = match class {
         Some(c) => t.class_state(c, if hover { State::Hover } else { State::Idle }),

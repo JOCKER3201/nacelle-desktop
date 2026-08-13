@@ -185,7 +185,7 @@ mod tests {
                 w: W,
                 h: H,
                 t,
-                mouse: (0.0, 0.0),
+                mouse: nacelle::pointer::Pointer::new(0.0, 0.0),
                 term_font_scale: 1.0,
                 ui_font_scale: 1.0,
                 panel_scale: 1.0,

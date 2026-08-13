@@ -2416,7 +2416,7 @@ impl Settings {
                 Rect::new(view.right() - reach, view.y, reach, view.h)
             }
         };
-        let hovered = band.contains(ctx.mouse.0, ctx.mouse.1);
+        let hovered = ctx.mouse.over(band);
         let Some(geom) = scroll::scrollbar(
             view,
             &look,
@@ -2496,7 +2496,7 @@ impl Settings {
         match ctrl {
             // The whole row toggles (nacelle::object).
             Ctrl::Toggle { label, get, act } => {
-                let hover = rc.band.contains(ctx.mouse.0, ctx.mouse.1);
+                let hover = ctx.mouse.over(rc.band);
                 let on = get(self);
                 nacelle::object::checkbox::draw_focusable(
                     ctx,
@@ -2713,7 +2713,7 @@ impl Settings {
                 cw,
                 rc.band.h,
             );
-            let hover = r.contains(ctx.mouse.0, ctx.mouse.1);
+            let hover = ctx.mouse.over(r);
             let on = cur == *bits;
             let st = ladder(
                 th,
@@ -2772,7 +2772,7 @@ impl Settings {
             rc.content.w - rc.label_w,
             rc.band.h,
         );
-        let hover = r.contains(ctx.mouse.0, ctx.mouse.1);
+        let hover = ctx.mouse.over(r);
         let st = ladder(
             th,
             &BTN_CLASS,
@@ -3029,7 +3029,7 @@ impl Settings {
         // and exactly wrong here — the door stands INSIDE the open
         // list and is one of the two things the pointer can reach.
         let st = nacelle::object::button::ButtonState {
-            hover: r.contains(ctx.mouse.0, ctx.mouse.1),
+            hover: ctx.mouse.over(r),
             flash: self.flashing(act),
             selected: false,
         };
@@ -3129,7 +3129,7 @@ impl Settings {
         for b in &self.boards {
             let (bx, by) = b.id;
             let tile = tile_at(bx, by);
-            let hover = tile.contains(ctx.mouse.0, ctx.mouse.1);
+            let hover = ctx.mouse.over(tile);
             ctx.dl.rect(tile.x, tile.y, tile.w, tile.h, bed);
             let proxy_min = th.px(tok(&PROXY_MIN, "boards.tile.proxy_min_px"));
             for ps in &b.panels {
@@ -3195,7 +3195,7 @@ impl Settings {
                     th.px(tok(&CLOSE_SIZE, "boards.tile.close_size")).min(tile.w * 0.2);
                 let inset = th.px(tok(&CLOSE_INSET, "boards.tile.close_inset"));
                 let xr = Rect::new(tile.right() - xs - inset, tile.y + inset, xs, xs);
-                let x_hot = xr.contains(ctx.mouse.0, ctx.mouse.1);
+                let x_hot = ctx.mouse.over(xr);
                 // A destructive control: hovering takes the close glyph's
                 // severity colour, not the plain hover.
                 let c = if x_hot { wc_close } else { wc_idle };
@@ -3222,7 +3222,7 @@ impl Settings {
         ];
         for ((cx, cy), dir) in ends {
             let pr = Rect::new(cx - plus / 2.0, cy - plus / 2.0, plus, plus);
-            let hot = pr.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(pr);
             let c = if hot { wc_hover } else { wc_idle };
             ctx.dl.rect(pr.x, pr.y, pr.w, pr.h, bed);
             ctx.dl.rect_outline(pr.x, pr.y, pr.w, pr.h, ring_w, c);
@@ -3317,7 +3317,7 @@ impl Settings {
         act: Act,
     ) -> nacelle::object::button::ButtonState {
         // With an open dropdown only its items react to the mouse.
-        let hover = self.dropdown.is_none() && r.contains(ctx.mouse.0, ctx.mouse.1);
+        let hover = self.dropdown.is_none() && ctx.mouse.over(r);
         let flash = self.flashing(act);
         // An anchor whose list is unfolded is the one button on the
         // page that is switched ON, and the ladder already has the rung
@@ -3636,26 +3636,22 @@ mod tests {
         // Flush under the anchor, and the names start under the DOOR —
         // one column, in the order the decision names.
         assert!(door.y < first.y, "the door does not stand above the themes");
-        // The list is a FRAMED box now (libnacelle 0acb873: it stands on
-        // elev.popover, bedded and ringed like the window). The box still
-        // hangs from the door's edge; the first name hangs from the BOX's
-        // inner edge, which is the box's own pad below it. Written as the
-        // token and not as the 8.35 px it currently bakes to: a theme that
-        // moves the pad moves this gap, and a number here would turn that
-        // into a failure instead of a following.
-        // Two terms, and both are the toolkit's: `menu.anchor_gap` is the air
-        // between the door and the box (libnacelle d7e7f54 — flush, the two
-        // frames shared an edge and each one's rounding cancelled the
-        // other's), and `menu.pad` is the box's own inside. Written as the
-        // tokens: a theme that moves either moves this gap, and a number here
-        // would turn that into a failure instead of a following.
+        // ONE term, and it is the toolkit's. There is no box any more
+        // (libnacelle a449763: a drop-down is a column of anchor-dressed
+        // elements on a blind, not a container with rows inside), so there
+        // is no inner pad to add — the first element simply hangs
+        // `menu.anchor_gap` under the door, the same air that stands
+        // between every pair of elements below it.
+        //
+        // Written as the token and not as the 2.7 px it bakes to: a theme
+        // that widens the air widens this gap, and a number here would turn
+        // that into a failure instead of a following.
         let t = nacelle::theme::resolved();
         let px = |n: &str| t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("{n} must exist")));
-        let want = px("menu.anchor_gap") + px("menu.pad");
+        let want = px("menu.anchor_gap");
         assert!(
             (first.y - door.bottom() - want).abs() < 0.51,
-            "the first theme hangs {} px under the door, not the {want} px of \
-             air plus the box's own pad",
+            "the first theme hangs {} px under the door, not the {want} px of air",
             first.y - door.bottom()
         );
         assert!(
@@ -4275,7 +4271,7 @@ mod tests {
             w: h * 16.0 / 9.0,
             h,
             t: 0.0,
-            mouse: (-1.0, -1.0),
+            mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale,
             panel_scale: 1.0,
