@@ -3636,9 +3636,19 @@ mod tests {
         // Flush under the anchor, and the names start under the DOOR —
         // one column, in the order the decision names.
         assert!(door.y < first.y, "the door does not stand above the themes");
+        // The list is a FRAMED box now (libnacelle 0acb873: it stands on
+        // elev.popover, bedded and ringed like the window). The box still
+        // hangs from the door's edge; the first name hangs from the BOX's
+        // inner edge, which is the box's own pad below it. Written as the
+        // token and not as the 8.35 px it currently bakes to: a theme that
+        // moves the pad moves this gap, and a number here would turn that
+        // into a failure instead of a following.
+        let pad = nacelle::theme::resolved()
+            .px(nacelle::theme::id("menu.pad").expect("menu.pad must exist"));
         assert!(
-            (first.y - door.bottom()).abs() < 0.51,
-            "the first theme does not hang from the door's edge"
+            (first.y - door.bottom() - pad).abs() < 0.51,
+            "the first theme hangs {} px under the door, not the box's pad of {pad} px",
+            first.y - door.bottom()
         );
         assert!(
             (door.h - first.h).abs() > 1.0,
