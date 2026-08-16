@@ -150,6 +150,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "block"
@@ -482,7 +485,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -770,6 +773,8 @@ dependencies = [
  "fontdue",
  "libc",
  "rhai",
+ "ron",
+ "serde",
  "serde_json",
  "taffy",
  "unicode-segmentation",
@@ -858,6 +863,8 @@ dependencies = [
  "nacelle-widget-search",
  "nacelle-widget-shell",
  "raw-window-handle",
+ "ron",
+ "serde",
  "smithay-clipboard",
  "sysinfo",
  "vte",
@@ -956,6 +963,7 @@ version = "0.1.0"
 source = "git+https://github.com/JOCKER3201/nacelle-addons#c109821ff282c9f2e19c15e05d36c8fb526374b3"
 dependencies = [
  "libnacelle",
+ "serde",
 ]
 
 [[package]]
@@ -973,6 +981,7 @@ source = "git+https://github.com/JOCKER3201/nacelle-addons#c109821ff282c9f2e19c1
 dependencies = [
  "libnacelle",
  "nacelle-launcher-core",
+ "serde",
 ]
 
 [[package]]
@@ -1319,6 +1328,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
+dependencies = [
+ "bitflags 2.13.1",
+ "once_cell",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1347,7 +1370,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1762,6 +1785,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2110,7 +2139,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

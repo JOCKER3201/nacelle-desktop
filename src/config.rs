@@ -2,23 +2,53 @@
 //!
 //! Configuration is read as an XDG cascade — the arrangement GTK, Qt,
 //! libadwaita and COSMIC all use. The user's own file comes first and
-//! the system ones after it, key by key: a key the user never set is
-//! answered by the system file, so a distribution or an administrator
-//! can change a default without anything being copied into anybody's
-//! home directory.
+//! the system ones after it, FIELD by field: a setting the user never
+//! made is answered by the system file, so a distribution or an
+//! administrator can change a default without anything being copied
+//! into anybody's home directory.
 //!
-//!   $XDG_CONFIG_HOME/nacelle/nacelle-desktop.conf  — the user's own (Key=Value)
+//!   $XDG_CONFIG_HOME/nacelle/nacelle-desktop.ron  — the user's own
 //!       (~/.config/nacelle/… when the variable is unset)
-//!   $XDG_CONFIG_DIRS/nacelle/nacelle-desktop.conf  — the system defaults
+//!   $XDG_CONFIG_DIRS/nacelle/nacelle-desktop.ron  — the system defaults
 //!       (/etc/xdg/nacelle/… when the variable is unset)
 //!   <either of those>/shellrc                     — bash startup file, first one found
 //!
 //! The FOLDER is the family and the FILE is the program: `nacelle-ai`
 //! reads these very directories, so naming them after one member was an
-//! accident rather than a design, and `nacelle/nacelle-ai.conf` can
-//! stand beside `nacelle/nacelle-desktop.conf` the day it is needed.
+//! accident rather than a design, and `nacelle/nacelle-ai.ron` can
+//! stand beside `nacelle/nacelle-desktop.ron` the day it is needed.
 //! Both search paths still carry the folder's old name one rung lower —
 //! see [`FAMILY_DIR`] and [`LEGACY_FAMILY_DIR`].
+//!
+//! The file is Rusty Object Notation and its shape is a TYPE, in
+//! [`model`]: the parser is derived from it, so every default a setting
+//! can fall back to is written once, beside the field, instead of at
+//! each `unwrap_or` that read it. [`model::DesktopConf`] says what the
+//! whole of it looks like.
+//!
+//! `shellrc` is the exception that stays as it is, and is not an
+//! inconsistency: it is a bash startup file — the SHELL consumes it,
+//! not this program — and RON is not a language bash reads. "All the
+//! configuration in RON" is about configuration, not about every file
+//! that happens to lie in the configuration directory. Theme files
+//! (`*.theme`) stay in their own format for the mirror-image reason:
+//! their master is a schema and a document for a person to read, with
+//! expressions over palette seeds that RON has no way to carry.
+//!
+//! A `nacelle-desktop.conf` in the old `Key=Value` format is still
+//! read where no `.ron` stands beside it, and is never rewritten,
+//! moved or deleted. A format change that loses somebody's settings is
+//! not a format change, it is a bug with a version number.
+//!
+//! The user has ONE configuration, and it may only live in one place.
+//! The first setting changed writes `nacelle/nacelle-desktop.ron` from
+//! everything the user's own files say — including a file under the
+//! folder's OLD name — and from then on that file answers alone. The
+//! old one stays on disk untouched and stops being consulted, which is
+//! what makes taking a field back out of the new file mean something:
+//! with two files of the user's own in the cascade, removing a field
+//! from the first merely hands the question to the second, which is a
+//! reset that does nothing and says nothing.
 //!
 //! Writes go to the user's directory and nowhere else, and only when
 //! the user changes something: the program creates no directory and
@@ -61,38 +91,55 @@
 //! re-adapted to the window continuously (edge-anchored transform on
 //! landscape, a vertical restack on portrait).
 //!
-//! In nacelle-desktop.conf the Theme= option picks one of the engine's
-//! themes; the Layaut= and Sounds= options name a file from layauts/
-//! (without an extension) and a directory from sounds/. Empty values or
-//! missing options = defaults built into the code.
+//! In nacelle-desktop.ron `theme:` picks one of the engine's themes;
+//! `layaut:` and `sounds:` name a file from layauts/ (without an
+//! extension) and a directory from sounds/. A field that is not there
+//! is answered by the system file, and after that by the defaults the
+//! model carries.
 //!
-//! Variant= is the second half of the colour axis: it names one of the
+//! `variant:` is the second half of the colour axis: it names one of the
 //! theme's contrast variants — hc, the high-contrast one, is the variant
-//! the engine's master ships — and an empty or missing value is the plain
-//! theme. It is a key of its own rather than part of Theme= because the
+//! the engine's master ships — and `Off` or nothing is the plain theme.
+//! It is a field of its own rather than part of `theme:` because the
 //! two are independent: a variant is an accessibility setting, and liking
 //! a colour is not a reason to give one up.
 //!
 //! A machine with several screens gives each of them a desktop of its
-//! own, so Layaut= is only the DEFAULT arrangement. A screen takes a
+//! own, so `layaut:` is only the DEFAULT arrangement. A screen takes a
 //! layaut of its own when the file names it by connector:
 //!
-//!   Layaut=console          # every screen not named below
-//!   Layaut[DP-1]=cockpit    # the monitor on DisplayPort 1
-//!   Layaut[eDP-1]=panel     # the laptop's own screen
+//!   (
+//!       layaut: Named("console"),          // every screen not named below
+//!       screens: {
+//!           "DP-1": Named("cockpit"),      // the monitor on DisplayPort 1
+//!           "eDP-1": Named("panel"),       // the laptop's own screen
+//!       },
+//!   )
 //!
 //! The connector — DP-1, HDMI-A-1, eDP-1 — is what the display server
 //! calls the socket a screen hangs off, and the program prints it for
 //! every screen at startup. It is the only stable name a screen has:
 //! the order screens come up in depends on which monitor is switched
 //! on first, so a number in that order would name a different screen
-//! every morning. Case is not significant, an empty value means "no
-//! layaut of its own", and a name no layauts/ file answers to costs
-//! that screen nothing but a line in the log — it takes the default.
+//! every morning. Case is not significant, `Off` means "no layaut of
+//! its own" and outranks a system file that gives it one, and a name no
+//! layauts/ file answers to costs that screen nothing but a line in the
+//! log — it takes the default.
+
+pub mod model;
 
 use crate::widgets::PanelSpec;
+use model::{Choice, DesktopConf, Layered};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+
+// The ranges and the list of names belong to the settings themselves,
+// so they live beside the fields they bound. Re-exported because the
+// settings window and the grid editor ask this module for them, and
+// where a constant is declared is not their business. The gutter's own
+// bound is not among them: it is applied where the field is read and
+// nothing outside asks for it.
+pub use model::{COLOR_SPACES, GRID_MAX, GRID_MIN};
 
 
 
@@ -177,6 +224,7 @@ pub fn load() -> (Config, Option<String>) {
     // harmlessly, since nothing else reads them. Retiring them would
     // mean editing a file this change promised not to touch.
     migrate_look_style_in(&config_dir().join(CONF_FILE), &asset_roots());
+    install_addon_settings();
     // The registry must exist before anything parses a layout: panels
     // are resolved by name against it.
     let roots = asset_roots();
@@ -222,6 +270,180 @@ pub fn load() -> (Config, Option<String>) {
     let (cfg, warning) = resolve();
     nacelle::base::set_panel_sizes(&cfg.layout.sizes);
     (cfg, warning)
+}
+
+/// Tells the toolkit where an ADDON's own settings live, before a
+/// single widget exists to ask for any.
+///
+/// Until this is called every such read answers `Origin::Refused`, and
+/// a refusal is deliberately silent — it means a caller asked for a
+/// name that is not a name, which is a programming error rather than
+/// anything a user did. So leaving it uncalled did not merely disable
+/// the addon-settings half, it disabled it WITHOUT A WORD: a user
+/// writes `~/.config/nacelle/addons/search.ron`, the addon goes on
+/// running on the values baked into it, and nothing anywhere connects
+/// the two. That is the exact failure this format was chosen to make
+/// impossible, so the call has a name and a test of its own.
+///
+/// The FAMILY name and only it. The program's own configuration search
+/// path carries the folder's old name behind the new one because files
+/// were already sitting there; addon settings are new with this
+/// change, so there is no such directory in the world to support, and
+/// inventing one would be a rung of the search path nothing can ever
+/// be found on.
+///
+/// It also READS, once, everything standing in those directories —
+/// [`prime_addon_settings`] carries the whole of why.
+fn install_addon_settings() {
+    let roots = nacelle::assets::AssetRoots::xdg_config(FAMILY_DIR);
+    // Kept before the roots are handed over: the toolkit deliberately
+    // answers no path back, so the one moment this side can see the
+    // search order is while it is still holding it.
+    let dirs = roots.read.clone();
+    nacelle::settings::install(roots);
+    prime_addon_settings(&dirs);
+}
+
+/// The sub-directory addon settings stand in, under the configuration
+/// directory. The toolkit's own name for them, written once here so the
+/// window and the walk below cannot drift from what is installed.
+const ADDON_SETTINGS_SUB: &str = "addons";
+
+/// Where an addon settings file goes on THIS machine.
+///
+/// The one directory the program would write to, which is also the one
+/// the settings window tells the user about — a page reporting that a
+/// file is unreadable is no use to somebody who does not know where
+/// files go. The toolkit will not answer this (handing out a path is
+/// the one thing it does not do), and it does not have to: the embedder
+/// chose the directory, so the embedder can name it.
+pub fn addon_settings_dir() -> PathBuf {
+    config_dir().join(ADDON_SETTINGS_SUB)
+}
+
+/// How many settings files one directory is walked for. A machine has
+/// sixteen addons; the bound is against a directory somebody has
+/// emptied a download into, and reaching it costs a report that stops
+/// early rather than a startup that does not finish.
+const ADDON_SETTINGS_MAX: usize = 256;
+
+/// Reads every addon settings file that exists, once, at startup.
+///
+/// Nothing here is needed to make a widget work: an addon reads its own
+/// file the first time it draws, and the toolkit caches it, so this walk
+/// changes no value anywhere. What it changes is WHEN a file that
+/// cannot be used is known about, and that turned out to be the whole
+/// difference between a report and a dead channel.
+///
+/// `nacelle::settings::problems()` fills as a side effect of somebody
+/// reading. [`resolve`] is where that list becomes the notice on
+/// screen, and it runs at the end of [`load`] — before the first widget
+/// is built, so on the one run that matters, the first frame after the
+/// user edited the file, the list was always empty. An addon that is on
+/// no board never reads at all, and its file stayed unmentioned for as
+/// long as it stayed off the boards: the user's edit did nothing, and
+/// nothing said why.
+///
+/// So the host asks for what is THERE rather than waiting to be asked.
+/// Both arrangements the format has are walked — `<addon>.ron`, and
+/// `<addon>/<file>.ron` for an addon that needs more than one — and
+/// only `.ron` is looked at, so the `.ron.bak` the toolkit leaves
+/// beside a file it overwrites is not reported as a second broken copy
+/// of the same settings.
+///
+/// A name the toolkit refuses is the one case that gets a line of its
+/// own. It is a file the user wrote and NOTHING can ever read — no
+/// addon can ask for a name that is not a plain name — so the silence
+/// would be permanent, and it is the only failure here that is about
+/// the name of the file rather than what is inside it.
+///
+/// Which is exactly why a name beginning with a dot is passed over
+/// without a word. `.#filesystem.ron` is not somebody's settings, it is
+/// the lock an editor leaves while that file is OPEN — so the one
+/// moment this walk would shout about it is the moment the user is
+/// sitting in the file it names. A hidden file could never be read
+/// either way, and being quiet about a name nobody chose is cheaper
+/// than crying wolf at the one who is mid-edit.
+fn prime_addon_settings(dirs: &[PathBuf]) {
+    let mut seen = 0usize;
+    for dir in dirs {
+        let addons = dir.join(ADDON_SETTINGS_SUB);
+        let Ok(entries) = std::fs::read_dir(&addons) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if seen >= ADDON_SETTINGS_MAX {
+                return;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let Some(addon) = stem_of(&path, None) else { continue };
+                let Ok(members) = std::fs::read_dir(&path) else { continue };
+                for member in members.flatten() {
+                    if seen >= ADDON_SETTINGS_MAX {
+                        return;
+                    }
+                    let member = member.path();
+                    if let Some(file) = stem_of(&member, Some("ron")) {
+                        seen += 1;
+                        prime_one(&addon, &file, &member);
+                    }
+                }
+            } else if let Some(addon) = stem_of(&path, Some("ron")) {
+                seen += 1;
+                prime_one(&addon, "", &path);
+            }
+        }
+    }
+}
+
+/// The file's stem, when its extension is the one asked for (or when
+/// none is asked for, as for a directory). `None` for anything whose
+/// name is not text at all, and for a hidden one — see
+/// [`prime_addon_settings`] for the whole of why a dot is passed over.
+fn stem_of(path: &Path, ext: Option<&str>) -> Option<String> {
+    if path.file_name().and_then(|n| n.to_str())?.starts_with('.') {
+        return None;
+    }
+    if let Some(ext) = ext {
+        if path.extension().and_then(|e| e.to_str()) != Some(ext) {
+            return None;
+        }
+    }
+    path.file_stem().and_then(|s| s.to_str()).map(String::from)
+}
+
+/// One file, read and thrown away: what is wanted is the toolkit's
+/// verdict on it, which lands in `problems()` for the notice and the
+/// settings window to find.
+///
+/// Except for the one verdict the toolkit cannot put there. A name it
+/// REFUSES is refused before any file is opened, so nothing is read,
+/// nothing is parsed and `problems()` stays empty — and this used to be
+/// a line on stderr and no more. That is the argument the toolkit
+/// itself raises against a stderr-only report, in the very module that
+/// fills `problems()`: a desktop session has no stderr open, and a
+/// settings window announcing that every file loads while two of the
+/// user's files are being ignored is worse than one that says nothing.
+///
+/// And here the silence is PERMANENT. A file that does not parse is
+/// named the moment some addon asks for it; a file whose NAME no addon
+/// can ask for is never asked for by anything, ever, so the day the
+/// user renames it is the only day they will find out.
+///
+/// So it goes onto the toolkit's own list through `settings::report`,
+/// which exists for precisely this and which the host is the only side
+/// able to call: the module discovers every other problem by somebody
+/// ASKING for a file, and this is the one nobody will ever ask for. The
+/// stderr line stays, because a headless start has no window.
+fn prime_one(addon: &str, file: &str, path: &Path) {
+    if nacelle::settings::text(addon, file).1 == nacelle::settings::Origin::Refused {
+        let message = "is not a name any addon can ask for \u{2014} a settings file is \
+                       <addon>.ron in lower-case letters, digits, `_` and `-`, so this \
+                       file will never be read by anything";
+        eprintln!("nacelle-desktop: {} {message}", path.display());
+        nacelle::settings::report(path.to_path_buf(), message.to_string());
+    }
 }
 
 /// Layout by name, through the toolkit's store.
@@ -348,48 +570,48 @@ fn migrate_widgets_to_addons(roots: &AssetRoots) {
 
 
 
-/// The name of the theme the new engine is to load: `Theme=` in
-/// nacelle-desktop.conf, or the built-in master when nothing is set.
+/// The name of the theme the new engine is to load: `theme:` in
+/// nacelle-desktop.ron, or the built-in master when nothing is set.
 ///
 /// A theme name is a bare identifier — the engine refuses a path, because a
 /// `[meta] base` that could name `../../etc/passwd` would be a file-read
 /// primitive.
 pub fn current_engine_theme() -> Option<String> {
-    conf_kv()
-        .get("Theme")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    conf().theme.name().map(str::to_string)
 }
 
+/// Writes `theme:`. An empty name CLEARS the field — the settings
+/// window's own way of saying "no choice of mine", which lets the
+/// system file answer again.
 pub fn set_engine_theme(name: &str) {
-    set_conf_kv("Theme", name);
+    update_conf(|c| c.theme = Choice::named(name));
 }
 
-/// The contrast variant to select on top of the theme: `Variant=` in
-/// nacelle-desktop.conf. `None` — the ordinary case — is the plain theme.
+/// The contrast variant to select on top of the theme: `variant:` in
+/// nacelle-desktop.ron. `None` — the ordinary case — is the plain theme.
 ///
 /// `hc` is the one the engine's master declares, and every theme resolves it:
 /// a theme that declares no `[variant.*]` of its own inherits the master's,
 /// so high contrast does not disappear as a side effect of choosing a colour.
 pub fn current_engine_variant() -> Option<String> {
-    conf_kv()
-        .get("Variant")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    conf().variant.name().map(str::to_string)
 }
 
-/// Writes `Variant=`. `None` writes it EMPTY rather than dropping the line,
-/// because an empty value is an explicit off that outranks a system file
-/// naming one, while a missing key would inherit it (see [`cascade_kv`]).
+/// Writes `variant:`. `None` writes [`Choice::Off`] rather than
+/// dropping the field, because a contrast switch turned off is an
+/// explicit off that outranks a system file naming one — where a
+/// missing field would inherit it. Taking the setting back altogether
+/// is [`clear_look_and_feel`]'s job, and the difference between the
+/// two is the whole reason the third state exists.
 ///
 /// Read here and written elsewhere: the settings screen's contrast switch
 /// calls this and then re-applies the configuration, exactly as its theme
 /// list already calls [`set_engine_theme`]. Until that switch exists the
-/// user writes the line by hand — `allow(dead_code)` says only that, and
+/// user writes the field by hand — `allow(dead_code)` says only that, and
 /// comes off the day it is called.
 #[allow(dead_code)]
 pub fn set_engine_variant(name: Option<&str>) {
-    set_conf_kv("Variant", name.unwrap_or(""));
+    update_conf(|c| c.variant = Choice::or_off(name));
 }
 
 /// The layout half of the configuration: `Layaut=` names one, and
@@ -418,55 +640,12 @@ fn load_layaut_or_default(name: &str, warning: &mut Option<String>) -> (String, 
     ("default".to_string(), layaut_by_name("default").unwrap_or_default())
 }
 
-/// The configuration key one screen's layaut is written under:
-/// `Layaut[DP-1]`. None when the text is not a connector name — a key
-/// nothing could ever match a screen to is not worth writing, and
-/// keeping brackets and separators out of it is what keeps the file
-/// parseable by the same two rules as every other line.
+/// The key one screen's layaut is written under in `screens:` — the
+/// connector name, trimmed. None when the text is not a connector name:
+/// a key nothing could ever match a screen to is not worth writing.
 fn screen_layaut_key(connector: &str) -> Option<String> {
     let c = connector.trim();
-    (crate::screens::connector_of(c).as_deref() == Some(c)).then(|| format!("Layaut[{c}]"))
-}
-
-/// Every connector→layaut assignment in an already-cascaded
-/// configuration map, in connector order.
-///
-/// Takes the map rather than reading the files, so a test hands it
-/// three lines and touches nothing process-wide.
-///
-/// A value is carried through as written and NOT checked against the
-/// installed layauts here: whether it names something real is
-/// [`choose_layaut`]'s judgement, which is also the only place that
-/// can say so in the log. Dropping it here would lose the sentence.
-fn screen_layauts_in(kv: &HashMap<String, String>) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (key, value) in kv {
-        // `Layaut [DP-1]` reads as `Layaut[DP-1]`: this is a file
-        // people type into, and a space before the bracket is not a
-        // different intention.
-        let Some(inner) = key
-            .trim()
-            .strip_prefix("Layaut")
-            .map(str::trim_start)
-            .and_then(|rest| rest.strip_prefix('['))
-            .and_then(|rest| rest.strip_suffix(']'))
-        else {
-            continue;
-        };
-        let inner = inner.trim();
-        if crate::screens::connector_of(inner).as_deref() != Some(inner) {
-            continue;
-        }
-        let name = value.trim();
-        // An empty value is a value: it is how the user's own file
-        // says "this screen has no layaut of its own" over a system
-        // file that gave it one, exactly as ColorLut= says "off".
-        if name.is_empty() {
-            continue;
-        }
-        out.insert(inner.to_string(), name.to_string());
-    }
-    out
+    (crate::screens::connector_of(c).as_deref() == Some(c)).then(|| c.to_string())
 }
 
 /// What one screen's layaut resolves to, and the one sentence the log
@@ -526,7 +705,7 @@ fn choose_layaut(
 /// user's file laid over the system ones.
 #[allow(dead_code)]
 pub fn screen_layauts() -> BTreeMap<String, String> {
-    screen_layauts_in(&conf_kv())
+    conf().screens()
 }
 
 /// The layaut assigned to one connector, if any. Case is not
@@ -539,9 +718,10 @@ pub fn layaut_for_connector(connector: &str) -> Option<String> {
         .map(|(_, v)| v)
 }
 
-/// Assigns a layaut to a connector. An empty name CLEARS the
-/// assignment — written as an empty value rather than deleted, so the
-/// user's file also overrules one a system file makes.
+/// Assigns a layaut to a connector. An empty name switches the screen
+/// OFF — written as [`Choice::Off`] rather than dropped, so the user's
+/// file also overrules an assignment a system file makes. Removing the
+/// entry outright is [`clear_screen_layauts`].
 #[allow(dead_code)]
 pub fn set_layaut_for_connector(connector: &str, name: &str) {
     let Some(key) = screen_layaut_key(connector) else {
@@ -551,7 +731,9 @@ pub fn set_layaut_for_connector(connector: &str, name: &str) {
         );
         return;
     };
-    set_conf_kv(&key, name.trim());
+    update_conf(|c| {
+        c.screens.insert(key, Choice::or_off(Some(name)));
+    });
 }
 
 /// The NAME of the layaut a screen takes, by the connector it hangs
@@ -645,6 +827,12 @@ fn look_bundled_layaut(roots: &AssetRoots, name: &str) -> Option<LookLayaut> {
 /// `Theme=default` is written only when `Theme=` is unset. A file
 /// without the old keys is left untouched, which is what makes this
 /// run-once.
+///
+/// `Key=Value` throughout, and it stays that way: those two keys only
+/// ever existed in that format, so the file this rewrites is by
+/// definition an old one. A `.ron` beside it takes the whole directory
+/// over anyway (see [`read_conf_dir`]), which is what stops the two
+/// from ever contradicting each other.
 fn migrate_look_style_in(conf: &Path, roots: &AssetRoots) {
     let Ok(text) = std::fs::read_to_string(conf) else { return };
     let kv = parse_kv(&text);
@@ -686,7 +874,7 @@ fn migrate_look_style_in(conf: &Path, roots: &AssetRoots) {
     }
 
     /// Sets Key=Value on the lines of the file being rewritten,
-    /// preserving everything else — set_conf_kv, minus the filesystem.
+    /// preserving everything else — one line, minus the filesystem.
     fn set_line(lines: &mut Vec<String>, key: &str, value: &str) {
         let prefix = format!("{key}=");
         for line in lines.iter_mut() {
@@ -743,6 +931,38 @@ fn migrate_look_style_in(conf: &Path, roots: &AssetRoots) {
 pub fn resolve() -> (Config, Option<String>) {
     let mut warning: Option<String> = None;
     let layout = resolve_layout(&mut warning);
+    // BEFORE anything else has a chance to fill this in. A file that
+    // did not parse explains every other surprise the user is about to
+    // have — the theme, the layaut and the fonts all reverted at once —
+    // and a warning about one of the symptoms would send them looking
+    // in the wrong place.
+    if let Some(bad) = conf_error() {
+        warning = Some(bad);
+    }
+    // An addon whose settings file the host could not use. Second, so
+    // it does not stand in front of a broken program file — that one
+    // explains more — and ahead of the theme engine's own remarks,
+    // because this is a file the user wrote and those are usually about
+    // a file they did not.
+    if let Some(p) = nacelle::settings::problems().first() {
+        warning.get_or_insert_with(|| {
+            // An entry with no addon on it belongs to no addon — it is
+            // a file whose NAME is not a name — so the clause about an
+            // addon running on its defaults would be about nobody.
+            let fate = if p.addon.is_empty() {
+                ""
+            } else {
+                " \u{2014} the addon is running on its own defaults"
+            };
+            format!("{}: {}{fate}", p.path.display(), p.message)
+        });
+    }
+    // Last, so it wins: this one is not a description of a state the
+    // user can go and look at, it is the only notice of something that
+    // has already happened to their file.
+    if let Some(rescued) = take_conf_rescued() {
+        warning = Some(rescued);
+    }
     // Reload the engine: this runs on every configuration change, and Theme=
     // may be what changed. Parse, cascade, resolve and bake is under 5 ms for
     // the whole catalogue, so re-doing it on a settings click costs nothing a
@@ -857,14 +1077,172 @@ fn safe_component(name: &str) -> Option<String> {
 }
 
 /// The effective configuration: the user's file laid over the system
-/// ones, key by key.
-fn conf_kv() -> HashMap<String, String> {
-    cascade_kv(&conf_files())
+/// ones, field by field.
+fn conf() -> DesktopConf {
+    cascade_conf(&conf_dirs())
 }
 
-/// Every `nacelle-desktop.conf` that takes part, most specific first.
-fn conf_files() -> Vec<PathBuf> {
-    config_dirs().into_iter().map(|d| d.join(CONF_FILE)).collect()
+/// The user's OWN configuration directories, most specific first: the
+/// family folder and, one rung behind it, the folder's old name. The
+/// system end is not here, and that is the point — these are the two
+/// places a file of the USER's can be, which is what both the
+/// migration and the supersession below need to know.
+fn user_conf_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    push_level(&mut out, &config_home());
+    out
+}
+
+/// The directories the configuration DOCUMENT is read from, which is
+/// [`config_dirs`] with one rung possibly taken out.
+///
+/// A user has ONE configuration. Once `~/.config/nacelle/nacelle-desktop.ron`
+/// answers, the same user's old-named folder stops being consulted for
+/// it: that file can only have been written by [`update_conf`], which
+/// seeds from both folders, so everything the old one said is already
+/// in it.
+///
+/// Leaving it in was a reset that could not work, and the failure was
+/// silent. Reset REMOVES the user's fields so the system file can
+/// answer again; with a second file of the user's own still standing
+/// behind the first, the removal simply handed the question to it, and
+/// the theme, the layaut and the sound set came back unchanged with
+/// nothing said. Rewriting or deleting that file instead is the one
+/// thing this change promised not to do — so it is superseded rather
+/// than touched, and it stays on disk exactly as it was.
+///
+/// The `.ron` must PARSE, not merely exist. A file that does not parse
+/// supersedes nothing: its own contents are already unreachable, and
+/// taking the older file away as well would turn one broken bracket
+/// into the loss of both.
+///
+/// And the OLD file has to have been readable too, which is the half
+/// that was missing. The sentence above — everything the old one said
+/// is already in the new one — is a claim about a file [`update_conf`]
+/// managed to READ, and it is false exactly when it could not: an old
+/// file behind the wrong permissions, or a bracket short, contributes
+/// nothing to the document that gets written, and dropping its
+/// directory afterwards is what turns "not read this once" into "never
+/// read again". The file is still on disk, so the user repairs the
+/// typo and waits for their settings to come back; superseded, they
+/// never do, and nothing on screen connects the two.
+///
+/// So an unreadable old file KEEPS its rung. It contributes nothing
+/// while it stays broken — `cascade_conf` reads past it and reports it,
+/// which is also the sentence that was missing — and everything the
+/// moment it is repaired. The reset the supersession exists for is
+/// unharmed either way: the old folder is out of the cascade AND out of
+/// the seeding, so a field taken out of the new document stays out.
+///
+/// What the answer may NOT be derived from is the state of the old file
+/// now. That was the first repair and it is wrong in the one direction
+/// that matters: the file is unreadable when the carry is attempted, so
+/// its rung is kept — and then the user repairs the typo, the file
+/// parses, and the same rule retires it on the next read without a
+/// single byte of it ever having been carried anywhere. The moment the
+/// settings would have come back is the moment they are taken away.
+/// A condition that heals cannot record an event that did not happen.
+///
+/// So the event is written down when it happens, and read here. See
+/// [`CONF_RON_CARRIED`].
+///
+/// That costs one parse of a small file per call. `cascade_conf` is
+/// about to parse the same file again, and the alternative — passing
+/// the answer down through a function whose whole virtue is that it
+/// takes its directories and reads no environment — would buy a few
+/// microseconds with the one property that makes it testable.
+fn conf_dirs() -> Vec<PathBuf> {
+    let mut dirs = config_dirs();
+    let old = config_home().join(LEGACY_FAMILY_DIR);
+    if !dirs.iter().any(|d| *d == old) {
+        return dirs;
+    }
+    // The new file must PARSE as well, and not merely stand there: a
+    // file that does not parse is already unreachable, and taking the
+    // older one away as well would turn one broken bracket into the
+    // loss of both. The mark says the carry happened; this says there
+    // is still something to have carried it into.
+    if !old_folder_carried() || !matches!(read_conf_dir(&config_dir()), Ok(Some(_))) {
+        return dirs;
+    }
+    warn_once_about_superseded(&old);
+    dirs.retain(|d| *d != old);
+    dirs
+}
+
+/// Whether the user's old-named folder has been carried across.
+///
+/// A file rather than a comparison of the two documents. The comparison
+/// was tried and cannot work: "the new one already says everything the
+/// old one says" is exactly what LOOK AND FEEL RESET makes false on
+/// purpose — the reset REMOVES fields — so a rule built on it would
+/// bring the old folder back the instant somebody reset, and hand the
+/// removal straight back to the file it was supposed to get past.
+///
+/// It is a mark and not a copy: deleting it loses nothing, and what it
+/// costs is one directory being read again. That is the safe direction,
+/// which is the reason it is a separate file at all — the alternative,
+/// a field inside `nacelle-desktop.ron`, is bookkeeping in a document
+/// the user edits by hand and would be answering a question about the
+/// migration in the middle of their settings.
+fn old_folder_carried() -> bool {
+    config_dir().join(CONF_RON_CARRIED).is_file()
+}
+
+/// Writes that mark, once the carry has actually happened.
+///
+/// Best effort in both directions: a mark that cannot be written costs
+/// one folder being read that need not be, which is the direction to
+/// fail in, and it is not worth a sentence to anybody.
+fn mark_old_folder_carried() {
+    // Nothing to retire, nothing to say: a machine that never had the
+    // old folder would otherwise get a mark about a directory it has
+    // never seen, which is litter with a sentence on it.
+    if !config_home().join(LEGACY_FAMILY_DIR).is_dir() {
+        return;
+    }
+    let mark = config_dir().join(CONF_RON_CARRIED);
+    if mark.exists() {
+        return;
+    }
+    let _ = std::fs::write(
+        &mark,
+        format!(
+            "// The settings that were in {} have been carried into {}, which\n\
+             // answers for them now. That folder is no longer read for them.\n\
+             //\n\
+             // Nothing was deleted, and this file holds no settings. Delete it\n\
+             // and the old folder is read again, one rung behind this one.\n",
+            config_home().join(LEGACY_FAMILY_DIR).display(),
+            config_dir().join(CONF_RON).display(),
+        ),
+    );
+}
+
+/// Names the user's old-named folder as no longer answering for the
+/// configuration, once.
+///
+/// Said in its own line rather than folded into
+/// [`warn_once_about_legacy`], which is about the FOLDER and stays
+/// true: the shell startup file and the data tree are still read from
+/// there. This one is about the configuration document alone, and it
+/// is the more specific of the two.
+static SUPERSEDED_SAID: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_once_about_superseded(old: &Path) -> bool {
+    use std::sync::atomic::Ordering;
+    if SUPERSEDED_SAID.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    eprintln!(
+        "nacelle-desktop: the settings in {} are no longer read \u{2014} they were \
+         carried into {} the first time a setting was changed, and that file \
+         answers for them now. Nothing has been deleted",
+        old.display(),
+        config_dir().join(CONF_RON).display()
+    );
+    true
 }
 
 /// Sub-directories named `sub` that exist, in search order.
@@ -888,6 +1266,80 @@ fn find_asset(sub: &str, rel: &str) -> Option<PathBuf> {
 
 
 /// Name of the main configuration file.
+const CONF_RON: &str = "nacelle-desktop.ron";
+
+/// The copy kept of whatever stood there before a write.
+///
+/// RON is parsed ALL OR NOTHING, where `Key=Value` lost one line per
+/// mistake — so the cost of a bad write is the whole file rather than
+/// one setting, and a file that cannot be lost is the only honest
+/// answer to that. The write itself lands through a temporary name, so
+/// a crash half way through leaves the old file whole rather than
+/// truncated.
+///
+/// The copy is taken of a file this program did not write, and only of
+/// one — [`ours`] carries why a copy taken on every write is no copy at
+/// all.
+const CONF_RON_BACKUP: &str = "nacelle-desktop.ron.bak";
+
+/// The middle of a temporary name, not the whole of one: what
+/// [`claim_tmp`] builds is `<file>.new.<pid>.<n>`, because a single
+/// fixed name is a name two processes share.
+const CONF_RON_TMP: &str = ".new.";
+
+/// The mark saying the user's old-named folder has been carried into
+/// the new one, and may stop being read for the configuration.
+///
+/// It records an EVENT — a write that seeded from that folder and
+/// succeeded — because the alternative, asking what the two files look
+/// like now, cannot tell "everything was carried" from "nothing could
+/// be read and nothing was". See [`old_folder_carried`].
+const CONF_RON_CARRIED: &str = "nacelle-desktop.ron.carried";
+
+/// The rescue copy of a file that could not be parsed, taken the moment
+/// this program decided to replace it.
+///
+/// [`CONF_RON_BACKUP`] cannot do this job and it is worth saying why,
+/// because it looks as though it could. That copy is one generation
+/// deep and is retaken on EVERY write, and the writes come in bursts:
+/// one arrow key on the volume slider is one write. So a user whose
+/// file is a bracket short, who then nudges a slider twice, has a live
+/// file holding one setting, a `.bak` holding the same file one nudge
+/// earlier, and nothing anywhere holding what they actually wrote. Two
+/// keystrokes, and the whole configuration is gone.
+///
+/// A rescue copy is never written over. Once this name holds a text it
+/// keeps it, however many writes follow, and a DIFFERENT text goes to
+/// `<name>.2`, `.3` and so on. Both halves are load-bearing and for
+/// opposite reasons. Without the first, the burst above simply moves
+/// here: the second nudge would replace the user's text with the file
+/// the first nudge wrote. Without the second, the copies this program
+/// refuses to delete become the thing that destroys the next one — a
+/// user who broke their file in June, repaired it and left the copy
+/// lying about would have August's text answered with "already
+/// rescued", and lose it exactly as if none of this existed.
+///
+/// Copies are left for the user to delete: one this program cleaned up
+/// after itself would be a rescue copy that disappears exactly when
+/// somebody is still working out what went wrong.
+const CONF_RON_RESCUE: &str = "nacelle-desktop.ron.broken";
+
+/// How many distinct unreadable texts one directory will hold.
+///
+/// A limit rather than none, because the name is derived from a
+/// COMPARISON and a comparison can be wrong about a filesystem that
+/// answers oddly; without a stop this walks forever with the user
+/// waiting on a keypress. The number is far past anything a person
+/// reaches — it is one per typo that was never cleaned up — so the
+/// branch that gives up is about a broken disk, not about a user.
+const CONF_RESCUE_LIMIT: u32 = 64;
+
+/// The same configuration in the format that came before it.
+///
+/// Read where no `.ron` stands beside it, never written and never
+/// deleted: a machine that had settings before this change keeps
+/// exactly the file it had, and gains one the first time a setting is
+/// changed.
 const CONF_FILE: &str = "nacelle-desktop.conf";
 
 /// The directory the nacelle FAMILY keeps its configuration and its
@@ -959,96 +1411,78 @@ pub fn active_sounds_dir() -> Option<PathBuf> {
     find_asset("sounds", &name).filter(|d| d.is_dir())
 }
 
-/// Current Sounds= value from nacelle-desktop.conf (if a safe, non-empty name).
+/// Current `sounds:` value (if a safe, non-empty name).
 pub fn current_sounds_name() -> Option<String> {
-    conf_kv().get("Sounds").and_then(|s| safe_component(s))
+    conf().sounds.name().and_then(safe_component)
 }
 
 pub fn set_sounds_option(name: &str) {
-    set_conf_kv("Sounds", name);
+    update_conf(|c| c.sounds = Choice::named(name));
 }
 
 pub fn list_layauts() -> Vec<String> {
     store().list()
 }
 
-/// Current Layaut= value from nacelle-desktop.conf (if a safe, non-empty name).
+/// Current `layaut:` value (if a safe, non-empty name).
 pub fn current_layaut_name() -> Option<String> {
-    conf_kv().get("Layaut").and_then(|s| safe_component(s))
-}
-
-fn font_prefs_for(prefix: &str, min: f32, max: f32) -> (f32, Option<String>, Option<String>) {
-    let kv = conf_kv();
-    let scale = kv
-        .get(&format!("{prefix}FontSize"))
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .map(|p| (p / 100.0).clamp(min, max))
-        .unwrap_or(1.0);
-    let get = |key: String| {
-        kv.get(&key)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
-    (
-        scale,
-        get(format!("{prefix}FontFamily")),
-        get(format!("{prefix}FontWeight")),
-    )
+    conf().layaut.name().and_then(safe_component)
 }
 
 /// Terminal font preferences: (size scale, family, weight).
 pub fn term_font_prefs() -> (f32, Option<String>, Option<String>) {
-    font_prefs_for("Term", 0.5, 2.0)
+    font_prefs(&conf().term_font, 0.5, 2.0)
 }
 
 /// Interface font preferences: (size scale, family, weight).
 pub fn ui_font_prefs() -> (f32, Option<String>, Option<String>) {
-    font_prefs_for("UI", 0.30, 1.25)
+    font_prefs(&conf().ui_font, 0.30, 1.25)
+}
+
+/// One font section as the renderer wants it. The two sections allow
+/// different ranges — the terminal may be made twice as big, the
+/// interface may not — so the caller names them.
+fn font_prefs(f: &model::FontConf, min: f32, max: f32) -> (f32, Option<String>, Option<String>) {
+    (
+        f.scale(min, max),
+        f.family.name().map(str::to_string),
+        f.weight.name().map(str::to_string),
+    )
 }
 
 pub fn set_term_font_size(percent: u32) {
-    set_conf_kv("TermFontSize", &percent.to_string());
+    update_conf(|c| c.term_font.size = Some(percent as f32));
 }
 
 pub fn set_term_font_family(name: &str) {
-    set_conf_kv("TermFontFamily", name);
+    update_conf(|c| c.term_font.family = Choice::named(name));
 }
 
 pub fn set_term_font_weight(name: &str) {
-    set_conf_kv("TermFontWeight", name);
+    update_conf(|c| c.term_font.weight = Choice::named(name));
 }
 
 pub fn set_ui_font_size(percent: u32) {
-    set_conf_kv("UIFontSize", &percent.to_string());
+    update_conf(|c| c.ui_font.size = Some(percent as f32));
 }
 
 pub fn set_ui_font_family(name: &str) {
-    set_conf_kv("UIFontFamily", name);
+    update_conf(|c| c.ui_font.family = Choice::named(name));
 }
 
 pub fn set_ui_font_weight(name: &str) {
-    set_conf_kv("UIFontWeight", name);
+    update_conf(|c| c.ui_font.weight = Choice::named(name));
 }
 
 pub fn set_layaut_option(name: &str) {
-    set_conf_kv("Layaut", name);
+    update_conf(|c| c.layaut = Choice::named(name));
 }
 
 /// Sound preferences: (master volume 0-100, typing sounds, ambient bed).
 /// Everything on by default — a fresh install should be heard.
 pub fn sound_prefs() -> (u32, bool, bool) {
-    let kv = conf_kv();
-    let volume = kv
-        .get("SoundVolume")
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .map(|v| v.min(100))
-        .unwrap_or(100);
-    let flag = |key: &str| {
-        kv.get(key)
-            .map(|v| v.trim() != "0")
-            .unwrap_or(true)
-    };
-    (volume, flag("SoundTyping"), flag("SoundAmbient"))
+    let s = conf().sound;
+    (s.volume(), s.typing(), s.ambient())
 }
 
 /// The colour pipeline preferences: bit depth of the swapchain, the
@@ -1070,54 +1504,34 @@ pub struct ColorPrefs {
     pub icc: Option<String>,
 }
 
-/// The colour spaces the COLOR view offers, in display order. Names
-/// map to the Color Management protocol's named primaries + transfer
-/// function pairs in the application.
-pub const COLOR_SPACES: [&str; 7] = [
-    "auto",
-    "srgb",
-    "display p3",
-    "adobe rgb",
-    "bt2020 pq",
-    "bt2020 hlg",
-    "scrgb linear",
-];
-
 pub fn color_prefs() -> ColorPrefs {
-    let kv = conf_kv();
-    let depth = kv
-        .get("ColorDepth")
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|d| matches!(d, 8 | 10 | 12 | 16))
-        .unwrap_or(8);
-    let space = kv
-        .get("ColorSpace")
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| COLOR_SPACES.contains(&v.as_str()))
-        .unwrap_or_else(|| "auto".to_string());
-    let file = |key: &str| {
-        kv.get(key)
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .and_then(|v| safe_component(&v))
-    };
-    ColorPrefs { depth, space, lut: file("ColorLut"), icc: file("ColorIcc") }
+    let c = conf().color;
+    let file = |ch: &Choice| ch.name().and_then(safe_component);
+    ColorPrefs {
+        depth: c.depth(),
+        space: c.space(),
+        lut: file(&c.lut),
+        icc: file(&c.icc),
+    }
 }
 
 pub fn set_color_depth(bits: u32) {
-    set_conf_kv("ColorDepth", &bits.to_string());
+    update_conf(|c| c.color.depth = Some(bits));
 }
 
 pub fn set_color_space(space: &str) {
-    set_conf_kv("ColorSpace", space);
+    update_conf(|c| c.color.space = Choice::named(space));
 }
 
+/// Nothing chosen is an explicit OFF here, not a question passed on:
+/// a grading LUT switched off in the settings window may not come back
+/// because a system file names one.
 pub fn set_color_lut(name: Option<&str>) {
-    set_conf_kv("ColorLut", name.unwrap_or(""));
+    update_conf(|c| c.color.lut = Choice::or_off(name));
 }
 
 pub fn set_color_icc(name: Option<&str>) {
-    set_conf_kv("ColorIcc", name.unwrap_or(""));
+    update_conf(|c| c.color.icc = Choice::or_off(name));
 }
 
 /// File names (sorted) with one of the extensions, across every assets
@@ -1150,47 +1564,31 @@ pub fn color_file_path(sub: &str, name: &str) -> Option<std::path::PathBuf> {
 /// the opacity is the glass tint's alpha — below 100 the sharp boards
 /// beneath begin to show through the frost.
 pub fn blur_prefs() -> (u32, u32) {
-    let kv = conf_kv();
-    let pct = |key: &str, default: u32| {
-        kv.get(key)
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .map(|v| v.min(100))
-            .unwrap_or(default)
-    };
-    (pct("BlurRadius", 100), pct("BlurOpacity", 100))
+    let b = conf().blur;
+    (b.radius(), b.opacity())
 }
 
 pub fn set_blur_radius(percent: u32) {
-    set_conf_kv("BlurRadius", &percent.min(100).to_string());
+    update_conf(|c| c.blur.radius = Some(percent.min(model::BlurConf::FULL)));
 }
 
 pub fn set_blur_opacity(percent: u32) {
-    set_conf_kv("BlurOpacity", &percent.min(100).to_string());
+    update_conf(|c| c.blur.opacity = Some(percent.min(model::BlurConf::FULL)));
 }
 
 pub fn set_sound_volume(percent: u32) {
-    set_conf_kv("SoundVolume", &percent.min(100).to_string());
+    update_conf(|c| c.sound.volume = Some(percent.min(model::SoundConf::VOLUME)));
 }
 
 pub fn set_sound_typing(on: bool) {
-    set_conf_kv("SoundTyping", if on { "1" } else { "0" });
+    update_conf(|c| c.sound.typing = Some(on));
 }
 
 pub fn set_sound_ambient(on: bool) {
-    set_conf_kv("SoundAmbient", if on { "1" } else { "0" });
+    update_conf(|c| c.sound.ambient = Some(on));
 }
 
-/// Grid editor preferences: (snap to grid, columns, rows, widget padding px).
-/// How coarse or fine the editor's snap grid may be made. Read here
-/// rather than in the settings window, because a value already in the
-/// file has to be brought into range too — a grid saved before these
-/// were the limits is still a number this program has to draw.
-pub const GRID_MIN: u32 = 15;
-pub const GRID_MAX: u32 = 100;
-/// How wide a gutter the settings window will let anyone type.
-pub const GRID_PAD_MAX: u32 = 40;
-
-/// `GridPadding=`, if the file carries one.
+/// `grid: (padding: …)`, if the file carries one.
 ///
 /// The band around a panel is a length like every other, so the theme owns
 /// it — `layout.panel_gutter` — and this key is the user's stage-5 override
@@ -1203,10 +1601,7 @@ pub const GRID_PAD_MAX: u32 = 40;
 /// The bound is on the typed number alone. A length the theme wrote is not
 /// this program's to cap.
 pub fn grid_padding_override() -> Option<u32> {
-    conf_kv()
-        .get("GridPadding")
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .map(|n| n.min(GRID_PAD_MAX))
+    conf().grid.padding()
 }
 
 /// The band kept clear around every panel on a board, in device px.
@@ -1226,34 +1621,15 @@ pub fn panel_gutter(user: Option<u32>) -> f32 {
 }
 
 pub fn grid_prefs() -> (bool, u32, u32, u32) {
-    let kv = conf_kv();
-    // The range is the grid's own, applied once below. An older,
-    // narrower clamp used to sit here as well, and it won: a grid set
-    // to a hundred cells came back as sixty-four after a restart.
-    let num = |key: &str, def: u32| {
-        kv.get(key)
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or(def)
-    };
-    // Snap is opt-in (off by default).
-    let snap = kv
-        .get("GridSnap")
-        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let g = conf().grid;
     // Whole pixels because this is the number the settings spinner edits;
     // the layout itself asks `panel_gutter` and gets the theme's own.
-    let pad = panel_gutter(
-        kv.get("GridPadding")
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .map(|n| n.min(GRID_PAD_MAX)),
-    )
-    .round() as u32;
-    let cells = |key: &str| num(key, GRID_MIN).clamp(GRID_MIN, GRID_MAX);
-    (snap, cells("GridCols"), cells("GridRows"), pad)
+    let pad = panel_gutter(g.padding()).round() as u32;
+    (g.snap(), g.cols(), g.rows(), pad)
 }
 
 pub fn set_grid_snap(on: bool) {
-    set_conf_kv("GridSnap", if on { "1" } else { "0" });
+    update_conf(|c| c.grid.snap = Some(on));
 }
 
 
@@ -1283,15 +1659,15 @@ pub fn remove_board_in_layaut(name: &str, k: BoardId) -> std::io::Result<()> {
 }
 
 pub fn set_grid_cols(n: u32) {
-    set_conf_kv("GridCols", &n.to_string());
+    update_conf(|c| c.grid.cols = Some(n));
 }
 
 pub fn set_grid_rows(n: u32) {
-    set_conf_kv("GridRows", &n.to_string());
+    update_conf(|c| c.grid.rows = Some(n));
 }
 
 pub fn set_grid_padding(n: u32) {
-    set_conf_kv("GridPadding", &n.to_string());
+    update_conf(|c| c.grid.padding = Some(n));
 }
 
 /// Selects a layout by name.
@@ -1403,55 +1779,613 @@ fn monitor_diag_inches_uncached(monitor_name: &str) -> u32 {
     0
 }
 
-/// Sets Key=Value in the USER's nacelle-desktop.conf, preserving the
-/// rest of the file. The system files are read-only to the program —
-/// what a settings click writes is always the user's own copy, which
-/// then outranks them.
+/// Changes the USER's own configuration and writes it back.
+///
+/// The system files are read-only to the program — what a settings
+/// click writes is always the user's own copy, which then outranks
+/// them — and the document handed to `f` is the user's file ALONE for
+/// the same reason: reading the cascade here would copy a
+/// distribution's values into the user's file and freeze them there,
+/// so an administrator changing a default would never reach that
+/// machine again.
 ///
 /// This is also the moment the configuration directory is created.
 /// The program makes no directory at startup and installs nothing:
 /// what is not installed is simply not offered, and the home
 /// directory stays untouched until the user changes something.
-fn set_conf_kv(key: &str, value: &str) {
-    let path = config_dir().join(CONF_FILE);
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("nacelle-desktop: cannot create {}: {e}", dir.display());
-            return;
+///
+/// The user's own file being in the OLD format is what makes this the
+/// migration: it is read as it stands, changed, and written out as
+/// RON beside it — every setting carried over in one step, and the old
+/// file left exactly where it was.
+///
+/// A file of the user's own that does not parse is REPLACED rather
+/// than refused. Refusing would leave the settings window silently
+/// powerless on the one machine whose file needs fixing; replacing
+/// without a copy would spend somebody's whole configuration on a typo.
+/// So two things happen before the replacement, and neither is
+/// optional: the text is put beyond reach of every later write, under
+/// [`CONF_RON_RESCUE`], and the user is TOLD — at this moment, not at
+/// the next start, because by the next start the file parses and there
+/// is nothing left to notice.
+///
+/// Which makes the rule REPLACE WHAT HAS BEEN KEPT, and it decides the
+/// case the paragraph above does not reach: a file that could not be
+/// COPIED is not replaced at all. Nothing is known about such a file —
+/// it was never read, so it may be a perfectly good configuration
+/// behind a `chown` that went the wrong way — and replacing it needs
+/// no permission on the file itself, only on the directory it sits in,
+/// so the rename would land and take the lot. The settings window
+/// keeps its power over a file that is merely wrong, which is the case
+/// it was given that power for, and stops at one it cannot even see.
+fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
+    let dir = config_dir();
+    let path = dir.join(CONF_RON);
+    // Seeded from the user's OWN configuration wherever it currently
+    // lies — the family folder over the folder's old name — and not
+    // from the family folder alone.
+    //
+    // Alone is what this used to read, and it carried nothing across
+    // on exactly the machines the migration exists for: their old file
+    // sits in ~/.config/nacelle-desktop/, so the family folder
+    // answered "nothing", the first write produced a document holding
+    // one setting, and the old file went on answering everything else
+    // — out of reach of a reset, because nothing ever rewrites it.
+    // Reading it here is what makes the write below the whole of the
+    // user's configuration, which is in turn what lets `conf_dirs`
+    // stop consulting the old folder.
+    //
+    // And only for as long as `conf_dirs` still consults it, which is
+    // why the two are asked the SAME question here. A folder that has
+    // been carried across and retired must stop being seeded from as
+    // well: it is still on disk, so a reset — which takes fields OUT of
+    // the new document — would find them all again on the next write
+    // and put them back, and the setting the user cleared in the
+    // morning would return the first time they touched a slider.
+    //
+    // The system end is deliberately absent: a value that came from
+    // /etc/xdg must stay a system value, or the first setting anybody
+    // changed would freeze that day's defaults into their home
+    // directory forever — the exact trap the XDG arrangement exists to
+    // avoid.
+    let live = conf_dirs();
+    let mut doc = DesktopConf::default();
+    let mut keeps_nothing = false;
+    let mut carried = true;
+    for d in user_conf_dirs().iter().rev() {
+        if !live.contains(d) {
+            continue;
+        }
+        match read_conf_dir(d) {
+            Ok(Some(found)) => doc = found.over(doc),
+            Ok(None) => {}
+            // Only the file about to be REPLACED is rescued. A broken
+            // one in the old folder is not being replaced by anything,
+            // so it needs no copy; `cascade_conf` is what reports it.
+            //
+            // What it does need is to go on being read, and this is the
+            // loop that decides that: the carry is happening HERE, and
+            // a folder this loop could not read has not been carried
+            // anywhere. Saying so is the whole of the mark below —
+            // without it, the document about to be written would stand
+            // in for a file none of whose bytes are in it.
+            Err(said) => {
+                if d == &dir {
+                    if !rescue_unreadable(&path, &said) {
+                        keeps_nothing = true;
+                    }
+                } else {
+                    carried = false;
+                }
+            }
         }
     }
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let out = set_kv_in_text(&text, key, value);
-    if let Err(e) = std::fs::write(&path, out) {
-        eprintln!("nacelle-desktop: cannot write {}: {e}", path.display());
+    // Before `f`, not after: there is no write to make and no document
+    // to make it out of, and running the change would only invite a
+    // reader to think one had happened.
+    if keeps_nothing {
+        return;
     }
+    f(&mut doc);
+    let wrote = write_conf(&path, &doc);
+    // After the write and only if it landed: a mark saying the old
+    // folder is in the new file, put down by the write that actually
+    // put it there. A write that failed carried nothing.
+    if wrote.is_ok() && carried {
+        mark_old_folder_carried();
+    }
+    report_write(&path, wrote);
 }
 
-/// `Key=Value` set on the TEXT of a configuration file: the line is
-/// replaced where it stands, and appended when there is none. Every
-/// other line — the comments, the order, keys this program has never
-/// heard of — survives verbatim.
+/// The last write failure said out loud, so a slider held down is one
+/// sentence and not one per keypress.
 ///
-/// The pure half of [`set_conf_kv`], and what the tests exercise: the
-/// environment is shared by tests running in parallel, so a test that
-/// wrote through it would be testing the other tests too.
-fn set_kv_in_text(text: &str, key: &str, value: &str) -> String {
-    let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    let prefix = format!("{key}=");
-    let mut replaced = false;
-    for line in lines.iter_mut() {
-        if line.trim_start().starts_with(&prefix) {
-            *line = format!("{key}={value}");
-            replaced = true;
-            break;
+/// Cleared by a write that lands, which is what makes the NEXT failure
+/// after a good spell worth saying again. `None` is therefore "the last
+/// write worked", not "nothing has been written yet" — the two are the
+/// same thing to every reader of it.
+static WRITE_FAILED_SAID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Puts a write that could not happen where the user will see it.
+///
+/// A line on stderr was the whole of this, and a desktop session has no
+/// stderr open: the user dragged the volume slider, the slider sprang
+/// back, and there was nothing anywhere to explain it. Nothing already
+/// on disk is lost — this is the branch that loses least, and that is
+/// exactly why it was easy to leave silent — but EVERY change from here
+/// on goes nowhere, which is a worse thing to find out by accident than
+/// a file that was replaced.
+///
+/// It goes down [`CONF_RESCUED`] rather than [`CONF_ERROR`] because it
+/// is an event and not a state: the next write may well work, and a
+/// notice re-derived from a condition that has passed is a notice that
+/// never clears. Same reason, same channel, same one-shot.
+fn report_write(path: &Path, wrote: std::io::Result<()>) {
+    let said = match wrote {
+        Ok(()) => None,
+        Err(e) => Some(format!(
+            "the setting you just changed could NOT be saved \u{2014} {}: {e}. \
+             Nothing on disk has been touched, and every change made from now \
+             on will be lost when the program closes",
+            path.display()
+        )),
+    };
+    let Ok(mut last) = WRITE_FAILED_SAID.lock() else { return };
+    if *last == said {
+        return;
+    }
+    if let Some(s) = &said {
+        remember_rescue(s.clone());
+    }
+    *last = said;
+}
+
+/// Puts an unreadable file out of harm's way and says so, naming the
+/// copy that actually holds it.
+///
+/// What decides is the TEXT, not the presence of a file with the rescue
+/// name on it. A name that is there already may be holding this same
+/// text — the ordinary case, since a directory the program cannot write
+/// to meets the same broken file on every keypress, and one text wants
+/// one copy — or it may be holding somebody's configuration from
+/// months ago, which is a file to step around rather than through.
+/// Asking only whether the name is taken cannot tell those apart, and
+/// gets one of them catastrophically wrong.
+///
+/// Answers whether the file is now safe to replace, which is the same
+/// question as whether a copy of it exists — see [`update_conf`], whose
+/// write this is the condition of.
+fn rescue_unreadable(path: &Path, said: &str) -> bool {
+    // Bytes rather than text: what is being kept is the file the user
+    // has, and a copy that refuses anything an editor could leave
+    // behind is a copy that is missing when it is wanted.
+    let kept = match std::fs::read(path) {
+        Ok(text) => keep_broken_text(path, &text),
+        Err(e) => {
+            eprintln!("nacelle-desktop: cannot read {} to keep it: {e}", path.display());
+            None
+        }
+    };
+    let notice = match &kept {
+        Some(copy) => format!(
+            "{said} \u{2014} so the setting you just changed has REPLACED it. \
+             What you wrote is kept whole as {}: repair that file and put it \
+             back under the old name",
+            copy.display()
+        ),
+        // Says what the user can DO, because this is the one branch
+        // where the program has stopped and will go on being stopped
+        // until somebody moves. A sentence that only named the failure
+        // would leave them clicking a control that does nothing.
+        None => format!(
+            "{said} \u{2014} and no copy of it could be kept, so the setting you \
+             just changed has NOT been applied and nothing has been touched. \
+             Make that file readable, or move it aside, and change the setting \
+             again"
+        ),
+    };
+    remember_rescue(notice);
+    kept.is_some()
+}
+
+/// Finds `text` a name of its own beside `path` and answers with it —
+/// or with the name that is already holding exactly this text.
+///
+/// The name is CLAIMED rather than checked and then written: an
+/// `exists()` and a `copy()` are two moments, and a second copy of this
+/// program — a settings window and a running desktop are two processes
+/// — writing between them would have its rescue copy overwritten by
+/// this one. `create_new` fails instead, and a failure here means the
+/// name is taken, which is the question being asked anyway.
+///
+/// `None` when nothing could be kept, and the caller must say so rather
+/// than name a file: a sentence pointing at a copy that is not there,
+/// or holds somebody else's text, is worse than no sentence at all —
+/// it is what sends a user to delete the wrong file.
+fn keep_broken_text(path: &Path, text: &[u8]) -> Option<PathBuf> {
+    use std::io::Write;
+    for n in 1..=CONF_RESCUE_LIMIT {
+        // The first copy keeps the plain name. A user who has one is
+        // the common case and should not have to read a number.
+        let name = if n == 1 {
+            CONF_RON_RESCUE.to_string()
+        } else {
+            format!("{CONF_RON_RESCUE}.{n}")
+        };
+        let candidate = path.with_file_name(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(mut f) => {
+                // The copy takes the ORIGINAL's permissions, and takes
+                // them before a byte goes in. A new file is born at
+                // whatever the umask allows, which is usually wider
+                // than a configuration somebody deliberately closed
+                // down; a rescue copy that is easier to read than the
+                // file it rescues would be this program handing out
+                // what it was asked to keep. The descriptor is already
+                // open, so tightening it here does not stop the write.
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let _ = f.set_permissions(meta.permissions());
+                }
+                // Flushed here rather than left to the system, for the
+                // same reason the settings file is: the copy exists to
+                // survive the thing that goes wrong next.
+                if let Err(e) = f.write_all(text).and_then(|()| f.sync_all()) {
+                    eprintln!(
+                        "nacelle-desktop: cannot write {}: {e}",
+                        candidate.display()
+                    );
+                    // A half-written copy under the rescue name is the
+                    // one outcome worse than none, because the sentence
+                    // would send the user to it. It never held anything
+                    // else — this branch owns the name it just made.
+                    let _ = std::fs::remove_file(&candidate);
+                    return None;
+                }
+                return Some(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Taken. By this same text, in which case it is the
+                // answer and nothing needs writing; otherwise by an
+                // older one, and the search moves along rather than
+                // touching it.
+                if std::fs::read(&candidate).map(|kept| kept == text).unwrap_or(false) {
+                    return Some(candidate);
+                }
+            }
+            Err(e) => {
+                eprintln!("nacelle-desktop: cannot keep {}: {e}", candidate.display());
+                return None;
+            }
         }
     }
-    if !replaced {
-        lines.push(format!("{key}={value}"));
+    eprintln!(
+        "nacelle-desktop: {} already holds {CONF_RESCUE_LIMIT} unreadable \
+         configurations; delete the ones you no longer need",
+        path.parent().unwrap_or(Path::new(".")).display()
+    );
+    None
+}
+
+/// The header every written file carries.
+///
+/// A serialiser cannot keep somebody's comments — they are not part of
+/// the value — so the file has to say that itself, next to the name of
+/// the copy that still has them. The alternative was to rewrite the
+/// file by hand and preserve the text, which is exactly the fragility
+/// this format was chosen to leave behind.
+///
+/// What the second paragraph promises is only true because of `ours`
+/// in [`write_conf`]. It used to say "the copy from just before the
+/// last write", which is a sentence that stops being true on the
+/// SECOND write: two nudges of a slider and the copy is of this
+/// program's own previous output. A header sending somebody to a file
+/// for comments that are no longer in it is worse than one that says
+/// nothing.
+const CONF_HEADER: &str = "\
+// nacelle-desktop settings \u{2014} Rusty Object Notation.
+//
+// The settings window REWRITES this file whenever something changes,
+// and comments of your own do not survive that. What you wrote by hand
+// is kept in nacelle-desktop.ron.bak: that copy is taken of a file this
+// program did not write, and later saves leave it alone, so it stays
+// your text however many settings you change afterwards.
+//
+// A field that is not here is answered by the system file
+// (/etc/xdg/nacelle/nacelle-desktop.ron) and then by the program's own
+// defaults. `Off` is different: it means \"nothing\", and it outranks a
+// system file that names something.
+";
+
+/// Writes the document, keeping the previous file and never leaving a
+/// half-written one.
+///
+/// The order is the whole of it: back up what is there, write the new
+/// text under a temporary name, flush it to the disk, then rename it
+/// into place. Renaming within a directory is atomic, so a machine that
+/// loses power during this has either the old file or the new one —
+/// never four hundred bytes of a document that no longer parses, which
+/// for an all-or-nothing format is the same as having no settings at
+/// all.
+///
+/// The two flushes are what make that sentence true of this code rather
+/// than of a filesystem that happens to be kind. Without the first, the
+/// rename can reach the disk while the bytes it points at have not, and
+/// the file that survives a power cut is the new name over a hole.
+/// Without the second, the rename itself is only in memory and the
+/// setting is simply lost — which is the milder half, and still not
+/// what the paragraph above promises. Both are best effort, for the
+/// same reason the copy is: a filesystem that will not sync is not a
+/// reason to refuse the setting the user just asked for.
+///
+/// Three things the first version of that order got wrong, each of
+/// which loses a file rather than a setting:
+///
+/// * the copy was taken on EVERY write, so it was a copy of the
+///   previous SAVE and not of the user's document — see [`ours`];
+/// * the rename landed on the NAME the caller was given, which for a
+///   symbolic link is the link and not the file it points at — see
+///   [`follow_link`];
+/// * the temporary was one fixed name shared by every process — see
+///   [`claim_tmp`].
+fn write_conf(path: &Path, doc: &DesktopConf) -> std::io::Result<()> {
+    use std::io::Write;
+    // Through the link before anything else, so that every path below —
+    // the backup, the temporary, the rename and the directory flush —
+    // is about the file the user actually keeps.
+    let path = &follow_link(path);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // Read rather than `is_file`, because the question is not whether
+    // something stands there but WHOSE it is. Bytes that will not come
+    // back as text were certainly not written here, so they are copied
+    // aside like any other stranger's rather than falling through the
+    // check.
+    let stranger = match std::fs::read_to_string(path) {
+        Ok(old) => !ours(path, &old),
+        Err(_) => path.is_file(),
+    };
+    if stranger {
+        // Best effort: a backup that cannot be made is not a reason to
+        // refuse the setting the user just asked for.
+        // Beside the file, which after a link has been followed is not
+        // the directory the caller named: a copy of somebody's dotfile
+        // belongs next to that dotfile, not next to the link.
+        if let Err(e) = std::fs::copy(path, path.with_file_name(CONF_RON_BACKUP)) {
+            eprintln!("nacelle-desktop: cannot keep a copy of {}: {e}", path.display());
+        }
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    let body = ron_options()
+        .to_string_pretty(doc, ron_pretty())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let text = format!("{CONF_HEADER}{body}\n");
+    let (tmp, mut f) = claim_tmp(path)?;
+    // A temporary left behind under a name this function may hand out
+    // again is a file the next write appends its luck to, so every way
+    // out of here from this point takes its own litter with it.
+    if let Err(e) = f.write_all(text.as_bytes()) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let _ = f.sync_all();
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // The directory entry, not the file: what is being made durable
+    // here is the rename.
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    remember_written(path, &text);
+    Ok(())
+}
+
+/// The file a name finally stands for, links and all.
+///
+/// A configuration kept in somebody's dotfiles repository and linked
+/// into place is an ordinary arrangement, and writing to the LINK ends
+/// it: `rename` replaces the link with a plain file, the values survive
+/// the day it happens, and every edit the user makes in their
+/// repository from then on goes nowhere. Nothing is said, because from
+/// this program's side nothing went wrong — which is the exact shape of
+/// "loses settings and does not know when".
+///
+/// `canonicalize` is not what is wanted here: it fails on a link
+/// pointing at a file that does not exist yet, which is how a fresh
+/// checkout of a dotfiles repository looks before its first write, and
+/// falling back to the link itself in that case would replace it. This
+/// walks the chain by hand instead, relative targets resolved against
+/// the directory the link sits in, and answers the last name in the
+/// chain whether or not anything stands there.
+///
+/// The bound is against a loop — a link to itself is a file a user can
+/// make in one command — and reaching it answers the last name looked
+/// at, which the write then fails on honestly rather than hanging.
+fn follow_link(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    for _ in 0..CONF_LINK_LIMIT {
+        let Ok(target) = std::fs::read_link(&at) else { return at };
+        at = if target.is_absolute() {
+            target
+        } else {
+            at.parent().unwrap_or(Path::new(".")).join(target)
+        };
+    }
+    at
+}
+
+/// How many links deep a configuration file may be. Well past a
+/// dotfiles repository behind a `stow`, and short of a loop costing
+/// somebody their keypress.
+const CONF_LINK_LIMIT: u32 = 16;
+
+/// A temporary file of THIS write's own, created exclusively.
+///
+/// The name used to be one constant, and `File::create` TRUNCATES: a
+/// settings window and a running desktop are two processes — the code
+/// says so itself, in [`keep_broken_text`], and uses `create_new` there
+/// for exactly this reason — so both could hold the same name, and the
+/// rename of whichever finished first would publish a file the other
+/// was still writing. An all-or-nothing format turns that into no
+/// settings at all.
+///
+/// The process id makes the name unique among the processes that are
+/// ALIVE, which is the whole of the race; the counter is for the
+/// leftover of a dead process that happened to have this id, and for a
+/// second write from this one before the first is renamed away.
+/// `create_new` is what makes it a claim rather than a guess.
+fn claim_tmp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or(CONF_RON);
+    let mut last = None;
+    for n in 0..CONF_TMP_TRIES {
+        let candidate =
+            path.with_file_name(format!("{stem}{CONF_RON_TMP}{}.{n}", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => return Ok((candidate, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no temporary name was free")
+    }))
+}
+
+/// How many temporary names one write will try before giving up. Each
+/// one taken is a leftover of a process that died mid-write, so a
+/// handful is already a machine with a story.
+const CONF_TMP_TRIES: u32 = 8;
+
+/// One file this program wrote, kept so the backup it takes is never a
+/// copy of its own output.
+struct WrittenConf {
+    path: PathBuf,
+    text: String,
+}
+
+/// The texts [`write_conf`] last put at each path.
+static CONF_WRITTEN: std::sync::Mutex<Vec<WrittenConf>> = std::sync::Mutex::new(Vec::new());
+
+/// How many paths are remembered. One machine writes one file; the
+/// bound is against a process that keeps being pointed at new
+/// directories.
+const CONF_WRITTEN_MAX: usize = 64;
+
+/// Whether what stands at `path` is byte for byte what this program
+/// last wrote there.
+///
+/// The measured reason, which is the same one `nacelle::settings` has
+/// written down for addon files and which the program's OWN file never
+/// got: a `.bak` refreshed on every write is a backup of the previous
+/// SAVE, not of the user's document. A hand-written file with comments
+/// in it — and possibly a field a newer build knows and this one drops
+/// on the way through serde — is replaced on the first save, so `.bak`
+/// holds it; the second save, which is one more press of an arrow key
+/// on a slider, replaces `.bak` with the first save's output. Two
+/// keypresses and the user's text is nowhere: not in the file, not in
+/// the copy, and the header in the file is still pointing at the copy.
+///
+/// So the rule is not "keep the previous contents" but KEEP WHAT THIS
+/// PROGRAM DID NOT WRITE. One file, no generations, no pruning, holding
+/// the only version that was ever irreplaceable.
+///
+/// A path never written by this process answers false, so a program
+/// restarted between two saves takes one backup more than it needed.
+/// That is the side to be wrong on — and it is why the bound above
+/// EVICTS rather than refuses: the entry a full table would have
+/// dropped is the one just written, which is the only one anybody is
+/// about to ask about.
+fn ours(path: &Path, on_disk: &str) -> bool {
+    CONF_WRITTEN
+        .lock()
+        .map(|w| w.iter().any(|e| e.path == path && e.text == on_disk))
+        .unwrap_or(false)
+}
+
+/// Remembers the text [`write_conf`] just wrote, for [`ours`].
+fn remember_written(path: &Path, text: &str) {
+    let Ok(mut w) = CONF_WRITTEN.lock() else { return };
+    if let Some(e) = w.iter_mut().find(|e| e.path == path) {
+        e.text = text.to_string();
+        return;
+    }
+    if w.len() >= CONF_WRITTEN_MAX {
+        w.remove(0);
+    }
+    w.push(WrittenConf { path: path.to_path_buf(), text: text.to_string() });
+}
+
+/// How RON is read and written here.
+///
+/// `implicit_some` is on for BOTH, and on by default rather than by
+/// the `#![enable(…)]` line a file may carry: it lets a person write
+/// `volume: 80` where the type says `Option<u32>`, and `Some(80)` goes
+/// on parsing as well. A configuration file is written by hand at
+/// least as often as by the program, and `Some(…)` around every number
+/// is a Rust detail leaking into somebody's evening.
+fn ron_options() -> ron::Options {
+    ron::Options::default().with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+}
+
+fn ron_pretty() -> ron::ser::PrettyConfig {
+    ron::ser::PrettyConfig::new()
+        // The type's name is this program's business, not the file's.
+        .struct_names(false)
+        .indentor("    ")
+        .extensions(ron::extensions::Extensions::IMPLICIT_SOME)
+}
+
+// ---------------------------------------------------------------- clearing
+//
+// Writing an EMPTY value and REMOVING a field are two different acts,
+// and the difference only shows on a machine that has a system file.
+// An empty value wins the cascade and pins the setting off; a removed
+// field lets the system file answer. The old format could only do the
+// first, so LOOK AND FEEL RESET wrote empties and was correct by
+// accident — there was no system file for them to beat. Installing one
+// is what would have made it silently wrong, which is why the removing
+// half lands in the same change as the format.
+
+/// Everything to do with look and feel, taken back to what this
+/// machine looks like with no configuration of the user's at all.
+///
+/// One write rather than a dozen: the fields go out TOGETHER, so no
+/// intermediate state of the file is ever on disk, and a crash in the
+/// middle cannot leave half a reset behind. Every field is REMOVED —
+/// `variant:` and the two font sizes included, which is precisely what
+/// the old format could not express: an empty variant is a documented
+/// explicit off, and a size cannot be written empty at all.
+pub fn clear_look_and_feel() {
+    update_conf(|c| {
+        c.theme = Choice::Inherit;
+        c.variant = Choice::Inherit;
+        // The default arrangement AND every screen given one of its
+        // own: clearing the first alone would leave a second monitor
+        // pinned to whatever its entry says, which is precisely the
+        // setting the user cannot see from that page.
+        c.layaut = Choice::Inherit;
+        c.screens.clear();
+        c.sounds = Choice::Inherit;
+        c.term_font = model::FontConf::default();
+        c.ui_font = model::FontConf::default();
+        // The band around every panel. It is typed on the GRID page
+        // rather than this one, which is why it was missed, but the
+        // page a control sits on does not decide what it IS: this
+        // field is an override of the theme's `layout.panel_gutter`
+        // and of nothing else, so a number left standing here would
+        // leave the user's own spacing around a reset look, from a
+        // theme token they never chose to overrule.
+        c.grid.padding = None;
+    });
+}
+
+/// Takes back every per-screen assignment, leaving the default
+/// arrangement alone.
+#[allow(dead_code)]
+pub fn clear_screen_layauts() {
+    update_conf(|c| c.screens.clear());
 }
 
 /// One level of a search path: `<base>/nacelle` and, directly behind
@@ -1464,6 +2398,11 @@ fn set_kv_in_text(text: &str, key: &str, value: &str) -> String {
 /// old-named directory has to keep outranking the system defaults.
 /// Appending would quietly reverse that and let a distribution's
 /// `/etc/xdg` answer a key the user had set years ago.
+///
+/// This is the SEARCH PATH. The configuration document drops one rung
+/// of it once that rung has been carried across — see [`conf_dirs`],
+/// which is the only place that happens and the only thing it happens
+/// to.
 fn push_level(out: &mut Vec<PathBuf>, base: &Path) {
     for name in [FAMILY_DIR, LEGACY_FAMILY_DIR] {
         let dir = base.join(name);
@@ -1543,7 +2482,7 @@ fn data_home() -> PathBuf {
 /// Data directory: `~/.local/share/nacelle`. Holds everything a theme is
 /// made of (layauts/, sounds/, addons/) — those are data, not
 /// configuration, so they belong under XDG_DATA_HOME while
-/// nacelle-desktop.conf stays in the config directory. The one data
+/// nacelle-desktop.ron stays in the config directory. The one data
 /// directory written to, and the new name only.
 fn data_dir() -> PathBuf {
     data_home().join(FAMILY_DIR)
@@ -1640,26 +2579,246 @@ fn warn_once_about_legacy(
     true
 }
 
-/// Merges Key=Value files given MOST SPECIFIC FIRST: an earlier file
-/// wins key by key, and a key only a later file has is inherited. A
-/// file that does not exist contributes nothing, which is the normal
-/// case on both ends — a machine with no system defaults and a user
-/// who has never changed a setting are both perfectly ordinary.
+/// Merges the configuration directories given MOST SPECIFIC FIRST: an
+/// earlier document wins field by field, and a field only a later one
+/// carries is inherited. A directory with no configuration in it
+/// contributes nothing, which is the normal case on both ends — a
+/// machine with no system defaults and a user who has never changed a
+/// setting are both perfectly ordinary.
 ///
-/// An empty value is a value, not an absence: `ColorLut=` in the
-/// user's file is how the settings panel says "off", and it has to
-/// beat a system file that names one.
+/// `Off` is an answer, not an absence: a LUT switched off in the
+/// user's file has to beat a system file that names one.
 ///
-/// Takes its paths rather than reading the environment, so a test
-/// hands it two temporary files and no process-wide state is touched.
-fn cascade_kv(paths: &[PathBuf]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for path in paths.iter().rev() {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            out.extend(parse_kv(&text));
+/// Takes its directories rather than reading the environment, so a
+/// test hands it two temporary ones and no process-wide state is
+/// touched.
+fn cascade_conf(dirs: &[PathBuf]) -> DesktopConf {
+    let mut out = DesktopConf::default();
+    let mut bad: Option<String> = None;
+    for dir in dirs.iter().rev() {
+        match read_conf_dir(dir) {
+            Ok(Some(doc)) => out = doc.over(out),
+            Ok(None) => {}
+            // Least specific first, so the last one assigned is the
+            // most specific broken file — the user's own, when it is
+            // theirs, which is the one they can do something about.
+            //
+            // The consequence is spelled out here because it is this
+            // caller's: reading goes ON past the file, so every
+            // setting in it counts as unset and the rest of the
+            // cascade answers in its place.
+            Err(said) => {
+                bad = Some(format!(
+                    "{said} \u{2014} it is being ignored WHOLE, so every setting \
+                     in it counts as unset"
+                ))
+            }
         }
     }
+    // Set on EVERY read, so a file that has been repaired stops being
+    // complained about without the program having to be restarted.
+    remember_conf_error(bad);
     out
+}
+
+/// One directory's configuration: its `.ron` file, or — where there is
+/// none — the `Key=Value` file that came before it.
+///
+/// Per DIRECTORY, so the two formats can stand on different rungs of
+/// the same cascade: a distribution still shipping the old format is
+/// answered by a user who has already moved on, and neither has to
+/// wait for the other. Nothing here writes, renames or deletes: the
+/// old file goes on being read exactly where it lies until a `.ron`
+/// appears beside it.
+///
+/// `Ok(None)` when the directory says nothing at all — which means no
+/// `.ron` THERE, not a `.ron` that would not come open. `Err` carries
+/// the sentence the user should see whenever a file exists and could
+/// not be turned into a document, whether the obstacle was the syntax,
+/// the permissions or the bytes.
+///
+/// That sentence names the file and the place in it and STOPS there,
+/// without saying what follows: the two callers do different things
+/// with the same broken file — one reads past it, the other replaces
+/// it — and each states its own consequence. One sentence covering
+/// both would have to be true of neither.
+fn read_conf_dir(dir: &Path) -> Result<Option<DesktopConf>, String> {
+    let ron = dir.join(CONF_RON);
+    match std::fs::read_to_string(&ron) {
+        Ok(text) => {
+            return match ron_options().from_str::<DesktopConf>(&text) {
+                Ok(doc) => {
+                    warn_once_about_dead_conf(dir);
+                    Ok(Some(doc))
+                }
+                Err(e) => Err(format!(
+                    "{} could not be read at line {}, column {}: {}",
+                    ron.display(),
+                    e.span.start.line,
+                    e.span.start.col,
+                    e.code
+                )),
+            };
+        }
+        // NOT THERE is the only reading of a failure that means this
+        // directory says nothing — and it is the ordinary one, since a
+        // machine with no system defaults and a user who has never
+        // changed a setting both land here. Everything else is a file
+        // that EXISTS and could not be had: the wrong permissions on
+        // it, an I/O error, or bytes that are not text at all, which is
+        // what a filesystem hands back after replaying a journal over a
+        // write it never finished.
+        //
+        // Reading those as silence is the quiet half of the loss this
+        // whole arrangement is about: the caller that WRITES would take
+        // the directory for empty and rename a one-field document over
+        // somebody's settings, with no copy kept, because nothing ever
+        // told it there was a file there. An `Err` costs one popup on a
+        // machine where something is genuinely wrong and saves the file
+        // on the one where it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{} could not be read: {e}", ron.display())),
+    }
+    let legacy = dir.join(CONF_FILE);
+    let Ok(text) = std::fs::read_to_string(&legacy) else { return Ok(None) };
+    warn_once_about_conf_format(&legacy);
+    Ok(Some(DesktopConf::from_legacy(&parse_kv(&text))))
+}
+
+/// The last thing found wrong with a configuration file, in the words
+/// the user gets on screen.
+///
+/// A parse error may NOT degrade quietly to the defaults. RON is
+/// parsed all or nothing, so ONE misplaced bracket costs the whole
+/// file where the old format lost a single line — and a program that
+/// answered that with its factory appearance and no sentence would
+/// leave the user nothing to connect it to. So it is said in the log
+/// and carried to [`resolve`], which puts it on the screen.
+static CONF_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Remembers what the last read found, and says it once per distinct
+/// message: the configuration is read whenever the grid editor draws,
+/// and a sentence per frame is a sentence nobody reads.
+fn remember_conf_error(said: Option<String>) {
+    let Ok(mut last) = CONF_ERROR.lock() else { return };
+    if *last == said {
+        return;
+    }
+    if let Some(s) = &said {
+        eprintln!("nacelle-desktop: {s}");
+    }
+    *last = said;
+}
+
+/// What the last read had to say about a broken file, if anything.
+fn conf_error() -> Option<String> {
+    CONF_ERROR.lock().ok().and_then(|e| e.clone())
+}
+
+/// A file that was replaced because it could not be read, waiting to be
+/// put in front of the user.
+///
+/// A channel of its own rather than [`CONF_ERROR`], because the two
+/// have opposite lifetimes. The error describes a file that is still
+/// broken, so it is re-derived on every read and clears itself the
+/// moment the file is repaired. This describes something that has
+/// ALREADY happened and is already undone — one write later the file
+/// parses, the error is gone, and the only trace is a rescue copy the
+/// user has no reason to look for. So it is held until it has been
+/// shown, and it is taken rather than read: an event is reported once,
+/// and a popup that came back on every settings click would be a popup
+/// people learn to dismiss unread.
+static CONF_RESCUED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn remember_rescue(notice: String) {
+    let Ok(mut pending) = CONF_RESCUED.lock() else { return };
+    // The log gets it immediately and unconditionally: a headless start
+    // has no popup, and this is the one line explaining why a machine
+    // came up looking factory-fresh.
+    eprintln!("nacelle-desktop: {notice}");
+    // First one wins. A second unreadable file cannot happen without
+    // the user having repaired the first, and the pending sentence
+    // names the rescue copy that is actually on disk.
+    if pending.is_none() {
+        *pending = Some(notice);
+    }
+}
+
+/// The pending rescue notice, if there is one, and it is gone once
+/// taken. Both the startup path and every configuration re-apply ask,
+/// so whichever comes first after the write shows it.
+pub fn take_conf_rescued() -> Option<String> {
+    CONF_RESCUED.lock().ok().and_then(|mut p| p.take())
+}
+
+/// Said once per directory: a `Key=Value` file lying beside a `.ron`
+/// one is not merged with it, it is not read AT ALL.
+///
+/// The installer prints this for `/etc/xdg` at the moment it writes the
+/// new file, which covers a site's own defaults. It cannot cover the
+/// user's own directory, because no installer ever writes there — the
+/// old file gets there by having been there, and the `.ron` beside it
+/// appears the first time a setting is changed. So the program says it
+/// too, from the one place that can see both files: whoever put site
+/// defaults in the old file has to move them across by hand, and until
+/// they do the file is furniture.
+///
+/// Keyed by DIRECTORY rather than said once overall, because the two
+/// ends of the cascade are two different people's problem.
+///
+/// Returns whether it printed, which is what a test can count:
+/// `read_conf_dir` is on the path of a settings page that redraws every
+/// frame, and the failure worth catching is not the wording but a line
+/// that comes back forever.
+static DEAD_CONF_SAID: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn warn_once_about_dead_conf(dir: &Path) -> bool {
+    let legacy = dir.join(CONF_FILE);
+    // BOTH files, and the pair is the whole condition. An old file
+    // standing alone is being read, and `warn_once_about_conf_format`
+    // is what has something to say about that one; it only goes dead
+    // the moment a `.ron` appears in the same directory.
+    if !legacy.is_file() || !dir.join(CONF_RON).is_file() {
+        return false;
+    }
+    {
+        let Ok(mut said) = DEAD_CONF_SAID.lock() else { return false };
+        if said.iter().any(|d| d == dir) {
+            return false;
+        }
+        said.push(dir.to_path_buf());
+    }
+    eprintln!(
+        "nacelle-desktop: {} is no longer read \u{2014} within one directory the \
+         {CONF_RON} beside it answers WHOLE, and the two formats are never \
+         merged. Nothing has been deleted; anything still wanted out of that \
+         file has to be moved across by hand",
+        legacy.display()
+    );
+    true
+}
+
+/// Said once: the configuration is read on every settings click and on
+/// every frame the grid editor draws.
+static LEGACY_CONF_SAID: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Names the old-format file being read and where its contents are
+/// headed. Nothing is converted here — the file is read as it is, and
+/// the day a setting changes the new one is written beside it.
+fn warn_once_about_conf_format(path: &Path) {
+    use std::sync::atomic::Ordering;
+    if LEGACY_CONF_SAID.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "nacelle-desktop: reading {} \u{2014} the format that came before \
+         {CONF_RON}. Nothing has been converted and nothing has to be: it goes \
+         on being read there, and the first setting you change writes {} \
+         beside it, which then answers first",
+        path.display(),
+        path.with_file_name(CONF_RON).display()
+    );
 }
 
 /// Parser for Key=Value files (# and ; comments).
@@ -1769,7 +2928,7 @@ mod tests {
 
         let red = colour_of("proba-red");
         assert!(
-            dir.join(FAMILY_DIR).join(CONF_FILE).is_file(),
+            dir.join(FAMILY_DIR).join(CONF_RON).is_file(),
             "the first settings change must create the user's configuration file"
         );
         let blue = colour_of("proba-blue");
@@ -1920,11 +3079,17 @@ mod tests {
     }
 
     /// The XDG cascade every other toolkit implements: the user's file
-    /// wins key by key, the system file answers everything it does not
-    /// mention, and a missing file on either end is ordinary rather
+    /// wins FIELD by field, the system file answers everything it does
+    /// not mention, and a missing file on either end is ordinary rather
     /// than an error. Nothing is copied for this to work — which is
     /// the whole point of reading a search path instead of seeding a
     /// home directory at install time.
+    ///
+    /// The third state is what a two-state format could not carry:
+    /// `Off` in the user's file has to BEAT the system file, while an
+    /// absent field lets it answer. Both readings are taken here,
+    /// because a reset that confuses them turns the system defaults off
+    /// instead of letting them back in.
     ///
     /// Hermetic: explicit paths, no process environment.
     #[test]
@@ -1938,41 +3103,208 @@ mod tests {
         std::fs::create_dir_all(&system).unwrap();
         std::fs::create_dir_all(&user).unwrap();
         std::fs::write(
-            system.join(CONF_FILE),
-            "# the distribution's defaults\nTheme=azure\nLayaut=console\nColorLut=studio\n",
+            system.join(CONF_RON),
+            "// the distribution's defaults\n(\n    theme: Named(\"azure\"),\n    \
+             layaut: Named(\"console\"),\n    color: (lut: Named(\"studio\")),\n)\n",
         )
         .unwrap();
-        std::fs::write(user.join(CONF_FILE), "Theme=crimson\nColorLut=\n").unwrap();
+        std::fs::write(
+            user.join(CONF_RON),
+            "(theme: Named(\"crimson\"), color: (lut: Off))\n",
+        )
+        .unwrap();
 
-        let paths = vec![user.join(CONF_FILE), system.join(CONF_FILE)];
-        let kv = cascade_kv(&paths);
+        let dirs = vec![user.clone(), system.clone()];
+        let c = cascade_conf(&dirs);
+        assert_eq!(c.theme.name(), Some("crimson"), "the user's own value must win");
         assert_eq!(
-            kv.get("Theme").map(String::as_str),
-            Some("crimson"),
-            "the user's own value must win"
-        );
-        assert_eq!(
-            kv.get("Layaut").map(String::as_str),
+            c.layaut.name(),
             Some("console"),
-            "a key the user never set comes from the system file"
+            "a field the user never set comes from the system file"
         );
         assert_eq!(
-            kv.get("ColorLut").map(String::as_str),
-            Some(""),
-            "an empty user value is an explicit off, not an absence"
+            c.color.lut,
+            Choice::Off,
+            "an explicit off is not an absence: it must beat the system file"
+        );
+        assert_eq!(c.color.lut.name(), None, "and no LUT is loaded");
+        // A group the user's file mentions AT ALL must not swallow the
+        // system file's other fields in that group: the merge is per
+        // leaf, not per section.
+        assert_eq!(
+            c.color.depth(),
+            model::ColorConf::DEPTH,
+            "nobody set a depth, so the model's own default stands"
         );
 
         // A user who has never changed a setting has no file at all,
         // and the system defaults stand on their own.
-        std::fs::remove_file(user.join(CONF_FILE)).unwrap();
-        let kv = cascade_kv(&paths);
-        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
-        assert_eq!(kv.get("ColorLut").map(String::as_str), Some("studio"));
+        std::fs::remove_file(user.join(CONF_RON)).unwrap();
+        let c = cascade_conf(&dirs);
+        assert_eq!(c.theme.name(), Some("azure"));
+        assert_eq!(c.color.lut.name(), Some("studio"));
 
         // And with nothing installed anywhere the program is left with
         // what is built into it, rather than with an error.
-        assert!(cascade_kv(&[base.join("nowhere.conf")]).is_empty());
+        assert_eq!(cascade_conf(&[base.join("nowhere")]), DesktopConf::default());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A file in the format that came before, on a machine that has
+    /// never written the new one. Every setting in it goes on working,
+    /// and — the part a migration usually gets wrong — an EMPTY value
+    /// keeps meaning what it meant: an explicit off, not an absence.
+    #[test]
+    fn the_old_format_is_still_read_and_still_means_what_it_said() {
+        fixture_registry();
+        let dir = scratch("legacy-format");
+        std::fs::write(
+            dir.join(CONF_FILE),
+            "# somebody's own file\n\
+             Theme=crimson\n\
+             Variant=hc\n\
+             Layaut=console\n\
+             Layaut[DP-1]=cockpit\n\
+             Sounds=classic\n\
+             TermFontSize=112\n\
+             UIFontWeight=bold\n\
+             SoundVolume=40\n\
+             SoundTyping=0\n\
+             GridSnap=true\n\
+             GridCols=32\n\
+             GridPadding=9\n\
+             ColorDepth=10\n\
+             ColorSpace=bt2020 pq\n\
+             ColorLut=\n\
+             BlurRadius=60\n",
+        )
+        .unwrap();
+
+        let c = read_conf_dir(&dir).unwrap().expect("the old file must be read");
+        assert_eq!(c.theme.name(), Some("crimson"));
+        assert_eq!(c.variant.name(), Some("hc"));
+        assert_eq!(c.layaut.name(), Some("console"));
+        assert_eq!(c.screens().get("DP-1").map(String::as_str), Some("cockpit"));
+        assert_eq!(c.sounds.name(), Some("classic"));
+        assert_eq!(c.term_font.scale(0.5, 2.0), 1.12);
+        assert_eq!(c.ui_font.weight.name(), Some("bold"));
+        assert_eq!(c.sound.volume(), 40);
+        assert!(!c.sound.typing(), "SoundTyping=0 was off and stays off");
+        assert!(c.sound.ambient(), "a key the file never had takes the default");
+        assert!(c.grid.snap());
+        assert_eq!(c.grid.cols(), 32);
+        assert_eq!(c.grid.padding(), Some(9));
+        assert_eq!(c.color.depth(), 10);
+        assert_eq!(c.color.space(), "bt2020 pq");
+        assert_eq!(
+            c.color.lut,
+            Choice::Off,
+            "an empty value outranked the system file in that format too"
+        );
+        assert_eq!(c.blur.radius(), 60);
+        assert_eq!(c.blur.opacity(), model::BlurConf::FULL, "and the rest is default");
+
+        // A `.ron` beside it takes over WHOLE — the two formats are not
+        // merged inside one directory, or a setting deleted from the
+        // new file would be answered by a stale line in the old one.
+        std::fs::write(dir.join(CONF_RON), "(theme: Named(\"azure\"))\n").unwrap();
+        let c = read_conf_dir(&dir).unwrap().unwrap();
+        assert_eq!(c.theme.name(), Some("azure"));
+        assert_eq!(c.sounds, Choice::Inherit, "the old file no longer answers here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file with a syntax error costs the WHOLE file — that is what
+    /// this format is — so the one thing that may not happen is a quiet
+    /// fall back to the defaults. The rest of the cascade still
+    /// answers, the program still starts, and the user is told which
+    /// file and where in it.
+    #[test]
+    fn a_file_that_does_not_parse_is_said_out_loud_and_never_swallowed() {
+        fixture_registry();
+        // The sentence is remembered process-wide, so this test may not
+        // run beside one that reads a configuration of its own.
+        let _env = env_lock();
+        let base = scratch("broken-conf");
+        let user = base.join("user");
+        let system = base.join("system");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join(CONF_RON), "(theme: Named(\"azure\"))\n").unwrap();
+        // One bracket short, which is all it takes.
+        std::fs::write(
+            user.join(CONF_RON),
+            "(\n    theme: Named(\"crimson\"\n    variant: Off,\n)\n",
+        )
+        .unwrap();
+
+        let dirs = vec![user.clone(), system.clone()];
+        let c = cascade_conf(&dirs);
+        assert_eq!(
+            c.theme.name(),
+            Some("azure"),
+            "the file that does parse must still answer"
+        );
+        let said = conf_error().expect("a broken file must leave a sentence");
+        assert!(said.contains(&user.join(CONF_RON).display().to_string()), "{said}");
+        assert!(said.contains("line 2"), "the sentence must point AT it: {said}");
+
+        // And it stops being complained about the moment it is fixed,
+        // without the program being restarted.
+        std::fs::write(user.join(CONF_RON), "(theme: Named(\"crimson\"))\n").unwrap();
+        assert_eq!(cascade_conf(&dirs).theme.name(), Some("crimson"));
+        assert_eq!(conf_error(), None, "a repaired file must clear the warning");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The document is the schema: what the program writes, the program
+    /// reads back unchanged — and a file that is merely INCOMPLETE, or
+    /// carries a field this build has never heard of, is ordinary
+    /// rather than a failure. That is what keeps an older binary able
+    /// to open a newer machine's file.
+    #[test]
+    fn the_written_document_reads_back_and_a_partial_one_still_parses() {
+        let doc = DesktopConf {
+            theme: Choice::Named("crimson".into()),
+            variant: Choice::Off,
+            screens: [
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+                ("eDP-1".to_string(), Choice::Off),
+            ]
+            .into_iter()
+            .collect(),
+            term_font: model::FontConf { size: Some(112.5), ..Default::default() },
+            grid: model::GridConf { cols: Some(32), ..Default::default() },
+            color: model::ColorConf {
+                space: Choice::Named("bt2020 pq".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let text = ron_options().to_string_pretty(&doc, ron_pretty()).unwrap();
+        assert_eq!(ron_options().from_str::<DesktopConf>(&text).unwrap(), doc);
+        // Nothing that was not set is written down, which is what makes
+        // a cleared setting indistinguishable from one never made.
+        assert!(!text.contains("sounds"), "an unset field must not be written: {text}");
+        assert!(!text.contains("blur"), "nor an untouched group: {text}");
+        assert_eq!(
+            ron_options()
+                .to_string_pretty(&DesktopConf::default(), ron_pretty())
+                .unwrap()
+                .trim(),
+            "()",
+            "and a document with nothing in it is empty rather than a list of defaults"
+        );
+
+        // Half a document, a field from the future, and a number
+        // written the way a person writes one.
+        let hand = "// mine\n(\n    theme: Named(\"azure\"),\n    \
+                    warp_drive: Enabled,\n    sound: (volume: 40),\n)\n";
+        let c = ron_options().from_str::<DesktopConf>(hand).expect("must parse");
+        assert_eq!(c.theme.name(), Some("azure"));
+        assert_eq!(c.sound.volume(), 40, "`40` and `Some(40)` are the same number");
+        assert_eq!(c.layaut, Choice::Inherit, "everything absent is simply absent");
     }
 
     /// The search path itself: the user's directory first — it is also
@@ -2117,6 +3449,12 @@ mod tests {
     /// this program before the rename, and its settings have to go on
     /// being read where they lie. Nothing here moves, renames or
     /// deletes a file.
+    ///
+    /// BOTH is the state after the first setting is changed, and it is
+    /// reached by changing one rather than by planting a file: on a
+    /// real machine the new file can only have been written by
+    /// [`update_conf`], which is what carries the old one across and
+    /// what earns the right to answer in its place.
     #[test]
     fn the_new_configuration_folder_wins_and_the_old_one_is_still_read() {
         fixture_registry();
@@ -2129,39 +3467,761 @@ mod tests {
 
         // NEITHER: an ordinary first run. Not an error, not a directory
         // created — the program simply uses what is built into it.
-        assert!(conf_kv().is_empty(), "an empty home carries no settings");
+        assert_eq!(conf(), DesktopConf::default(), "an empty home carries no settings");
         assert!(!root.join(FAMILY_DIR).exists(), "reading creates nothing");
 
-        // OLD ONLY: the file is read under the folder's old name.
+        // OLD ONLY: the file is read under the folder's old name, in
+        // the format it was written in.
         let old = root.join(LEGACY_FAMILY_DIR);
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join(CONF_FILE), "Theme=crimson\nLayaut=console\n").unwrap();
-        let kv = conf_kv();
         assert_eq!(
-            kv.get("Theme").map(String::as_str),
+            conf().theme.name(),
             Some("crimson"),
             "a machine that never moved anything must keep its settings"
         );
 
-        // BOTH: the new name wins key by key, and a key only the old
-        // file carries is still answered. One cascade, one rung apart.
+        // BOTH, reached the only way a machine reaches it: by changing
+        // a setting. The write carries the old file across WHOLE and
+        // then answers for it — a user has one configuration, not two,
+        // and the second one would be a copy no reset could reach.
+        // Nothing is moved or deleted; the old file is still there.
         let new = root.join(FAMILY_DIR);
-        std::fs::create_dir_all(&new).unwrap();
-        std::fs::write(new.join(CONF_FILE), "Theme=azure\n").unwrap();
-        let kv = conf_kv();
-        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"), "the new folder wins");
+        set_engine_theme("azure");
+        let c = conf();
+        assert_eq!(c.theme.name(), Some("azure"), "the setting just made");
         assert_eq!(
-            kv.get("Layaut").map(String::as_str),
+            c.layaut.name(),
             Some("console"),
-            "a key only the old file has is inherited, not lost"
+            "and every field only the old file had, carried across rather than lost"
         );
+        let text = std::fs::read_to_string(new.join(CONF_RON)).unwrap();
+        assert!(text.contains("console"), "carried into the file, not merely answered: {text}");
+        assert!(old.join(CONF_FILE).is_file(), "and the old file is still where it was");
+
+        // Which is what makes taking a field OUT mean something: with
+        // the old file still in the cascade this would answer
+        // "crimson" again and nothing would say why.
+        clear_look_and_feel();
+        assert_eq!(conf().theme, Choice::Inherit, "a cleared field stays cleared");
+        assert_eq!(conf().layaut, Choice::Inherit);
 
         // NEW ONLY: what a machine looks like once the user has moved
         // the folder themselves.
         std::fs::remove_dir_all(&old).unwrap();
-        let kv = conf_kv();
-        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
-        assert_eq!(kv.get("Layaut"), None);
+        set_engine_theme("azure");
+        let c = conf();
+        assert_eq!(c.theme.name(), Some("azure"));
+        assert_eq!(c.layaut, Choice::Inherit);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The measurement that says a configuration cannot be LOST.
+    ///
+    /// The copy `write_conf` keeps is one generation deep and is
+    /// retaken on every write, and the writes come in bursts: one arrow
+    /// key on a slider is one write, and `nudge` calls the setter on
+    /// every press. So a user whose file is one bracket short, who then
+    /// presses the key twice, used to end up with a live file holding
+    /// one setting, a `.bak` holding that same file one press earlier,
+    /// and their own text nowhere at all.
+    ///
+    /// Three writes, which is two more than it used to survive.
+    #[test]
+    fn what_could_not_be_parsed_outlives_a_burst_of_writes_and_is_said_out_loud() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("rescue-broken");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        // Somebody's whole configuration, one bracket short.
+        let mine = "(\n    theme: Named(\"crimson\",\n    layaut: Named(\"console\"),\n    \
+                    sounds: Named(\"classic\"),\n    grid: (cols: 40, rows: 30),\n)\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+
+        // Exactly what holding an arrow key on the volume slider does.
+        set_sound_volume(70);
+        set_sound_volume(71);
+        set_sound_volume(72);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON_RESCUE)).unwrap(),
+            mine,
+            "the rescue copy must still be the text the USER wrote, not a \
+             write from halfway through the burst"
+        );
+        assert_eq!(conf().sound.volume(), 72, "and the setting asked for still took");
+
+        // The user is told, at the moment it happens rather than at the
+        // next start — by then the file parses and there is nothing
+        // left for a startup check to notice.
+        let said = take_conf_rescued().expect("a replaced file must leave a sentence");
+        assert!(said.contains(&dir.join(CONF_RON).display().to_string()), "{said}");
+        assert!(
+            said.contains(&dir.join(CONF_RON_RESCUE).display().to_string()),
+            "the sentence must name where the text went: {said}"
+        );
+        assert_eq!(take_conf_rescued(), None, "and it is said once, not per frame");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The SECOND typo, on a machine that still carries the first one's
+    /// rescue copy.
+    ///
+    /// This program never deletes a rescue copy — that is deliberate,
+    /// and it is exactly what makes this state ordinary rather than
+    /// exotic. A user breaks their file in June, gets a copy, repairs
+    /// the live file and leaves the copy lying there because nobody
+    /// told them to sweep it up. In August they hand-edit again and
+    /// miss another bracket. If the presence of June's copy is taken as
+    /// "already rescued", August's text is copied nowhere, the live
+    /// file is replaced, and two more nudges push it out of the `.bak`
+    /// as well — the same total loss the rescue copy exists to prevent,
+    /// arrived at by having been careful once before.
+    ///
+    /// So the question the copy answers is not "is there a file with
+    /// that name" but "is this text already kept". June's copy is not
+    /// touched, because a copy that is overwritten is not a copy.
+    #[test]
+    fn a_second_broken_file_is_kept_beside_the_first_rescue_rather_than_instead_of_it() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("rescue-twice");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        // June: broken, rescued, repaired, and the copy left lying
+        // about — written directly, because that is the state on disk
+        // however it was reached.
+        let june = "(\n    theme: Named(\"crimson\",\n)\n";
+        std::fs::write(dir.join(CONF_RON_RESCUE), june).unwrap();
+
+        // August: a different whole configuration, one bracket short,
+        // and the same burst of arrow keys on the volume slider.
+        let august = "(\n    theme: Named(\"azure\",\n    layaut: Named(\"console\"),\n    \
+                      sounds: Named(\"classic\"),\n    grid: (cols: 40, rows: 30),\n)\n";
+        std::fs::write(dir.join(CONF_RON), august).unwrap();
+        set_sound_volume(70);
+        set_sound_volume(71);
+        set_sound_volume(72);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON_RESCUE)).unwrap(),
+            june,
+            "the copy already on disk is somebody's configuration too and may \
+             not be written over"
+        );
+        let kept = rescue_copies(&dir);
+        assert!(
+            kept.iter().any(|t| t == august),
+            "August's text has to be SOMEWHERE on disk; what was found: {kept:?}"
+        );
+        assert_eq!(conf().sound.volume(), 72, "and the setting asked for still took");
+
+        // Named, so the sentence sends the user to the file that holds
+        // their August text rather than to June's.
+        let said = take_conf_rescued().expect("a replaced file must leave a sentence");
+        let named = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| said.contains(&p.display().to_string()) && p != &dir.join(CONF_RON))
+            .expect("the sentence must name a file that exists");
+        assert_eq!(
+            std::fs::read_to_string(&named).unwrap(),
+            august,
+            "the sentence must name the copy holding what was just replaced: {said}"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The file that is not TEXT — the shape a machine that lost power
+    /// mid-write leaves behind, and the one an editor set to the wrong
+    /// encoding leaves behind on purpose.
+    ///
+    /// A filesystem that recovers a journal can hand back a file of the
+    /// right length whose blocks were never written: bytes that are not
+    /// UTF-8 at all. Reading that with a `read_to_string` and taking the
+    /// failure to mean "this directory says nothing" is the quiet
+    /// version of the whole problem — a present file, holding
+    /// somebody's settings under whatever went wrong, replaced by a
+    /// document with one field in it and not a word said.
+    ///
+    /// A file that is THERE is never nothing. Only its absence is.
+    #[test]
+    fn a_configuration_that_is_not_even_text_is_kept_and_said_out_loud_too() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("rescue-not-text");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        // Half a configuration and then the hole the journal left,
+        // under permissions the user closed down by hand.
+        use std::os::unix::fs::PermissionsExt;
+        let mut mine: Vec<u8> = b"(\n    theme: Named(\"crimson\"),\n".to_vec();
+        mine.extend_from_slice(&[0xff, 0xfe, 0x00, 0x00, 0x9c]);
+        std::fs::write(dir.join(CONF_RON), &mine).unwrap();
+        std::fs::set_permissions(dir.join(CONF_RON), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        set_sound_volume(70);
+        set_sound_volume(71);
+        set_sound_volume(72);
+
+        assert_eq!(
+            std::fs::read(dir.join(CONF_RON_RESCUE)).unwrap(),
+            mine,
+            "bytes that are not text are still the user's file"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join(CONF_RON_RESCUE)).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "and a copy easier to read than the file it copies is a copy that \
+             gave something away"
+        );
+        assert_eq!(conf().sound.volume(), 72, "and the setting asked for still took");
+        let said = take_conf_rescued().expect("a replaced file must leave a sentence");
+        assert!(
+            said.contains(&dir.join(CONF_RON_RESCUE).display().to_string()),
+            "the sentence must name where the bytes went: {said}"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The file this program cannot get at, at all.
+    ///
+    /// A configuration owned by root, or one on a mount that has gone
+    /// sour, cannot be READ — and a file that cannot be read cannot be
+    /// judged. It may be somebody's whole configuration, perfectly
+    /// well-formed, behind a `chown` that went the wrong way; the one
+    /// thing certain about it is that no copy of it can be taken. Yet
+    /// replacing it needs no permission on the FILE at all, only on the
+    /// directory: the rename lands, and what could not be read is gone
+    /// with nothing kept.
+    ///
+    /// So the rule is what may be replaced, not what may be refused:
+    /// this program replaces what it has safely kept. A file that does
+    /// not PARSE is kept whole and then replaced, which is what leaves
+    /// the settings window able to fix a machine. A file that could not
+    /// be kept is left exactly where it is, and the sentence says what
+    /// to do about it — the one case where the window is honestly
+    /// powerless, because the shell it is running in is too.
+    #[test]
+    fn a_file_that_could_not_be_copied_anywhere_is_not_replaced_either() {
+        // Meaningless as root, who can read every file there is, so
+        // there is nothing for the rescue copy to fail at.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("rescue-unreadable");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mine = "(\n    theme: Named(\"crimson\"),\n    grid: (cols: 40),\n)\n";
+        let path = dir.join(CONF_RON);
+        std::fs::write(&path, mine).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        set_sound_volume(70);
+        set_sound_volume(71);
+        set_sound_volume(72);
+
+        // The directory is the user's own, so nothing stopped the
+        // rename except the decision not to make it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            mine,
+            "a file that could not be copied may not be written over"
+        );
+        let said = take_conf_rescued().expect("and the user has to be told why");
+        assert!(
+            said.contains(&path.display().to_string()),
+            "the sentence must name the file standing in the way: {said}"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory with no `.ron` in it says NOTHING, and that has to
+    /// stay a different answer from a `.ron` that cannot be read.
+    ///
+    /// The distinction is the whole of the change above: an absent file
+    /// hands the question to the next rung of the cascade in silence,
+    /// which is the ordinary state of every machine with no system
+    /// defaults and of every user who has never changed a setting. If
+    /// absence started reporting itself, the popup would be on screen
+    /// for everybody, and the one it exists for would be lost in it.
+    #[test]
+    fn a_directory_without_a_configuration_is_still_silent() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("no-conf-at-all");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let _ = take_conf_rescued();
+
+        assert_eq!(read_conf_dir(&root.join(FAMILY_DIR)), Ok(None), "a directory that is not there");
+        std::fs::create_dir_all(root.join(FAMILY_DIR)).unwrap();
+        assert_eq!(read_conf_dir(&root.join(FAMILY_DIR)), Ok(None), "and one that is empty");
+
+        let _ = conf();
+        assert_eq!(conf_error(), None, "nothing to complain about");
+        assert_eq!(take_conf_rescued(), None, "and nothing was replaced");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A write that keeps failing must not turn one broken file into a
+    /// directory full of identical copies of it.
+    ///
+    /// The read-only configuration directory is the case: every nudge
+    /// finds the same unreadable file, fails to replace it, and comes
+    /// back for the next keypress. Holding a slider down is hundreds of
+    /// those. What decides is the TEXT — the same text is already kept,
+    /// so there is nothing to keep — which is also why the burst in the
+    /// test above leaves exactly one copy.
+    #[test]
+    fn the_same_broken_text_is_kept_once_however_many_writes_come() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("rescue-repeats");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        let mine = "(\n    theme: Named(\"crimson\",\n    grid: (cols: 40),\n)\n";
+        for _ in 0..5 {
+            // Put it back each time, which is what a directory the
+            // program cannot write to amounts to: the replacement never
+            // lands, so the next keypress meets the same file again.
+            std::fs::write(dir.join(CONF_RON), mine).unwrap();
+            set_sound_volume(70);
+        }
+
+        assert_eq!(
+            rescue_copies(&dir),
+            vec![mine.to_string()],
+            "one text, one copy — a copy per keypress is a directory nobody \
+             can read"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every rescue copy in a directory, read back as text.
+    fn rescue_copies(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .expect("the configuration directory must exist")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(CONF_RON_RESCUE))
+                    .unwrap_or(false)
+            })
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The abandoned template, which is the state of every machine that
+    /// installed any release up to `be64867`.
+    ///
+    /// That installer wrote `~/.config/nacelle-desktop/nacelle-desktop.conf`
+    /// with every key present and BLANK, under a comment of its own
+    /// saying that empty means the defaults built into the program.
+    /// Reading those blanks as explicit offs pinned the system file off
+    /// — permanently, since that directory stands ahead of `/etc/xdg`
+    /// and is deliberately never rewritten — and LOOK AND FEEL RESET
+    /// then had nothing left to clear and no way to say so.
+    #[test]
+    fn the_blank_template_under_the_old_folder_name_does_not_pin_the_system_file_off() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("abandoned-template");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::fs::create_dir_all(root.join(LEGACY_FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(\n    theme: Named(\"corporate\"),\n    layaut: Named(\"console\"),\n    \
+             sounds: Named(\"classic\"),\n    term_font: (family: Named(\"Iosevka\")),\n)\n",
+        )
+        .unwrap();
+        // Verbatim from that release, blanks and all.
+        std::fs::write(
+            root.join(LEGACY_FAMILY_DIR).join(CONF_FILE),
+            "# Empty values or missing options = defaults built into the program.\n\
+             Theme=\nLayaut=\nSounds=\nTermFontSize=\nTermFontFamily=\n\
+             TermFontWeight=\nUIFontSize=\nUIFontFamily=\nUIFontWeight=\n",
+        )
+        .unwrap();
+
+        let c = conf();
+        assert_eq!(
+            c.theme.name(),
+            Some("corporate"),
+            "a template nobody chose may not outrank the machine's own file"
+        );
+        assert_eq!(c.sounds.name(), Some("classic"));
+        assert_eq!(c.layaut.name(), Some("console"));
+        assert_eq!(c.term_font.family.name(), Some("Iosevka"));
+
+        // And the reset still reaches the system file THROUGH it: the
+        // old file is never rewritten, so this is the state it leaves
+        // behind for good if the blanks are read as offs.
+        set_engine_theme("crimson");
+        assert_eq!(conf().theme.name(), Some("crimson"));
+        clear_look_and_feel();
+        assert_eq!(
+            conf().theme.name(),
+            Some("corporate"),
+            "the reset must land on the system value, not on a blank"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same blank, on the keys that are SWITCHES rather than names.
+    ///
+    /// The template shipped none of these, but the file it shipped
+    /// documented itself as one to edit — "Empty values or missing
+    /// options = defaults built into the program" — so `SoundTyping=`
+    /// with nothing after it is a line somebody typed and left, and the
+    /// old reader answered it with the built-in default, exactly as it
+    /// answered an absent one. Nothing on that machine could tell the
+    /// two apart. Reading the blank as a value now would hand the user
+    /// a switch they never flipped and let it outrank the system file
+    /// for good, which is the whole of the template's failure one rung
+    /// down.
+    #[test]
+    fn a_blank_switch_in_an_old_file_is_not_a_switch_anybody_flipped() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("blank-switches");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::fs::create_dir_all(root.join(LEGACY_FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        // A site that has decided about all three, against the
+        // program's own defaults — which is the only arrangement under
+        // which the difference is visible at all.
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(sound: (typing: false, ambient: false), grid: (snap: true))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(LEGACY_FAMILY_DIR).join(CONF_FILE),
+            "SoundTyping=\nSoundAmbient=\nGridSnap=\nSoundVolume=\n",
+        )
+        .unwrap();
+
+        let c = conf();
+        assert!(!c.sound.typing(), "a blank switch may not outrank the machine's own file");
+        assert!(!c.sound.ambient());
+        assert!(c.grid.snap(), "and the same blank read the other way round");
+        // The numbers next to them have always been read this way: a
+        // blank is not a number, so nothing is said. The switches now
+        // agree with them.
+        assert_eq!(c.sound.volume(), model::SoundConf::VOLUME);
+
+        // A switch that was actually written still wins, blank
+        // neighbours or not — this is not a rule about old files, it is
+        // a rule about blanks.
+        std::fs::write(
+            root.join(LEGACY_FAMILY_DIR).join(CONF_FILE),
+            "SoundTyping=1\nSoundAmbient=\nGridSnap=0\n",
+        )
+        .unwrap();
+        let c = conf();
+        assert!(c.sound.typing(), "1 is an answer and beats the system file");
+        assert!(!c.grid.snap(), "so is 0");
+        assert!(!c.sound.ambient(), "and the blank beside them still says nothing");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of the same failure, and the one the blank
+    /// template hid: a user who had CHOSEN things before the folder was
+    /// renamed, so their old file holds real names rather than blanks.
+    ///
+    /// Measured before this was closed: the reset wrote a document
+    /// holding `()` and nothing else, the old file in
+    /// `~/.config/nacelle-desktop/` went on answering theme, sound set
+    /// and volume, and the screen did not change. Not a blank
+    /// outranking a system file this time — a second file of the
+    /// user's own standing behind the first, which no amount of
+    /// removing fields from the first can reach.
+    #[test]
+    fn a_users_old_folder_is_carried_across_by_the_first_write_and_then_answers_no_more() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("old-folder-carried");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::fs::create_dir_all(root.join(LEGACY_FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(theme: Named(\"corporate\"), sounds: Named(\"classic\"))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(LEGACY_FAMILY_DIR).join(CONF_FILE),
+            "Theme=crimson\nSounds=quiet\nSoundVolume=40\nBlurRadius=55\n",
+        )
+        .unwrap();
+
+        // Before anything is written the old file is the answer, which
+        // is the promise the rename made and still keeps.
+        let c = conf();
+        assert_eq!(c.theme.name(), Some("crimson"));
+        assert_eq!(c.sound.volume(), 40);
+
+        // One setting changed — the whole of that file comes across,
+        // including the parts the setting had nothing to do with.
+        set_blur_opacity(80);
+        let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
+        for carried in ["crimson", "quiet", "40", "55"] {
+            assert!(text.contains(carried), "'{carried}' was left behind: {text}");
+        }
+        let c = conf();
+        assert_eq!(c.sound.volume(), 40, "and nothing changed on screen by moving");
+        assert_eq!(c.blur.radius(), 55);
+
+        // Which is what lets the reset mean what it says.
+        clear_look_and_feel();
+        let c = conf();
+        assert_eq!(
+            c.theme.name(),
+            Some("corporate"),
+            "the system file must answer again, not the user's old folder"
+        );
+        assert_eq!(c.sounds.name(), Some("classic"));
+        // What the reset does not cover is still the user's, from the
+        // file it was carried into.
+        assert_eq!(c.sound.volume(), 40, "a reset of the LOOK takes no sound with it");
+
+        // And the old file is exactly where it was, untouched.
+        assert_eq!(
+            std::fs::read_to_string(root.join(LEGACY_FAMILY_DIR).join(CONF_FILE)).unwrap(),
+            "Theme=crimson\nSounds=quiet\nSoundVolume=40\nBlurRadius=55\n",
+            "superseded is not the same as rewritten"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `Key=Value` file lying in the SAME directory as a `.ron` one
+    /// is not merged with it — it is not read at all — and that is
+    /// worth one line, because nothing else on the machine says so.
+    ///
+    /// The installer prints it for `/etc/xdg` at the moment it writes
+    /// the new file. It cannot print it for the user's own directory,
+    /// where no installer ever writes: the old file is there by having
+    /// been there, and the `.ron` appears beside it the first time a
+    /// setting is changed. So the program says it, from the one place
+    /// that can see both files.
+    #[test]
+    fn a_dead_key_value_file_beside_the_ron_one_is_named_once_per_directory() {
+        let root = scratch("dead-conf");
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(CONF_FILE), "Theme=crimson\n").unwrap();
+
+        // Nothing to say while the old file is the only one there: it
+        // is being READ, and `warn_once_about_conf_format` covers that.
+        assert!(!warn_once_about_dead_conf(&dir));
+
+        std::fs::write(dir.join(CONF_RON), "(theme: Named(\"azure\"))\n").unwrap();
+        assert_eq!(
+            read_conf_dir(&dir).unwrap().unwrap().theme.name(),
+            Some("azure"),
+            "the .ron answers whole"
+        );
+        // Said by that read, so this second ask is the guard's own test:
+        // `read_conf_dir` is on the path of a page that redraws every
+        // frame, and a line per frame is a line nobody reads.
+        assert!(!warn_once_about_dead_conf(&dir), "once per directory, not once per read");
+
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(CONF_FILE), "Theme=crimson\n").unwrap();
+        std::fs::write(other.join(CONF_RON), "()\n").unwrap();
+        assert!(
+            warn_once_about_dead_conf(&other),
+            "the two ends of the cascade are two different people's problem"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The addon settings directories are actually installed, which is
+    /// the difference between the whole half working and it being dead
+    /// AND silent: an uninstalled read answers `Origin::Refused`, and a
+    /// refusal says nothing to anybody because it means a programming
+    /// error rather than a user's mistake.
+    ///
+    /// Measured through the toolkit rather than by asserting that a
+    /// call happened, so the PATH SHAPE is under test too — `addons/`
+    /// beside the program's own file, one file per addon.
+    #[test]
+    fn an_addon_settings_file_written_by_the_user_is_actually_found() {
+        let _env = env_lock();
+        let root = scratch("addon-settings");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let addons = root.join(FAMILY_DIR).join("addons");
+        std::fs::create_dir_all(&addons).unwrap();
+        std::fs::write(addons.join("shell.ron"), "(rows: 40)\n").unwrap();
+
+        install_addon_settings();
+        let (text, origin) = nacelle::settings::text("shell", "");
+        assert_eq!(
+            origin,
+            nacelle::settings::Origin::File,
+            "the file the user wrote must be the one the addon is handed"
+        );
+        assert_eq!(text.trim(), "(rows: 40)");
+
+        // And an addon nobody wrote a file for is ordinary, not refused
+        // — the difference the settings window reports on.
+        assert_eq!(nacelle::settings::text("clock", "").1, nacelle::settings::Origin::Absent);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A settings file the program cannot use is named AT STARTUP, and
+    /// not one addon later.
+    ///
+    /// The toolkit fills `problems()` when somebody READS, so a host
+    /// that only installs the directories has an empty report for as
+    /// long as it takes a widget to be built — and `resolve()`, which
+    /// is where the report is turned into the notice on screen, runs
+    /// before any widget exists at all. The whole channel was therefore
+    /// dead on the one run that matters: the first frame after the user
+    /// edited the file. It also stays dead for an addon that is on no
+    /// board, whose file is exactly as broken and never asked for.
+    ///
+    /// So the host reads what is THERE, once, on the way in.
+    #[test]
+    fn a_settings_file_the_host_cannot_use_is_named_before_any_widget_exists() {
+        let _env = env_lock();
+        let root = scratch("addon-settings-report");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let addons = root.join(FAMILY_DIR).join("addons");
+        std::fs::create_dir_all(addons.join("search")).unwrap();
+        // One file per addon, and one member of an addon's directory:
+        // both arrangements the format has, both unreadable.
+        std::fs::write(addons.join("filesystem.ron"), "(hidden: false\n").unwrap();
+        std::fs::write(addons.join("search/engines.ron"), "(\n").unwrap();
+        // ...and one that is perfectly good, which must not be named.
+        std::fs::write(addons.join("shell.ron"), "(rows: 40)\n").unwrap();
+        // Nor may anything be said about what is not a settings file:
+        // the backup the toolkit takes stands in the same directory.
+        std::fs::write(addons.join("filesystem.ron.bak"), "(hidden: true)\n").unwrap();
+        // A name no addon can ask for is a bad NAME and not a bad file
+        // — and it is the one the window has to say MOST about, because
+        // nothing will ever ask for it and so nothing else will ever
+        // mention it. Reported without an addon on it, since the whole
+        // trouble is that the name is not an addon's.
+        std::fs::write(addons.join("Weird.ron"), "(hidden: false\n").unwrap();
+
+        install_addon_settings();
+
+        let problems = nacelle::settings::problems();
+        let named = |addon: &str, file: &str| {
+            problems.iter().any(|p| p.addon == addon && p.file == file)
+        };
+        assert!(
+            named("filesystem", ""),
+            "a broken settings file is not in the report the notice reads: {problems:?}"
+        );
+        assert!(
+            named("search", "engines"),
+            "an addon's directory is not walked, so half the format is unreported"
+        );
+        assert!(
+            !named("shell", ""),
+            "a file that loads was reported as a problem"
+        );
+        // The whole of the fourth path: a settings window saying every
+        // file loads while this one never will is the same half-truth
+        // the toolkit refuses to tell about a file that does not parse,
+        // except that this one can never repair itself.
+        let refused = addons.join("Weird.ron");
+        assert!(
+            problems.iter().any(|p| p.path == refused && p.addon.is_empty()),
+            "a name nothing can ever ask for is the one silence that never \
+             ends, and it is not in the report: {problems:?}"
+        );
+        assert_eq!(problems.len(), 3, "something else was named too: {problems:?}");
+
+        // What the walk picks up, stated where it can be read without a
+        // directory: the settings file, never the copy the toolkit
+        // leaves beside one it overwrites, and never the lock an editor
+        // drops while the user is sitting IN the file.
+        assert_eq!(
+            stem_of(Path::new("/a/filesystem.ron"), Some("ron")).as_deref(),
+            Some("filesystem")
+        );
+        assert_eq!(stem_of(Path::new("/a/filesystem.ron.bak"), Some("ron")), None);
+        assert_eq!(stem_of(Path::new("/a/.#filesystem.ron"), Some("ron")), None);
+        assert_eq!(stem_of(Path::new("/a/search"), None).as_deref(), Some("search"));
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_CONFIG_DIRS");
@@ -2221,11 +4281,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Writing goes to the new folder and ONLY there: the old file is
-    /// left byte for byte as it was found.
+    /// Writing goes to the new folder, in the new format, and ONLY
+    /// there: the old file is left byte for byte as it was found.
     ///
     /// This is what makes the change reversible — a mistake costs the
-    /// user nothing, because nothing of theirs was touched.
+    /// user nothing, because nothing of theirs was touched. It is also
+    /// the whole of the migration: there is no conversion step that
+    /// could go wrong halfway, only a new file that begins to answer
+    /// first while the old one goes on answering for the rest.
     #[test]
     fn a_setting_is_written_to_the_new_folder_and_the_old_file_is_untouched() {
         fixture_registry();
@@ -2239,13 +4302,18 @@ mod tests {
         let before = "# somebody's own file\nTheme=crimson\nSounds=classic\n";
         std::fs::write(old.join(CONF_FILE), before).unwrap();
 
-        set_conf_kv("Theme", "azure");
+        set_engine_theme("azure");
 
-        let new = root.join(FAMILY_DIR).join(CONF_FILE);
+        let new = root.join(FAMILY_DIR).join(CONF_RON);
         assert!(new.is_file(), "the write must land in the new folder");
+        let text = std::fs::read_to_string(&new).unwrap();
         assert!(
-            std::fs::read_to_string(&new).unwrap().contains("Theme=azure"),
-            "the value must be in the file that was written"
+            text.contains("theme: Named(\"azure\")"),
+            "the value must be in the file that was written: {text}"
+        );
+        assert!(
+            text.starts_with("// nacelle-desktop settings"),
+            "a file people edit must say what it is: {text}"
         );
         assert_eq!(
             std::fs::read_to_string(old.join(CONF_FILE)).unwrap(),
@@ -2254,9 +4322,436 @@ mod tests {
         );
         // And the program now reads the new value while the rest of the
         // old file still answers for everything it alone carries.
-        let kv = conf_kv();
-        assert_eq!(kv.get("Theme").map(String::as_str), Some("azure"));
-        assert_eq!(kv.get("Sounds").map(String::as_str), Some("classic"));
+        let c = conf();
+        assert_eq!(c.theme.name(), Some("azure"));
+        assert_eq!(c.sounds.name(), Some("classic"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The write keeps a copy of what the USER wrote, and lands whole.
+    ///
+    /// A format parsed all or nothing raises the price of one bad
+    /// write from a single setting to the entire file, and a file the
+    /// user cannot get back is the difference between a format change
+    /// and a bug with a version number.
+    ///
+    /// Which is why the copy is of a file this program did NOT write.
+    /// A copy refreshed on every write is a copy of the previous save:
+    /// the first nudge of a slider puts the user's document in `.bak`,
+    /// the second replaces it with the first nudge's output, and after
+    /// two keypresses the hand-written text is in neither file. This
+    /// test spends most of its length on that second keypress, because
+    /// that is where it used to go.
+    #[test]
+    fn every_write_keeps_the_copy_it_replaced_and_leaves_nothing_half_written() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("write-backup");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+
+        set_engine_theme("crimson");
+        assert!(
+            !dir.join(CONF_RON_BACKUP).exists(),
+            "the first write replaced nothing, so there is nothing to keep"
+        );
+
+        set_engine_theme("azure");
+        assert!(
+            !dir.join(CONF_RON_BACKUP).exists(),
+            "a copy of this program's own output is not a backup of anything"
+        );
+        assert!(leftover_tmp(&dir).is_empty(), "the temporary name may not survive");
+        assert_eq!(conf().theme.name(), Some("azure"));
+
+        // A file of the user's own that cannot be parsed is replaced
+        // rather than left in the way — and the copy is what makes that
+        // defensible, so it has to hold the broken text verbatim.
+        //
+        // Comments and a field this build has never heard of, both of
+        // which the serialiser drops on the way through: the copy is
+        // the only place they can still be, so what it holds has to be
+        // the bytes and not the document.
+        let mine = "// mine, and nobody else's\n(theme: Named(\"crimson\", wallpaper: \"sea\")\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+        set_engine_theme("pure");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON_BACKUP)).unwrap(),
+            mine,
+            "what could not be parsed must still be recoverable"
+        );
+        assert_eq!(conf().theme.name(), Some("pure"));
+
+        // The keypress that used to destroy it. Two more, in fact: a
+        // slider does not stop at one.
+        set_engine_theme("azure");
+        set_engine_theme("crimson");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON_BACKUP)).unwrap(),
+            mine,
+            "the copy holds what the user wrote, however many saves follow"
+        );
+        assert!(leftover_tmp(&dir).is_empty(), "and no write left a temporary behind");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every temporary file left standing in a directory. Matched on
+    /// the infix rather than on a whole name, because the whole name is
+    /// the point: a temporary carries the writing process's id, so
+    /// there is no single name a test could ask about.
+    fn leftover_tmp(dir: &Path) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+        rd.flatten()
+            .filter_map(|e| e.file_name().to_str().map(String::from))
+            .filter(|n| n.contains(CONF_RON_TMP))
+            .collect()
+    }
+
+    /// The user's old folder is only superseded by a file that actually
+    /// CARRIES it.
+    ///
+    /// The state is ordinary and it is the worst one there is: an old
+    /// file with a bracket missing, in the folder this program used to
+    /// write to. The first setting anybody changes writes a document in
+    /// the NEW folder holding that one setting and nothing else —
+    /// nothing could be carried across, because nothing could be read —
+    /// and if the new file's mere existence retires the old folder, the
+    /// whole configuration is gone: theme, layaut, sounds, all answered
+    /// by the defaults, with a file sitting on the disk that says
+    /// otherwise and is no longer read by anything.
+    ///
+    /// What the user does next is repair the typo. That is the moment
+    /// this test is about: their settings have to come back.
+    #[test]
+    fn an_old_file_that_was_never_carried_across_goes_on_being_read() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("supersede-unread");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let old = root.join(LEGACY_FAMILY_DIR);
+        std::fs::create_dir_all(&old).unwrap();
+        let _ = take_conf_rescued();
+
+        // Everything they have, one bracket short of parsing.
+        let mine = "(\n    theme: Named(\"crimson\"\n    sounds: Named(\"classic\"),\n)\n";
+        std::fs::write(old.join(CONF_RON), mine).unwrap();
+
+        // One nudge of the volume slider, which is what writes the new
+        // folder's file for the first time.
+        set_sound_volume(72);
+        assert_eq!(conf().sound.volume(), 72, "the setting asked for took");
+        assert!(
+            conf_error().is_some(),
+            "a file of the user's that could not be read is not a file to say \
+             nothing about"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join(CONF_RON)).unwrap(),
+            mine,
+            "and nothing was rewritten, moved or deleted"
+        );
+
+        // The typo repaired — one character, in an editor, in the file
+        // that was there all along.
+        let repaired = "(\n    theme: Named(\"crimson\"),\n    sounds: Named(\"classic\"),\n)\n";
+        std::fs::write(old.join(CONF_RON), repaired).unwrap();
+
+        let c = conf();
+        assert_eq!(
+            c.theme.name(),
+            Some("crimson"),
+            "a file nothing was taken out of may not be cut out of the cascade"
+        );
+        assert_eq!(c.sounds.name(), Some("classic"));
+        assert_eq!(c.sound.volume(), 72, "and the new file still answers for what it holds");
+        assert_eq!(conf_error(), None, "with nothing left to complain about");
+
+        // Now the carry can happen, and one nudge is what does it: the
+        // old folder retires only once its bytes are in the new file.
+        set_sound_volume(73);
+        assert!(
+            std::fs::read_to_string(dir_of(&root).join(CONF_RON)).unwrap().contains("crimson"),
+            "the write that retires the old folder is the one that carries it"
+        );
+        assert_eq!(conf().theme.name(), Some("crimson"));
+
+        // And from here the reset works, which is what the retirement
+        // was for — including on the write AFTER it, which used to find
+        // every cleared field still sitting in the old folder and put
+        // them all back.
+        clear_look_and_feel();
+        set_sound_volume(74);
+        assert_eq!(
+            conf().theme.name(),
+            None,
+            "a folder that has been carried across may not be seeded from either"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The configuration directory under a scratch root.
+    fn dir_of(root: &Path) -> PathBuf {
+        root.join(FAMILY_DIR)
+    }
+
+    /// A configuration kept in a dotfiles repository and linked into
+    /// place stays LINKED to it.
+    ///
+    /// The loss here is quieter than any other on this page, which is
+    /// what makes it worth a test of its own: every value survives the
+    /// day it happens. `rename` replaces the link with a plain file,
+    /// the settings are all still there, and from that moment the
+    /// user's repository — the thing they think of as their
+    /// configuration — is a file nothing reads. They edit it, restart,
+    /// and the edit did not take; there is no message, because from the
+    /// program's side nothing went wrong.
+    #[test]
+    fn a_configuration_linked_in_from_elsewhere_is_written_through_the_link() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("conf-symlink");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = root.join("dotfiles");
+        std::fs::create_dir_all(&store).unwrap();
+        let real = store.join("nacelle-desktop.ron");
+        std::fs::write(&real, "// mine\n(\n    theme: Named(\"crimson\"),\n)\n").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join(CONF_RON)).unwrap();
+
+        set_sound_volume(72);
+
+        assert!(
+            std::fs::symlink_metadata(dir.join(CONF_RON)).unwrap().file_type().is_symlink(),
+            "the link the user made is theirs, and a write may not eat it"
+        );
+        let written = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            written.contains("volume: 72"),
+            "the setting has to land in the file the link points at: {written}"
+        );
+        assert!(
+            std::fs::read_to_string(store.join(CONF_RON_BACKUP)).unwrap().contains("// mine"),
+            "and the copy of what was replaced belongs beside that file, not \
+             beside the link"
+        );
+
+        // The point of the whole arrangement: the repository is still
+        // the source of truth, so an edit made there is what the
+        // program reads.
+        std::fs::write(&real, "(\n    theme: Named(\"azure\"),\n)\n").unwrap();
+        assert_eq!(conf().theme.name(), Some("azure"));
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A write that cannot happen is on the SCREEN.
+    ///
+    /// This is the branch that loses least — the file on disk is whole,
+    /// and it is left whole — which is exactly why it was easy to leave
+    /// silent. But the slider springs back and nothing explains it, and
+    /// every change made from here on goes nowhere: a permanent, quiet
+    /// loss of everything the user does next, which is worse to find
+    /// out by accident than a file that was replaced.
+    #[test]
+    fn a_setting_that_could_not_be_saved_is_not_only_said_to_stderr() {
+        // Meaningless as root, who may write a directory whatever its
+        // permissions say.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("write-refused");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = "(\n    theme: Named(\"crimson\"),\n)\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+        let _ = take_conf_rescued();
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        set_sound_volume(72);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap(),
+            mine,
+            "nothing on disk may be touched by a write that could not happen"
+        );
+        let said = take_conf_rescued()
+            .expect("a setting that went nowhere may not go there quietly");
+        assert!(
+            said.contains(&dir.join(CONF_RON).display().to_string()),
+            "and the sentence has to name the file it could not write: {said}"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two processes writing at the same moment do not share a
+    /// temporary name.
+    ///
+    /// The settings window and the running desktop are two processes —
+    /// this file says so itself, in `keep_broken_text`, and claims its
+    /// rescue names exclusively for that reason. The temporary the
+    /// configuration is written through had one fixed name and was
+    /// opened with a `File::create`, which TRUNCATES: both processes
+    /// hold the same file, and the rename of whichever finishes first
+    /// publishes what the other is still writing. For a format parsed
+    /// all or nothing that is not a lost setting, it is a lost file.
+    ///
+    /// Measured on the leftover, because the race itself is not
+    /// reproducible on demand: what another process is in the middle of
+    /// writing must still be there afterwards, untouched.
+    #[test]
+    fn a_second_writer_does_not_write_through_this_ones_temporary() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("tmp-shared");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Half a document, under the one name every process used to
+        // take. Whoever is writing it has not finished.
+        let theirs = dir.join("nacelle-desktop.ron.new");
+        let half = "(\n    theme: Named(\"crim";
+        std::fs::write(&theirs, half).unwrap();
+
+        set_sound_volume(72);
+
+        assert_eq!(
+            std::fs::read_to_string(&theirs).unwrap(),
+            half,
+            "a name this write did not claim is somebody else's file"
+        );
+        assert_eq!(conf().sound.volume(), 72, "and this write still landed");
+
+        // The claim itself: two of them running at once cannot come
+        // back with the same name, and the name says which process it
+        // belongs to.
+        let path = dir.join(CONF_RON);
+        let (a, _held) = claim_tmp(&path).unwrap();
+        let (b, _also) = claim_tmp(&path).unwrap();
+        assert_ne!(a, b, "a name that is merely checked is a name two writers get");
+        let name = a.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "the id is what makes the name unique among the processes that are \
+             alive: {name}"
+        );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LOOK AND FEEL RESET, and the reason it needed the format
+    /// changed under it: it has to REMOVE the user's fields, not write
+    /// them empty. An empty value wins the cascade, so a reset made of
+    /// empties would pin the system defaults OFF — on a machine that
+    /// has a system file, which is exactly what this change installs.
+    ///
+    /// The measurement is the one that failed before: a system file
+    /// naming a theme, a layaut, a sound set and a variant, a user who
+    /// had chosen otherwise, and the system's answers standing again
+    /// afterwards.
+    #[test]
+    fn the_reset_takes_the_users_fields_out_and_lets_the_system_file_answer() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("reset-clears");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(\n    theme: Named(\"azure\"),\n    variant: Named(\"hc\"),\n    \
+             layaut: Named(\"console\"),\n    sounds: Named(\"classic\"),\n    \
+             screens: {\"DP-1\": Named(\"cockpit\")},\n    \
+             term_font: (size: 130, family: Named(\"Iosevka\")),\n    \
+             blur: (radius: 40),\n)\n",
+        )
+        .unwrap();
+
+        // The user disagrees with all of it, including by switching
+        // two things OFF — the state an empty value used to leave
+        // behind, and the one a reset must also undo.
+        set_engine_theme("crimson");
+        set_engine_variant(None);
+        set_layaut_option("hangar");
+        set_layaut_for_connector("DP-1", "");
+        set_sounds_option("quiet");
+        set_term_font_size(80);
+        set_term_font_family("Fira Code");
+        set_grid_padding(24);
+        set_blur_radius(90);
+        assert_eq!(conf().theme.name(), Some("crimson"));
+        assert_eq!(conf().variant, Choice::Off, "off is a value of its own");
+        assert!(conf().screens().is_empty(), "the screen was switched off");
+
+        clear_look_and_feel();
+
+        let c = conf();
+        assert_eq!(c.theme.name(), Some("azure"), "the system theme must answer again");
+        assert_eq!(
+            c.variant.name(),
+            Some("hc"),
+            "an explicit off that was never removed would have blocked this"
+        );
+        assert_eq!(c.layaut.name(), Some("console"));
+        assert_eq!(c.sounds.name(), Some("classic"));
+        assert_eq!(
+            c.screens().get("DP-1").map(String::as_str),
+            Some("cockpit"),
+            "the per-screen assignments go too, or a second monitor stays pinned"
+        );
+        assert_eq!(c.term_font.scale(0.5, 2.0), 1.3, "and both font sections, whole");
+        assert_eq!(c.term_font.family.name(), Some("Iosevka"));
+        // The band around every panel. It is typed on the GRID page,
+        // which is why it was missed, but it overrides the theme's
+        // `layout.panel_gutter` and nothing else — so a number left
+        // standing here would be the user's own spacing around a look
+        // they have just taken back.
+        assert_eq!(
+            c.grid.padding(),
+            None,
+            "the panel gutter is an override of a theme token, so it goes too"
+        );
+
+        // What the reset does NOT touch stays the user's: this is a
+        // LOOK AND FEEL reset, not a factory reset.
+        assert_eq!(c.blur.radius(), 90, "the glass is not part of look and feel here");
+
+        // And the user's file no longer carries a word about any of it.
+        let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
+        for gone in ["theme", "variant", "layaut", "sounds", "screens", "term_font"] {
+            assert!(!text.contains(gone), "'{gone}' must be REMOVED, not emptied: {text}");
+        }
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_CONFIG_DIRS");
@@ -3130,10 +5625,14 @@ mod tests {
     /// then takes. Hermetic: an explicit configuration text and an
     /// explicit list of installed layauts, so this says what the rule
     /// is rather than what this machine's screens happen to be.
+    ///
+    /// Written in the OLD format on purpose: the bracket family it
+    /// invented is the thing the map replaces, and every one of those
+    /// files still has to read the way it always did.
     #[test]
     fn every_screen_takes_the_layaut_its_connector_is_assigned() {
         fixture_registry();
-        let kv = parse_kv(
+        let doc = DesktopConf::from_legacy(&parse_kv(
             "# the desktop\n\
              Layaut=console\n\
              Layaut[DP-1]=cockpit\n\
@@ -3141,8 +5640,8 @@ mod tests {
              Layaut[HDMI-A-1]=\n\
              Layaut[Dell Inc.]=nonsense\n\
              Theme=default\n",
-        );
-        let assigned = screen_layauts_in(&kv);
+        ));
+        let assigned = doc.screens();
         assert_eq!(
             assigned.get("DP-1").map(String::as_str),
             Some("cockpit"),
@@ -3162,7 +5661,7 @@ mod tests {
             "a make and model names no screen and cannot be a key: {assigned:?}"
         );
         assert_eq!(
-            kv.get("Layaut").map(String::as_str),
+            doc.layaut.name(),
             Some("console"),
             "the per-screen keys leave the default one alone"
         );
@@ -3194,48 +5693,57 @@ mod tests {
         );
     }
 
-    /// Writing an assignment, and taking it back. The file is a
-    /// user-editable one, so what matters as much as the value is that
-    /// everything else in it comes out untouched.
+    /// Writing an assignment, and taking it back. What matters as much
+    /// as the value is that everything else in the file comes out
+    /// untouched: one screen's arrangement is not the others', and it
+    /// is certainly not the theme.
     #[test]
     fn an_assignment_is_written_beside_the_rest_of_the_file() {
         fixture_registry();
-        let before = "# my desktop\nTheme=crimson\nLayaut=console\n";
-        let text = set_kv_in_text(
-            before,
-            &screen_layaut_key("DP-1").expect("DP-1 is a connector"),
-            "cockpit",
-        );
-        let kv = parse_kv(&text);
+        let _env = env_lock();
+        let root = scratch("assign-screen");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        set_engine_theme("crimson");
+        set_layaut_option("console");
+
+        set_layaut_for_connector("DP-1", "cockpit");
+        let c = conf();
         assert_eq!(
-            screen_layauts_in(&kv).get("DP-1").map(String::as_str),
+            c.screens().get("DP-1").map(String::as_str),
             Some("cockpit"),
-            "what was written must read back: {text}"
+            "what was written must read back"
         );
-        assert_eq!(kv.get("Layaut").map(String::as_str), Some("console"),
-            "the default layaut is a different key and must not be touched");
-        assert_eq!(kv.get("Theme").map(String::as_str), Some("crimson"));
-        assert!(text.contains("# my desktop"), "comments survive: {text}");
-
-        // Assigning again replaces the line rather than adding a second.
-        let text2 = set_kv_in_text(&text, "Layaut[DP-1]", "hangar");
-        assert_eq!(text2.matches("Layaut[DP-1]").count(), 1, "one line per screen: {text2}");
         assert_eq!(
-            screen_layauts_in(&parse_kv(&text2)).get("DP-1").map(String::as_str),
-            Some("hangar")
+            c.layaut.name(),
+            Some("console"),
+            "the default layaut is a different field and must not be touched"
         );
+        assert_eq!(c.theme.name(), Some("crimson"));
 
-        // Clearing writes an empty value: the assignment is gone, and
-        // the line stays to overrule a system file that makes one.
-        let text3 = set_kv_in_text(&text2, "Layaut[DP-1]", "");
-        assert!(text3.contains("Layaut[DP-1]="), "the key stays as an explicit off: {text3}");
-        assert!(screen_layauts_in(&parse_kv(&text3)).is_empty());
+        // Assigning again replaces the entry rather than adding a second.
+        set_layaut_for_connector("DP-1", "hangar");
+        let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
+        assert_eq!(text.matches("\"DP-1\"").count(), 1, "one entry per screen: {text}");
+        assert_eq!(conf().screens().get("DP-1").map(String::as_str), Some("hangar"));
+
+        // Clearing writes an explicit off: the assignment is gone, and
+        // the entry stays to overrule a system file that makes one.
+        set_layaut_for_connector("DP-1", "");
+        assert_eq!(conf().screens.get("DP-1"), Some(&Choice::Off), "an off, not an absence");
+        assert!(conf().screens().is_empty(), "and no screen is assigned anything");
 
         // A key nothing could match a screen to is never written.
-        assert!(screen_layaut_key("HDMI-A-1").is_some());
+        assert_eq!(screen_layaut_key("HDMI-A-1").as_deref(), Some("HDMI-A-1"));
         for bad in ["", "Dell Inc. U2720Q", "DP-1]", "screen 2"] {
             assert!(screen_layaut_key(bad).is_none(), "'{bad}' must not become a key");
+            set_layaut_for_connector(bad, "cockpit");
         }
+        assert_eq!(conf().screens.len(), 1, "and nothing of the sort reached the file");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A screen assigned a layaut this machine does not have. The
@@ -3245,7 +5753,7 @@ mod tests {
     #[test]
     fn an_assignment_to_a_layaut_that_is_not_installed_falls_back_to_the_default() {
         fixture_registry();
-        let assigned = screen_layauts_in(&parse_kv("Layaut[DP-1]=cockpit\n"));
+        let assigned = DesktopConf::from_legacy(&parse_kv("Layaut[DP-1]=cockpit\n")).screens();
         let installed = ["default".to_string(), "console".to_string()];
         let got = choose_layaut(Some("DP-1"), &assigned, "console", &installed);
         assert_eq!(got.name, "console", "the screen falls back to the default layaut");
@@ -3256,7 +5764,8 @@ mod tests {
 
         // The same rule keeps a hand-written value out of the paths
         // built from it: only a name the store listed is ever chosen.
-        let evil = screen_layauts_in(&parse_kv("Layaut[DP-1]=../../etc/passwd\n"));
+        let evil =
+            DesktopConf::from_legacy(&parse_kv("Layaut[DP-1]=../../etc/passwd\n")).screens();
         assert_eq!(choose_layaut(Some("DP-1"), &evil, "console", &installed).name, "console");
     }
 
@@ -3267,9 +5776,10 @@ mod tests {
     #[test]
     fn an_assignment_survives_the_screens_coming_up_in_another_order() {
         fixture_registry();
-        let assigned = screen_layauts_in(&parse_kv(
+        let assigned = DesktopConf::from_legacy(&parse_kv(
             "Layaut[DP-1]=cockpit\nLayaut[HDMI-A-1]=hangar\n",
-        ));
+        ))
+        .screens();
         let installed = [
             "default".to_string(),
             "console".to_string(),
@@ -3377,8 +5887,8 @@ mod tests {
             crate::widgets::Themed::new("gutter-user", "[layout]\npanel_gutter = 9u\n");
         assert_eq!(panel_gutter(grid_padding_override()), 31.0);
         // And a number no spinner could have produced is still bounded.
-        set_grid_padding(GRID_PAD_MAX + 1000);
-        assert_eq!(grid_padding_override(), Some(GRID_PAD_MAX));
+        set_grid_padding(model::GRID_PAD_MAX + 1000);
+        assert_eq!(grid_padding_override(), Some(model::GRID_PAD_MAX));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3502,3 +6012,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

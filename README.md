@@ -37,13 +37,77 @@ The folder is named after the nacelle FAMILY rather than after this
 program, because the themes, sounds, layauts and addons belong to the
 environment and not to one binary — `nacelle-ai` reads the same
 directories. The file inside says which program the settings are for:
-`nacelle/nacelle-desktop.conf`.
+`nacelle/nacelle-desktop.ron`.
+
+Settings are [Rusty Object Notation](https://github.com/ron-rs/ron): a
+field you have not written is answered by the system file
+(`/etc/xdg/nacelle/nacelle-desktop.ron`) and then by the program's own
+defaults, while `Off` means "nothing" and outranks a system file that
+names something. The settings window rewrites the file when you change
+something and does not keep comments of your own; what you wrote by
+hand is kept in `nacelle-desktop.ron.bak`. That copy is taken of a file
+the program did not write itself, so later saves leave it alone — it
+stays your text however many settings you change afterwards.
+
+Keeping the file in a dotfiles repository and linking it into place
+works: the program writes through the link, so your repository stays
+the file that answers. A setting that cannot be saved at all — a
+directory gone read-only, a full disk — is said on screen rather than
+only in the log, because nothing else would explain a slider that
+springs back.
+
+RON is parsed all or nothing, so one misplaced bracket costs the whole
+file rather than the line it is on. The program says so on screen
+instead of quietly starting up looking factory-fresh. If you change a
+setting while your file is in that state, the program replaces it and
+keeps what you wrote — whole, and untouched by every write that
+follows — as `nacelle-desktop.ron.broken`. Repair that file and put it
+back under the old name; nothing deletes it for you.
+
+An older `nacelle-desktop.conf` in the `Key=Value` format goes on being
+read wherever no `.ron` stands beside it. Nothing is converted, moved
+or deleted: the first setting you change writes the new file next to
+the old one, and the new one then answers first. Within one directory
+the two are never merged — once a `.ron` is there, the `.conf` beside
+it is not read at all, and the program says so once.
+
+### Addon settings
+
+An addon reads its own settings from `nacelle/addons/`, beside the
+program's file and cascading the same way — yours first, then
+`/etc/xdg/nacelle/addons/`. One file per addon, named after it
+(`addons/shell.ron`), or a directory of that name once an addon needs
+more than one (`addons/search/engines.ron`). Unlike the program's own
+file these do not merge field by field: the nearest file found is the
+whole answer. A file that does not parse is named on stderr and on the
+ADDONS page of the settings window, and the addon runs on its own
+defaults — it is never ignored in silence. Neither is a file whose
+NAME no addon can ask for: `My Addon.ron` is a settings file nothing
+will ever read, so it is named too, in the one place you would look.
+
+### The folder's old name
 
 If you already have a `nacelle-desktop` folder from an earlier version,
 leave it where it is. Both names are searched, the new one first, so
 everything installed under the old name goes on working; only new
 settings and saved layauts are written to `nacelle`. Nothing is moved
 or deleted, and you can move the folder yourself whenever you like.
+
+Your settings file is the one exception, and it is a carry-across
+rather than a move: the first setting you change writes
+`nacelle/nacelle-desktop.ron` containing everything your old file said,
+and from then on that file answers alone. The old one stays exactly
+where it is — nothing deletes it — but it is no longer read, because
+two settings files of your own would mean a reset that clears one and
+is answered by the other.
+
+That happens only once the carry has actually happened, and the program
+writes `nacelle/nacelle-desktop.ron.carried` to say so. If your old
+file could not be read that day — a bracket short, or the wrong
+permissions — nothing was carried, so nothing retires: the old folder
+goes on being read, the program says what is wrong with the file, and
+repairing it brings your settings straight back. The mark holds no
+settings; delete it and the old folder is simply read again.
 
 ## Widgets
 
@@ -110,9 +174,12 @@ make install        # clean build + install to ~/.local/
 sudo make install   # clean build + install to /usr/local/
 ```
 
-That installs the program alone. For a working interface, install the
-widgets and the default theme set as well — each has the same two
-commands:
+That installs the program alone — the binary, its fonts, the icons and
+the desktop entry, and nothing under `/etc` or `~/.config`. For a
+working interface, install the widgets and the default theme set as
+well; the theme set is also what ships
+`/etc/xdg/nacelle/nacelle-desktop.ron`, the file that answers every
+setting nobody has changed. Each has the same two commands:
 
 ```sh
 git clone https://github.com/JOCKER3201/nacelle-widgets && (cd nacelle-widgets && make install)
