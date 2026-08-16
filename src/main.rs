@@ -1766,6 +1766,18 @@ fn main() {
                             MouseScrollDelta::LineDelta(_, y) => y,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32 / 20.0,
                         };
+                        // An open settings window is a grab, for the same
+                        // reason the two guards above are: the wheel must
+                        // not reach whatever stands under it. It was the
+                        // one window that had no such line, so the notch
+                        // fell through to `content_layout()` — the board
+                        // BEHIND the window — and turned a widget nobody
+                        // was pointing at, while the settings pages could
+                        // not be scrolled at all.
+                        if settings.open {
+                            settings.wheel(dy);
+                            return;
+                        }
                         let mouse = screens[si].mouse;
                         let (w, h) = screens[si].size();
                         let layout = screens[si].content_layout();
