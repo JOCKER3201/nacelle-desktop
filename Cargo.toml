@@ -30,6 +30,16 @@ nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-addon
 nacelle-widget-search = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 nacelle-widget-ai = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 
+# The configuration file (src/config/model.rs). Rusty Object Notation
+# carries Rust's own types — enum variants, tuples, named structs — so
+# the parser is DERIVED from the shape of the settings instead of being
+# written out by hand at every read, which is where the defaults used
+# to hide. Audited before it was added, with its whole subtree: MIT OR
+# Apache-2.0, taken as MIT, and only two packages of eleven are new to
+# the lock file. Declared as 0.12 because 0.10.0 is yanked.
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+
 # Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
 # requests on the shared XWayland display. The same crate winit
 # already builds on, so this adds no new code to the tree.

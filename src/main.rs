@@ -1407,6 +1407,20 @@ fn main() {
     // one, and going to a board turns the monitor in front of the user.
     macro_rules! settings_after {
         () => {{
+            // A write that found the user's own file unreadable replaced
+            // it. This is the moment to say so: the user is in front of
+            // the window and has just changed something, and by the next
+            // start the file parses and there is nothing left to notice.
+            //
+            // Here rather than only in `apply_config!` because most of
+            // what the window writes never re-applies the configuration
+            // — a nudge on the volume slider is a write and nothing
+            // else — and the writes that destroy a broken file are
+            // exactly those, in bursts of one per keypress.
+            if let Some(said) = config::take_conf_rescued() {
+                nacelle::sound::emit(nacelle::sound::Event::Alert);
+                popup.show(said);
+            }
             let si = ui_screen.min(screens.len() - 1);
             // The pinned-section half of LOOK AND FEEL RESET: the
             // window cannot clear the section itself — only the
@@ -1431,7 +1445,8 @@ fn main() {
                         // configuration.
                         popup.show(format!(
                             "Look and feel reset: theme, layauts, sounds, fonts, \
-                             and the {}x{}@{} section of layaut '{}'",
+                             the panel gutter, and the {}x{}@{} section of \
+                             layaut '{}'",
                             key.0, key.1, key.2, name
                         ));
                     }

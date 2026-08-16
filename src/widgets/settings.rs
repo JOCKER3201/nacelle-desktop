@@ -70,6 +70,10 @@ enum View {
     Boards,
     Color,
     Blur,
+    /// What the addons on this machine were told to do — the settings
+    /// files the user writes by hand, and every one the program could
+    /// not use.
+    Addons,
 }
 
 /// The view one layer out, or `None` at the outermost one.
@@ -115,6 +119,12 @@ enum Act {
     OpenBoards,
     OpenColor,
     OpenBlur,
+    /// Reads the toolkit's report on the addon settings files, then
+    /// shows it. Read on the way in rather than every frame: the list
+    /// grows as widgets are built, and a page that re-asked while it
+    /// was open would change under the eye for no reason the user
+    /// could connect to anything they did.
+    OpenAddons,
     /// LOOK AND FEEL's pinned footer: opens the confirmation, and does
     /// nothing else. A press that could clear six settings is a press
     /// the pointer must not be able to make by accident.
@@ -216,6 +226,7 @@ fn focus_id(act: Act) -> FocusId {
         OpenBoards => FocusId::of("settings.menu.boards"),
         OpenColor => FocusId::of("settings.menu.color"),
         OpenBlur => FocusId::of("settings.menu.blur"),
+        OpenAddons => FocusId::of("settings.menu.addons"),
         ListBtn(l) => FocusId::of(match l {
             ListId::Looks => "settings.lookfeel.themes",
             ListId::Layauts => "settings.lookfeel.layauts",
@@ -704,7 +715,7 @@ enum Ctrl {
         step: u32,
         get: fn(&Settings) -> u32,
         set: fn(&mut Settings, u32),
-        /// Writes the value to nacelle-desktop.conf.
+        /// Writes the value to nacelle-desktop.ron.
         save: fn(&Settings),
     },
     /// A row of fixed segments, one of them on: COLOR's DEPTH.
@@ -802,7 +813,7 @@ struct Page {
 /// The main menu. THEMES, LOOK, LAYAUTS, SOUNDS and FONT are no longer
 /// here: all five were one question — what the desktop looks like — and
 /// they are now one door (decision §2).
-static MENU_ROWS: [Row; 6] = [
+static MENU_ROWS: [Row; 7] = [
     row(Ctrl::Button {
         label: Text::Fixed("LOOK AND FEEL"),
         kind: BtnKind::Listed,
@@ -837,6 +848,17 @@ static MENU_ROWS: [Row; 6] = [
         label: Text::Fixed("BLUR"),
         kind: BtnKind::Listed,
         act: Act::OpenBlur,
+    }),
+    // The one door on this menu that changes nothing. It is here
+    // because the files behind it are edited in a text editor and the
+    // program's only other word about them goes to a stderr a desktop
+    // session has nowhere to show — so without it a user who mistyped
+    // a bracket had a widget on factory values and no way to find out
+    // from inside the program.
+    row(Ctrl::Button {
+        label: Text::Fixed("ADDONS"),
+        kind: BtnKind::Listed,
+        act: Act::OpenAddons,
     }),
 ];
 
@@ -881,7 +903,7 @@ static LOOKFEEL_ROWS: [Row; 5] = [
 ///
 /// The first three lines read the configuration in force, so what the
 /// user is told they are losing is what they are actually losing.
-static LOOKFEEL_RESET_ROWS: [Row; 8] = [
+static LOOKFEEL_RESET_ROWS: [Row; 9] = [
     row_after(Ctrl::Section { title: "WHAT THIS CLEARS" }, Gap::None),
     row(Ctrl::Note { text: Text::Of(clears_theme) }),
     row(Ctrl::Note { text: Text::Of(clears_layaut) }),
@@ -889,6 +911,12 @@ static LOOKFEEL_RESET_ROWS: [Row; 8] = [
     row(Ctrl::Note {
         text: Text::Fixed("FONTS: SIZE, FAMILY AND WEIGHT, TERMINAL AND INTERFACE"),
     }),
+    // Typed on the GRID page, cleared here: it overrides the theme's
+    // `layout.panel_gutter` and nothing else, so it is part of the look
+    // whatever page it is reached from. Named for the same reason as
+    // the rest — a reset that took away a spacing the page had not
+    // mentioned would be a reset that surprises.
+    row(Ctrl::Note { text: Text::Fixed("THE PANEL GUTTER TYPED ON THE GRID PAGE") }),
     row_after(
         Ctrl::Note { text: Text::Fixed("THE PINNED ARRANGEMENT OF THIS SCREEN") },
         Gap::Section,
@@ -1119,9 +1147,84 @@ static BLUR_ROWS: [Row; 2] = [
     }),
 ];
 
+/// ADDONS: where an addon's own settings go, and every file the program
+/// could not use.
+///
+/// A page that reads and never writes, which is the whole of the
+/// promise `nacelle-addons/README.md` makes about these files — that a
+/// file which does not load is reported on stderr AND here, because a
+/// desktop session has nowhere to show a stderr. It edits nothing: the
+/// files are the user's, written by hand, and a window that offered to
+/// save over one would need the toolkit's `store` and a reason.
+///
+/// Two rows and no more. The first says where the files live, which is
+/// the question somebody who has never written one has; the second is
+/// the report, and it takes the rest of the page because how many lines
+/// it has is not this file's to guess.
+static ADDONS_ROWS: [Row; 2] = [
+    row_after(Ctrl::Note { text: Text::Of(addon_settings_where) }, Gap::Section),
+    row(Ctrl::Custom { h: addon_report_h, draw: Settings::draw_addon_report }),
+];
+
+/// The one line that answers "where do I put it?" — the directory the
+/// program would itself write to, so what is named is what is read
+/// first.
+fn addon_settings_where(_: &Settings) -> String {
+    format!("{}/<addon>.ron", config::addon_settings_dir().display())
+}
+
+/// The report takes what the row above it left of the content box.
+/// Stated here rather than measured, because [`Ctrl::Custom`] is asked
+/// for its height before anything is drawn — and it is the page's own
+/// arithmetic: the chrome row, the lead, the note and the break under
+/// it.
+fn addon_report_h(m: Metrics, content: Rect) -> f32 {
+    (content.h - m.btn_h - m.gap - m.note_h - m.section_gap).max(0.0)
+}
+
+/// What the page says when the toolkit has nothing to complain about.
+/// It is a whole answer rather than an empty page: "no news" and "this
+/// window is not looking" read identically on a blank surface, and the
+/// second is the state this page exists because of.
+const ADDONS_ALL_CLEAR: &str = "EVERY ADDON SETTINGS FILE ON THIS MACHINE LOADS";
+
+/// The report the page draws, from the two questions the toolkit
+/// answers with different things.
+///
+/// A pure function of those two answers so that what the page SAYS can
+/// be tested without a settings directory anywhere near the machine
+/// running the tests — the roots are process-wide, and a test that
+/// installed its own would be a test that decides what another one
+/// reads.
+///
+/// The path leads and the message follows it, indented, because the
+/// path is the part the user acts on: it is what they open in an
+/// editor, and it must be readable straight off the screen. Neither is
+/// shouted into the window's capitals — a path is case-sensitive, and a
+/// position in a file is not a heading.
+fn addon_report(installed: bool, problems: &[nacelle::settings::Problem]) -> Vec<String> {
+    if !installed {
+        // The larger failure, and the one nothing else can see: with no
+        // directories installed EVERY read is refused, so there are no
+        // bad files to list and every file on the machine is ignored.
+        return vec![
+            "NO SETTINGS DIRECTORIES ARE INSTALLED \u{2014} EVERY ADDON IS RUNNING ON \
+             THE VALUES BUILT INTO IT, AND EVERY SETTINGS FILE ON THIS MACHINE IS \
+             BEING IGNORED"
+                .to_string(),
+        ];
+    }
+    let mut out = Vec::new();
+    for p in problems {
+        out.push(p.path.display().to_string());
+        out.push(format!("    {}", p.message));
+    }
+    out
+}
+
 /// The whole window. Indexed by [`View`], which `pages_are_in_view_order`
 /// keeps true.
-static PAGES: [Page; 10] = [
+static PAGES: [Page; 11] = [
     Page {
         view: View::Menu,
         title: "SETTINGS",
@@ -1203,6 +1306,17 @@ static PAGES: [Page; 10] = [
         lead: Gap::Section,
         cols: Cols::Measured { label: "OPACITY", value: "100 %" },
         rows: &BLUR_ROWS,
+    },
+    // `Gap::Row` and not `Gap::Section`: `addon_report_h` counts this
+    // lead, and the two have to be the same decision or the report
+    // stands one break below where the page reserved room for it.
+    Page {
+        view: View::Addons,
+        title: "SETTINGS \u{2014} ADDONS",
+        chrome: Chrome::Back,
+        lead: Gap::Row,
+        cols: Cols::None,
+        rows: &ADDONS_ROWS,
     },
 ];
 
@@ -1387,7 +1501,7 @@ pub struct Settings {
     themes: Vec<String>,
     layauts: Vec<String>,
     sounds: Vec<String>,
-    /// Current selections from nacelle-desktop.conf (highlighted in the lists).
+    /// Current selections from nacelle-desktop.ron (highlighted in the lists).
     current_look: Option<String>,
     current_layaut: Option<String>,
     current_sounds: Option<String>,
@@ -1449,6 +1563,12 @@ pub struct Settings {
     color_icc: Option<String>,
     color_luts: Vec<String>,
     color_iccs: Vec<String>,
+    /// The ADDONS view's report, taken from the toolkit on the way into
+    /// the page and not re-asked while it is open. Lines rather than
+    /// problems: what a page shows is text, and keeping the shaping
+    /// where the two answers are read is what lets it be tested without
+    /// installing settings directories in the test process.
+    addon_report: Vec<String>,
     /// What the BOARDS view asked for; the application consumes it.
     pub board_action: Option<BoardAction>,
     /// The body's scroll offset, and its physics. One per window rather
@@ -1527,6 +1647,7 @@ impl Settings {
             color_icc: None,
             color_luts: Vec::new(),
             color_iccs: Vec::new(),
+            addon_report: Vec::new(),
             board_action: None,
             scroll: ScrollView::new(),
             span: (0.0, 0.0),
@@ -1885,6 +2006,13 @@ impl Settings {
                 self.grid_pad = pad;
                 self.go(View::Grid);
             }
+            Act::OpenAddons => {
+                self.addon_report = addon_report(
+                    nacelle::settings::installed(),
+                    &nacelle::settings::problems(),
+                );
+                self.go(View::Addons);
+            }
             Act::OpenBoards => self.go(View::Boards),
             Act::BoardGo(k) => {
                 self.board_action = Some(BoardAction::Go(k));
@@ -2123,9 +2251,9 @@ impl Settings {
         hit_into(&mut self.hits, self.clip, ctx, r, act);
     }
 
-    /// Refreshes the selection highlights from nacelle-desktop.conf:
-    /// the engine's theme (Theme=), the layout (Layaut=) and the sound
-    /// set (Sounds=), each falling back to "default" when unset.
+    /// Refreshes the selection highlights from nacelle-desktop.ron:
+    /// the engine's theme (`theme:`), the layout (`layaut:`) and the
+    /// sound set (`sounds:`), each falling back to "default" when unset.
     fn refresh_current(&mut self) {
         self.current_look = Some(
             config::current_engine_theme().unwrap_or_else(|| "default".to_string()),
@@ -2144,45 +2272,21 @@ impl Settings {
     /// way it looks with no user configuration at all: it takes what it
     /// finds at the system end of the cascade.
     ///
-    /// Every key goes out EMPTY rather than being deleted, because
-    /// `config.rs` writes values and has no way to remove a line
-    /// ([`config`]'s `set_conf_kv` replaces or appends). An empty value
-    /// reads as absent to `Theme=`, `Layaut=`, `Sounds=`, the two font
-    /// families, the two weights and the per-connector assignments —
-    /// their readers all filter it — so those eight keys really do fall
-    /// back. `Variant=` and the two sizes are the exceptions and are in
-    /// the fleet's report: an empty `Variant=` is documented as an
-    /// explicit off, and a size cannot be written empty at all
-    /// ([`FONT_SIZE_UNSET`]). Both need a "clear this key" writer in
-    /// `config.rs`, which belongs to another fleet today.
+    /// Every field is REMOVED from the file rather than written empty,
+    /// and that is the whole correctness of this control: an empty
+    /// value wins the cascade and pins a setting off, so a reset made
+    /// of empties would block the system defaults instead of letting
+    /// them back in. It worked only because no system file existed to
+    /// be blocked. [`config::clear_look_and_feel`] removes them — the
+    /// theme, the variant, the layaut and every per-screen assignment,
+    /// the sound set, both font sections and the panel gutter — in ONE
+    /// write, so no half reset is ever on disk.
     ///
     /// The pinned `[WxH@D]` section is the application's to clear —
     /// only it knows which screen this window is on — so it is asked
     /// for, exactly as it was when this control cleared nothing else.
     fn reset_look_and_feel(&mut self) {
-        // The theme engine's two keys. Colour and contrast are one
-        // choice made in two lines, and a reset that left the variant
-        // standing would hand the default theme somebody else's
-        // contrast.
-        config::set_engine_theme("");
-        config::set_engine_variant(None);
-        // The layout, and then every screen that was given one of its
-        // own: clearing `Layaut=` alone would leave a second monitor
-        // pinned to whatever `Layaut[DP-2]=` says, which is precisely
-        // the setting the user cannot see from this page.
-        config::set_layaut_option("");
-        for connector in config::screen_layauts().into_keys() {
-            config::set_layaut_for_connector(&connector, "");
-        }
-        config::set_sounds_option("");
-        // Both font sections, all three properties each — the page
-        // behind the FONTS door, whole.
-        config::set_term_font_size(FONT_SIZE_UNSET);
-        config::set_term_font_family("");
-        config::set_term_font_weight("");
-        config::set_ui_font_size(FONT_SIZE_UNSET);
-        config::set_ui_font_family("");
-        config::set_ui_font_weight("");
+        config::clear_look_and_feel();
         // The window's own copy of what it just cleared, so the page it
         // returns to and the font page behind it do not go on showing
         // settings that no longer exist.
@@ -2904,8 +3008,66 @@ impl Settings {
     /// ends of the row add a board on that side; the x removes one. The
     /// top and bottom boards, like home, have neither.
     ///
-    /// The one page a row cannot describe, and the only [`Ctrl::Custom`]
-    /// in the file.
+    /// The addon settings report: one line per file the program could
+    /// not use, or the one line that says so when there is nothing to
+    /// report.
+    ///
+    /// A row cannot describe it because how many lines it has is a fact
+    /// about the machine — nought on almost every one, two per broken
+    /// file on the one that matters. It registers nothing: there is no
+    /// control here, only text, and the files behind it are edited in an
+    /// editor.
+    ///
+    /// What does not fit is COUNTED rather than dropped. A report that
+    /// silently stopped at the bottom of the box would be this whole
+    /// hole again one page further in — the user would read four broken
+    /// files, fix four, and still have a widget on its defaults.
+    fn draw_addon_report(&mut self, ctx: &mut Ctx, area: Rect) {
+        let th = theme::resolved();
+        let ink = col(th.color(tok(&MUTED_FG, "text.muted")));
+        if self.addon_report.is_empty() {
+            let v = role_empty(ctx);
+            let y = center_y(ctx, area, v);
+            ctx.dl.text_center(
+                ctx.fonts,
+                FONT_UI,
+                v.px,
+                area.cx(),
+                y,
+                ADDONS_ALL_CLEAR,
+                ink,
+                v.track,
+            );
+            return;
+        }
+        let n = role_note(ctx);
+        let step = n.line();
+        // At least one line however short the box is: a report that
+        // rounded down to nothing would be the silence again.
+        let fits = ((area.h / step).floor() as usize).max(1);
+        let total = self.addon_report.len();
+        for (i, line) in self.addon_report.iter().enumerate() {
+            if i >= fits {
+                break;
+            }
+            let band = Rect::new(area.x, area.y + step * i as f32, area.w, step);
+            let last = i + 1 == fits && total > fits;
+            let text: Cow<'_, str> = if last {
+                Cow::Owned(format!(
+                    "\u{2026} AND {} MORE \u{2014} ALL OF THEM ON STDERR",
+                    total - i
+                ))
+            } else {
+                Cow::Borrowed(line.as_str())
+            };
+            let y = center_y(ctx, band, n);
+            ctx.dl.text(ctx.fonts, FONT_UI, n.px, area.x, y, &text, ink, n.track);
+        }
+    }
+
+    /// One of the two pages a row cannot describe (the other is
+    /// [`Settings::draw_addon_report`]), and one of the two
+    /// [`Ctrl::Custom`]s in the file.
     fn draw_boards(&mut self, ctx: &mut Ctx, area: Rect) {
         let th = theme::resolved();
         // Read out before the walk: the loop below holds `self.boards`,
@@ -3618,6 +3780,161 @@ mod tests {
         assert!(!s.reset_screen, "cancelling still asked for a reset");
     }
 
+    fn a_problem(addon: &str, path: &str, message: &str) -> nacelle::settings::Problem {
+        nacelle::settings::Problem {
+            addon: addon.to_string(),
+            file: String::new(),
+            path: std::path::PathBuf::from(path),
+            message: message.to_string(),
+        }
+    }
+
+    /// The two questions the toolkit answers with different things, and
+    /// what the page makes of each.
+    ///
+    /// `installed()` is asked separately from `problems()` on purpose:
+    /// a host that never told the toolkit where the files are has no
+    /// bad FILES to list and is ignoring all of them, so an empty
+    /// `problems()` means "nothing is wrong" in one case and "nothing
+    /// is being read" in the other. A page that showed only the second
+    /// answer would call the worse of the two states all clear.
+    #[test]
+    fn the_addons_report_tells_no_files_apart_from_no_directories() {
+        assert!(
+            addon_report(true, &[]).is_empty(),
+            "a machine with nothing wrong has nothing to report"
+        );
+
+        let dead = addon_report(false, &[]);
+        assert_eq!(dead.len(), 1, "the larger failure was reported as nothing");
+        assert!(
+            dead[0].contains("NO SETTINGS DIRECTORIES ARE INSTALLED"),
+            "the one state that ignores every file on the machine is not named: {dead:?}"
+        );
+
+        let lines = addon_report(
+            true,
+            &[a_problem(
+                "search",
+                "/home/who/.config/nacelle/addons/search.ron",
+                "is not valid RON \u{2014} 3:1-3:2: Expected comma",
+            )],
+        );
+        assert!(
+            lines.iter().any(|l| l == "/home/who/.config/nacelle/addons/search.ron"),
+            "the path is the part the user opens, and it is not there: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("3:1-3:2")),
+            "the position in the file was dropped: {lines:?}"
+        );
+    }
+
+    /// The window has somewhere to SHOW it, which is the half a report
+    /// nobody draws does not have.
+    ///
+    /// `nacelle-addons/README.md` promises a file that does not load is
+    /// reported on stderr and in the settings window. A desktop session
+    /// has nowhere to show a stderr — the program is started by a
+    /// display manager and its output goes to a journal — so until this
+    /// page existed the promise rested entirely on a channel the user
+    /// cannot see.
+    #[test]
+    fn a_settings_file_the_program_could_not_use_is_named_on_the_addons_page() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::Addons;
+        s.addon_report = addon_report(
+            true,
+            &[a_problem(
+                "filesystem",
+                "/home/who/.config/nacelle/addons/filesystem.ron",
+                "is not valid RON \u{2014} 2:15-2:16: Expected comma",
+            )],
+        );
+        let drawn = page_runs(&mut fonts, &mut s);
+        let said = |needle: &str| drawn.iter().any(|t| t.contains(needle));
+        assert!(
+            said("/home/who/.config/nacelle/addons/filesystem.ron"),
+            "the page does not name the file: {drawn:?}"
+        );
+        assert!(said("2:15-2:16"), "the page does not say where in it: {drawn:?}");
+        assert!(
+            !said(ADDONS_ALL_CLEAR),
+            "the page reported all clear over a file it had just named"
+        );
+        // And the way in from the menu is on the menu, not somewhere
+        // only a keyboard could reach.
+        assert!(
+            described_acts(&s, page(View::Menu)).contains(&Act::OpenAddons),
+            "there is no door to the page"
+        );
+    }
+
+    /// Nothing wrong is an ANSWER, drawn as one. A blank page and a
+    /// page that is not looking read the same, and the second is the
+    /// state this whole page exists because of.
+    #[test]
+    fn the_addons_page_says_so_when_every_file_loads() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::Addons;
+        s.addon_report = addon_report(true, &[]);
+        let drawn = page_runs(&mut fonts, &mut s);
+        assert!(
+            drawn.iter().any(|t| t.contains(ADDONS_ALL_CLEAR)),
+            "a page with nothing to report said nothing at all: {drawn:?}"
+        );
+    }
+
+    /// What does not fit is counted, never dropped. A report that
+    /// stopped at the bottom of the box would be this window's own
+    /// version of the silence it exists to end: four files named, four
+    /// fixed, and a widget still on its defaults.
+    #[test]
+    fn a_report_longer_than_the_page_says_how_much_it_did_not_show() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::Addons;
+        let many: Vec<_> = (0..40)
+            .map(|i| a_problem(&format!("addon{i}"), &format!("/tmp/a{i}.ron"), "is not valid RON"))
+            .collect();
+        s.addon_report = addon_report(true, &many);
+        let mut dl = nacelle::draw::DrawList::recording();
+        // The shortest window the program is built for, so the box is
+        // certainly shorter than eighty lines.
+        let mut ctx = probe(&mut dl, &mut fonts, 720.0, 1.0);
+        s.draw(&mut ctx);
+        let drawn = text_runs(&dl);
+        assert!(
+            drawn.iter().any(|t| t.contains("MORE") && t.contains("STDERR")),
+            "the page dropped what it could not fit without saying so: {drawn:?}"
+        );
+    }
+
+    /// The page shows the TOOLKIT's answer and not one of its own.
+    ///
+    /// Pinned against both answers as they stand in this process rather
+    /// than against a fixture: the settings roots are process-wide, so
+    /// a test that installed its own would decide what another test
+    /// reads. What is under test is that the door reads them at all —
+    /// a page that kept its own list would drift from the toolkit the
+    /// moment a widget was built.
+    #[test]
+    fn the_addons_page_reads_the_toolkit_on_the_way_in() {
+        let mut s = furnished();
+        assert!(!s.perform(Act::OpenAddons, 0.0), "a report changed the configuration");
+        assert!(s.view == View::Addons, "the door opened nothing");
+        assert_eq!(
+            s.addon_report,
+            addon_report(nacelle::settings::installed(), &nacelle::settings::problems()),
+            "the page is showing something other than what the toolkit answers"
+        );
+    }
+
     /// Decision §2a — the confirmation says what it is about to spend.
     ///
     /// A confirmation that only asks "are you sure" is a speed bump.
@@ -3642,6 +3959,11 @@ mod tests {
             );
         }
         assert!(said("FONTS"), "the confirmation does not mention the fonts");
+        assert!(
+            said("GUTTER"),
+            "the confirmation does not mention the panel gutter, which the \
+             reset also clears"
+        );
         assert!(
             said("PINNED"),
             "the confirmation does not mention the pinned arrangement"
