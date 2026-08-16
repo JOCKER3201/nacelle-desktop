@@ -115,3 +115,113 @@ pub(crate) fn token_px(name: &str) -> f32 {
     nacelle::theme::resolved()
         .px(nacelle::theme::id(name).unwrap_or_else(|| panic!("the master declares {name}")))
 }
+
+/// Every string a piece of chrome DREW, with the size it was drawn at, on
+/// a window `h` tall whose user has set `UIFontSize=` to `uscale × 100`.
+///
+/// The measuring instrument for "the interface scale is applied exactly
+/// once". Two mechanisms could carry that setting — the theme's
+/// `metric.ui_scale`, which multiplies u and therefore every length the
+/// master writes, and a factor a drawer applies by hand — and a caller
+/// that uses both squares it. Nothing in the arithmetic says which is
+/// happening: at 125 % the wrong answer is 156 % and both are "bigger".
+/// So the measurement is taken off the drawing itself, through the
+/// command register, and the ratio between two scales is the whole test.
+///
+/// `Ctx::ui_font_scale` is set to the same `uscale` the viewport is told,
+/// because that is what a frame does — a drawer that reaches for it is
+/// exactly what has to be caught.
+#[cfg(test)]
+pub(crate) fn drawn_text(
+    h: f32,
+    t: f64,
+    uscale: f32,
+    draw: impl FnOnce(&mut Ctx),
+) -> Vec<(String, f32)> {
+    // The engine publishes lazily and `set_viewport` is a no-op until it
+    // exists — a first caller that skips this measures the 1080-line
+    // default and reports it as this height's answer.
+    nacelle::theme::resolved();
+    nacelle::theme::set_viewport(h, uscale);
+    let mut fonts = crate::font::FontSystem::new();
+    let mut dl = nacelle::draw::DrawList::recording();
+    {
+        let mut ctx = Ctx {
+            dl: &mut dl,
+            fonts: &mut fonts,
+            w: h * 16.0 / 9.0,
+            h,
+            t,
+            // Off the window, so nothing is drawn in its hover look: a
+            // hovered control may swap the role it draws in, and this
+            // measurement compares two runs string for string.
+            mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
+            term_font_scale: 1.0,
+            ui_font_scale: uscale,
+            panel_scale: 1.0,
+            focus: None,
+            tips: None,
+        };
+        draw(&mut ctx);
+    }
+    dl.cmds()
+        .iter()
+        .filter_map(|c| match c {
+            nacelle::draw::DrawCmd::Text { text, px, .. } => Some((text.clone(), *px)),
+            // A module title is one call that draws two strings at one
+            // size; the pair is enough to tell the two runs apart.
+            nacelle::draw::DrawCmd::ModuleTitle { left, right, px, .. } => {
+                Some((format!("{left}\u{1f}{right}"), *px))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts that every string `draw` puts on screen at both 100 % and
+/// 125 % is exactly 25 % bigger in the second run.
+///
+/// Matched by the string itself rather than by position, because a bigger
+/// interface is a shorter list: a page holds itself to its content box,
+/// so the last row of a full one falls off the bottom at 125 % and the
+/// two runs are legitimately not the same picture. What must not differ
+/// is the size of a line BOTH runs drew.
+///
+/// The floor is the other exception: `type.<role>.min_px` is a device
+/// length and does not follow u, so a role already sitting on its floor
+/// at 100 % stays there. Such a line is skipped. A run in which nothing
+/// at all could be measured fails — a measurement that measured nothing
+/// must not read as a pass.
+#[cfg(test)]
+pub(crate) fn assert_scales_once(what: &str, h: f32, t: f64, draw: impl Fn(&mut Ctx)) {
+    const SCALE: f32 = 1.25;
+    let floor = token_px("type.min_px");
+    let plain = drawn_text(h, t, 1.0, &draw);
+    let mut big = drawn_text(h, t, SCALE, &draw);
+    assert!(!plain.is_empty(), "{what} at {h}: drew no text at all — nothing was measured");
+    let mut measured = 0;
+    for (s, a) in plain.iter() {
+        let Some(i) = big.iter().position(|(s2, _)| s2 == s) else { continue };
+        // Taken out, so two identical strings are two measurements and
+        // not the same one twice.
+        let (_, b) = big.remove(i);
+        // On the floor at 100 %: a device px, deliberately outside u.
+        if *a <= floor * 1.001 {
+            continue;
+        }
+        measured += 1;
+        let got = b / a;
+        assert!(
+            (got - SCALE).abs() < 0.005,
+            "{what} at {h}: \"{s}\" is {a} px at 100 % and {b} px at 125 % — \
+             a ratio of {got:.4} where 1.25 is the setting. \
+             1.5625 is the setting applied twice (the theme's u AND a \
+             factor in the drawer); 1.0 is a drawer that reads neither."
+        );
+    }
+    assert!(
+        measured > 0,
+        "{what} at {h}: no line could be measured — every one of them either \
+         sat on type.min_px or was drawn in only one of the two runs"
+    );
+}

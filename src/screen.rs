@@ -273,8 +273,18 @@ pub struct Screen {
     /// Per screen, or two monitors would share one screen's worth of
     /// frames between them.
     pub last_render: Instant,
-    /// Where the pointer last was ON THIS SCREEN.
+    /// Where the pointer last was ON THIS SCREEN, as the device reported
+    /// it. What the event loop routes presses and menus by.
     pub mouse: (f32, f32),
+    /// The same pointer as the DRAWING sees it: the toolkit's routing
+    /// ([`nacelle::pointer::Pointer`]), which answers a control that has a
+    /// window drawn over it that the pointer is nowhere near it.
+    ///
+    /// Per screen, and held between frames, because what covered the
+    /// pointer is the one fact about a frame the next frame needs. It is
+    /// lent to each frame's `Ctx` and taken back at the end of it, the
+    /// same way [`Screen::dl`] is.
+    pub pointer: nacelle::pointer::Pointer,
     /// Which placement reported a character grid on the last frame.
     pub term_inst: Option<InstanceId>,
     /// This screen's own draw list, kept between frames so a steady
@@ -409,6 +419,7 @@ impl Screen {
             booting: true,
             last_render: Instant::now() - std::time::Duration::from_secs(1),
             mouse: (0.0, 0.0),
+            pointer: nacelle::pointer::Pointer::default(),
             term_inst: None,
             dl: DrawList::new(),
             pad,

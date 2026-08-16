@@ -18,21 +18,39 @@
 //! What the pages hold: LOOK AND FEEL is one page carrying the three
 //! choices that say which installed set is in use — THEMES (the theme
 //! engine's themes, written as Theme=), LAYAUTS (Layaut=) and SOUNDS
-//! (Sounds=) — plus the door to the font page. Each of the three is a
-//! DROP-DOWN and not a page of its own, so the page at rest is five
+//! (Sounds=) — plus the doors to the pages behind it. Each of the three
+//! is a DROP-DOWN and not a page of its own, so the page at rest is six
 //! rows and only ever one list is unfolded. A theme comes from the
 //! toolkit (the eight compiled in plus anything on the search path);
 //! layouts and sound sets are read from the data directories.
 //! Everything applies live.
 //!
+//! TWO WORDS THAT ARE NOT THE SAME THING. `SOUNDS` is the drop-down
+//! that picks WHICH SET of clips is installed and in force (Sounds=),
+//! and `SOUND LEVELS` is the button that opens how loudly and how often
+//! that set is played — volume, typing, ambient. They stand one under
+//! the other on this page, so the two labels have to tell a reader
+//! apart what a single word "SOUND" would have run together: a set is a
+//! choice, a level is a dial. The button's own act
+//! ([`Act::OpenSoundLevels`]) and view ([`View::SoundLevels`]) carry the
+//! longer name for the same reason.
+//!
 //! An anchor wears its LIST'S NAME and not the choice standing in it
 //! (decision §2b) — THEMES, LAYAUTS, SOUNDS — against the convention
-//! of the font page, whose anchors read "FAMILY: TERMINUS".
+//! of the font page, whose anchors read "FAMILY: TERMINUS". Which
+//! member of a set is in force is said INSIDE the open list instead, by
+//! the row that wears the `menu.item` ladder's `selected` rung
+//! ([`nacelle::object::dropdown::AccordionStyle::current`]).
 //!
-//! The THEMES list carries one row in front of its names — the door to
-//! the theme editor — which is a door and not a choice: it writes no
-//! Theme= and moves no selection. [`ListId::head`] is the one place
-//! that count is stated, so a row can never pick the name above it.
+//! The THEMES list carries the door to the theme editor at the top of
+//! its unfolded body (decision §3), and that door is a BUTTON and not a
+//! row of the list. It has to be: a list whose whole role is "choose
+//! one of these" may not offer a member that is not a choice, and a row
+//! set apart by a hairline is a hair among hairs — every row of an
+//! accordion already has a seam above it. A button is a different
+//! object, a different height, a different ladder and a different type
+//! role, which is what "not a choice" has to look like. It is also what
+//! the page's other two doors already are, so the three read alike.
 //!
 //! LOOK AND FEEL pins one more row: LOOK AND FEEL RESET, which clears
 //! everything the page and its doors write (decision §2a) and is
@@ -45,7 +63,6 @@
 use super::{Ctx, PanelSpec, Rect};
 use std::borrow::Cow;
 use crate::config::{self, GRID_MAX, GRID_MIN};
-use crate::font::FONT_UI;
 use nacelle::focus::{Caps, FocusCtl, FocusId, Key as FKey, KeyEv, Mods, Nav};
 use nacelle::theme::bake::StateStyle;
 use nacelle::theme::parse::State;
@@ -66,7 +83,9 @@ enum View {
     ThemeEditor,
     Font,
     Grid,
-    Sound,
+    /// How loudly the installed sound set is played — NOT which set it
+    /// is, which is LOOK AND FEEL's `SOUNDS` list.
+    SoundLevels,
     Boards,
     Color,
     Blur,
@@ -86,16 +105,45 @@ enum View {
 fn parent_view(v: View) -> Option<View> {
     match v {
         View::Menu => None,
-        // All three of LOOK AND FEEL's doors lead back to it: the
-        // editor is opened from a row of its THEMES list, the font page
-        // is what its FONTS button opens, and the reset confirmation is
-        // what its footer opens. That the way back out of the
-        // confirmation is the ordinary one is the point — a destructive
-        // control the user changed their mind about must be left the
-        // same way as anything else, by BACK or by Escape.
-        View::ThemeEditor | View::Font | View::LookFeelReset => Some(View::LookFeel),
+        // All FOUR of LOOK AND FEEL's doors lead back to it: the editor
+        // stands at the head of its THEMES list, the levels page and
+        // the font page are what its two buttons open, and the reset
+        // confirmation is what its footer opens. That the way back out
+        // of the confirmation is the ordinary one is the point — a
+        // destructive control the user changed their mind about must be
+        // left the same way as anything else, by BACK or by Escape.
+        View::ThemeEditor | View::SoundLevels | View::Font | View::LookFeelReset => {
+            Some(View::LookFeel)
+        }
         _ => Some(View::Menu),
     }
+}
+
+/// Which number of the editor's colour a track moves.
+///
+/// The theme writes colours as `oklch(L, C, H)`, so a colour is three
+/// numbers and a slider moves one of them. Named rather than indexed
+/// because a swapped pair would be a colour that is merely wrong instead
+/// of a compile error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Knob {
+    EdgeL,
+    EdgeC,
+    EdgeH,
+    /// The glass TINT — the multiply quad, the one that can only darken.
+    TintB,
+    TintS,
+    TintH,
+    /// The glass WASH — the alpha-over quad, the only one that brightens.
+    WashB,
+    WashS,
+    WashH,
+    /// The whole effect's opacity, every kind.
+    BgOpacity,
+    /// The blur pyramid depth, BLUR and FROSTED.
+    BgDepth,
+    /// The wash's coverage, FROSTED only.
+    BgCoverage,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -106,16 +154,20 @@ enum Act {
     /// The anchor of one of LOOK AND FEEL's three lists: a press
     /// unfolds it, a second press folds it back.
     ListBtn(ListId),
-    /// A NAME of one of those lists — an index into the names and never
-    /// into the drawn rows, so what a list carries in front of its
-    /// names ([`ListId::head`]) is one place's business alone.
+    /// A NAME of one of those lists — an index into the names, which is
+    /// also the index of the row the accordion drew it in, because the
+    /// list object is given the names and nothing else.
     Pick(ListId, usize),
-    /// The first row of the THEMES list, which is not a theme: the door
-    /// to the theme editor (decision §3).
+    /// The door to the theme editor, standing at the head of the
+    /// unfolded THEMES list (decision §3). Not a member of that list:
+    /// it is drawn as a button, above the rows, and picks no theme.
     ThemesEditor,
     OpenFont,
     OpenGrid,
-    OpenSound,
+    /// LOOK AND FEEL's second button: volume, typing, ambient. Named
+    /// for the LEVELS and not for "sound", which on this page already
+    /// means the SOUNDS list's set of clips.
+    OpenSoundLevels,
     OpenBoards,
     OpenColor,
     OpenBlur,
@@ -150,6 +202,8 @@ enum Act {
     PadTrack,
     EditGrid,
     SizeTrack(Sect),
+    /// One of the theme editor's colour tracks.
+    EditorTrack(Knob),
     FamilyBtn(Sect),
     WeightBtn(Sect),
     FamilyPick(Sect, usize),
@@ -221,22 +275,43 @@ fn focus_id(act: Act) -> FocusId {
         Back => FocusId::of("settings.back"),
         OpenLookFeel => FocusId::of("settings.menu.lookfeel"),
         OpenFont => FocusId::of("settings.lookfeel.fonts"),
-        OpenSound => FocusId::of("settings.menu.sound"),
+        // A LOOK AND FEEL door now, not a menu entry — the path says
+        // where the control stands, which is the whole point of paths.
+        OpenSoundLevels => FocusId::of("settings.lookfeel.sound_levels"),
         OpenGrid => FocusId::of("settings.menu.grid"),
         OpenBoards => FocusId::of("settings.menu.boards"),
         OpenColor => FocusId::of("settings.menu.color"),
         OpenBlur => FocusId::of("settings.menu.blur"),
         OpenAddons => FocusId::of("settings.menu.addons"),
+        EditorTrack(k) => FocusId::of(match k {
+            Knob::EdgeL => "settings.editor.edge.l",
+            Knob::EdgeC => "settings.editor.edge.c",
+            Knob::EdgeH => "settings.editor.edge.h",
+            Knob::TintB => "settings.editor.tint.b",
+            Knob::TintS => "settings.editor.tint.s",
+            Knob::TintH => "settings.editor.tint.h",
+            Knob::WashB => "settings.editor.wash.b",
+            Knob::WashS => "settings.editor.wash.s",
+            Knob::WashH => "settings.editor.wash.h",
+            Knob::BgOpacity => "settings.editor.bg.opacity",
+            Knob::BgDepth => "settings.editor.bg.depth",
+            Knob::BgCoverage => "settings.editor.bg.coverage",
+        }),
         ListBtn(l) => FocusId::of(match l {
             ListId::Looks => "settings.lookfeel.themes",
             ListId::Layauts => "settings.lookfeel.layauts",
             ListId::Sounds => "settings.lookfeel.sounds",
+            ListId::Borders => "settings.editor.border",
+            ListId::Backgrounds => "settings.editor.background",
         }),
-        // A name's row is its index PAST whatever the list carries in
-        // front of it, so the editor door and the first theme cannot
-        // land on one id however long the list grows.
-        Pick(l, i) => dropdown_base(Dropdown::List(l)).item(i + l.head()),
-        ThemesEditor => dropdown_base(Dropdown::List(ListId::Looks)).item(0),
+        // A name's row is its index, with nothing added: the list
+        // object is handed the names alone, so `base.item(i)` is what
+        // it registers and what a click must agree with.
+        Pick(l, i) => dropdown_base(Dropdown::List(l)).item(i),
+        // A path of its own, and not `themes.list.item(0)`, because the
+        // door is no longer a row of that list — an id derived from the
+        // list would now collide with its first theme.
+        ThemesEditor => FocusId::of("settings.lookfeel.themes.editor"),
         LookFeelReset => FocusId::of("settings.lookfeel.reset"),
         LookFeelResetConfirm => FocusId::of("settings.lookfeel.reset.confirm"),
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
@@ -287,6 +362,8 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::Looks) => "settings.lookfeel.themes.list",
         Dropdown::List(ListId::Layauts) => "settings.lookfeel.layauts.list",
         Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
+        Dropdown::List(ListId::Borders) => "settings.editor.border.list",
+        Dropdown::List(ListId::Backgrounds) => "settings.editor.background.list",
     })
 }
 
@@ -323,6 +400,47 @@ fn hit_into(hits: &mut Vec<(Rect, Act)>, clip: Option<Rect>, ctx: &mut Ctx, r: R
 /// Answered by ASKING THE DESCRIPTION, not by a list kept beside it: a
 /// slider is a slider because some page says so, so the keyboard cannot
 /// disagree with what is drawn.
+/// HSV -> RGB, all components 0..1 (hue in degrees). The editor's colour
+/// model is HSV because that is how the owner thinks about it: brightness
+/// at 100 % is the FULL brightness of the chosen hue — red lands on
+/// #FF0000 — never white. OKLCh's lightness at 1.0 is white by definition,
+/// which read as a broken slider. The theme file still receives `oklch`:
+/// the conversion runs at the seam, so the editor speaks HSV and the file
+/// keeps its native space.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (r + m, g + m, b + m)
+}
+
+/// RGB -> HSV, the way back for seeding the sliders off the live theme.
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max == 0.0 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
 fn is_track(act: Act) -> bool {
     slider_of(act).is_some()
 }
@@ -442,6 +560,11 @@ static MODAL_PAD: OnceLock<TokenId> = OnceLock::new();
 struct Type {
     px: f32,
     track: f32,
+    /// The font slot the role's `face` names. Read from the role, not
+    /// chosen here: every text call in this file wrote `FONT_UI`, which
+    /// is the family decided at the call site while `type.<role>.face`
+    /// sat in the master with no reader on this side of the boundary.
+    face: u8,
     /// Line height as a MULTIPLE of `px` — the form the centring
     /// arithmetic takes it in.
     leading: f32,
@@ -463,16 +586,17 @@ impl Type {
 /// window had no reader at all while the roles were spelled out here
 /// instead, which made six declared tokens into dead letters.
 ///
-/// The px carries `ui_font_scale` — the UIFontSize= this very window
-/// writes — and `panel_scale`, and never falls under `type.min_px`.
-/// Without those three factors, the half of this window's text that
-/// `object::button` does not draw stayed at 100 % while the other half
-/// followed the preference: the interface size setting looked broken
-/// from the one screen that sets it.
+/// The px carries `panel_scale` and never falls under `type.min_px`.
+/// UIFontSize= is not applied here and must not be: this window writes it
+/// into `metric.ui_scale`, the frame hands it to the viewport, and every
+/// role's size is a multiple of the u that scale multiplies. The shrink
+/// argument used to be `ctx.ui_font_scale` — the shortest route to the
+/// setting back when the viewport was told a literal 1.0, and a straight
+/// doubling now that it is told the truth: 125 % would draw at 156 %.
 fn bound(ctx: &Ctx, cell: &'static OnceLock<TokenId>, binding: &'static str) -> Type {
     let role = nacelle::ui::bound_role(cell, binding);
-    let px = role.px(ctx, ctx.ui_font_scale);
-    Type { px, track: role.tracking_px(px), leading: role.leading() }
+    let px = role.px(ctx, 1.0);
+    Type { px, track: role.tracking_px(px), leading: role.leading(), face: role.font() }
 }
 
 // One binding per place this file writes text. Every name below is a
@@ -513,7 +637,7 @@ fn role_caption(ctx: &Ctx) -> Type {
     bound(ctx, &ROLE_CAPTION, "boards.tile.caption_role")
 }
 
-/// NO … FOUND.
+/// NO … FOUND — the addon report's all-clear line.
 fn role_empty(ctx: &Ctx) -> Type {
     bound(ctx, &ROLE_EMPTY, "emptystate.role")
 }
@@ -651,10 +775,18 @@ enum ListId {
     Looks,
     Layauts,
     Sounds,
+    /// The theme editor's border kind. Unlike the three above it names no
+    /// file: its members are the two shapes a border can take, and choosing
+    /// one lays a value over the theme instead of writing a config line.
+    Borders,
+    /// The editor's background kind — the same arrangement as `Borders`,
+    /// over the three shapes a surface's back can take.
+    Backgrounds,
 }
 
-/// The label of the row that opens the theme editor. It stands INSIDE
-/// the THEMES list, at the top (decision §3).
+/// The label of the button that opens the theme editor. It stands
+/// INSIDE the unfolded THEMES list, at the top (decision §3) — a door
+/// among the choices, and drawn as one ([`Settings::door`]).
 const EDITOR_ROW: &str = "THEMES EDITOR";
 
 impl ListId {
@@ -664,6 +796,8 @@ impl ListId {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
             ListId::Sounds => "SOUNDS",
+            ListId::Borders => "BORDER",
+            ListId::Backgrounds => "BACKGROUND",
         }
     }
 
@@ -672,27 +806,21 @@ impl ListId {
             ListId::Looks => "NO LOOKS FOUND",
             ListId::Layauts => "NO LAYAUTS FOUND",
             ListId::Sounds => "NO SOUND THEMES FOUND",
+            // Unreachable while the two kinds are built in, and stated
+            // anyway: an empty list is a state this type has to have a
+            // word for, not a case to leave to whatever draws it.
+            ListId::Borders => "NO BORDER KINDS",
+            ListId::Backgrounds => "NO BACKGROUND KINDS",
         }
     }
 
-    /// How many rows the open list carries BEFORE its first name. Only
-    /// THEMES has one — the editor door — and the count is asked for
-    /// rather than assumed because it is the offset between a drawn row
-    /// and the name it stands for.
-    fn head(self) -> usize {
-        matches!(self, ListId::Looks) as usize
-    }
-}
-
-/// What one ROW of an open list does. One derivation for the drawing,
-/// the hit map and the focus chain, so a row cannot pick the name above
-/// it and the door cannot be mistaken for the first theme.
-fn list_row_act(list: ListId, row: usize) -> Act {
-    match row.checked_sub(list.head()) {
-        Some(i) => Act::Pick(list, i),
-        // The rows in front of the names, in order. THEMES has exactly
-        // one, and it is the editor's door.
-        None => Act::ThemesEditor,
+    /// Whether the unfolded list stands under a door — a control that
+    /// belongs to the list's subject but is not a member of its set.
+    /// Only THEMES has one, the editor (decision §3), and it is asked
+    /// for rather than assumed because the door is drawn by this file
+    /// while the members are drawn by the list object.
+    fn carries_door(self) -> bool {
+        matches!(self, ListId::Looks)
     }
 }
 
@@ -728,9 +856,12 @@ enum Ctrl {
     /// A value that steps to the next on every press: COLOR's SPACE,
     /// LUT and ICC.
     Cycle { label: &'static str, get: fn(&Settings) -> String, act: Act },
-    /// One of LOOK AND FEEL's three lists: an anchor wearing the choice
-    /// in force, and the list itself unfolding from its bottom edge
-    /// when it is the open one ([`Settings::draw_open_dropdown`]).
+    /// One of LOOK AND FEEL's three lists: an anchor wearing the LIST'S
+    /// OWN NAME (decision §2b), and the list itself unfolding from its
+    /// bottom edge when it is the open one
+    /// ([`Settings::draw_open_dropdown`]). Which member is in force is
+    /// said by the open list, on the row that wears the ladder's
+    /// `selected` rung.
     Drop { list: ListId },
     Button { label: Text, kind: BtnKind, act: Act },
     /// A module header inside a page: the FONT view's TERMINAL and
@@ -738,9 +869,6 @@ enum Ctrl {
     Section { title: &'static str },
     /// A left-aligned aside in the flow.
     Note { text: Text },
-    /// The centred line a surface with nothing in it yet says about
-    /// itself (`emptystate.role`).
-    Empty { text: Text },
     /// A centred one-liner pinned to the bottom edge
     /// (`settings.hint_inset`) — the BOARDS view's gesture hint.
     Hint { text: Text },
@@ -770,6 +898,13 @@ struct Row {
     /// registers nothing — no hit, no place in the focus chain. The one
     /// genuinely disabled control in the program takes this road.
     enabled: fn(&Settings) -> bool,
+    /// A row that answers false here IS NOT THERE: no height in the flow,
+    /// no draw, no grey ghost. Distinct from `enabled` on purpose — a
+    /// disabled control says "not now", a hidden one says "not for this
+    /// choice". The editor's per-kind sliders are the first users: a
+    /// COVERAGE slider next to a SOLID background would be a question
+    /// about a thing that does not exist.
+    when: fn(&Settings) -> bool,
 }
 
 fn always(_: &Settings) -> bool {
@@ -777,15 +912,33 @@ fn always(_: &Settings) -> bool {
 }
 
 const fn row(ctrl: Ctrl) -> Row {
-    Row { ctrl, after: Gap::Row, enabled: always }
+    Row { ctrl, after: Gap::Row, enabled: always, when: always }
 }
 
 const fn row_after(ctrl: Ctrl, after: Gap) -> Row {
-    Row { ctrl, after, enabled: always }
+    Row { ctrl, after, enabled: always, when: always }
 }
 
 const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
-    Row { ctrl, after: Gap::Row, enabled }
+    Row { ctrl, after: Gap::Row, enabled, when: always }
+}
+
+fn bg_chosen(s: &Settings) -> bool {
+    s.current_background.is_some()
+}
+fn bg_blurs(s: &Settings) -> bool {
+    matches!(s.current_background.as_deref(), Some("BLUR") | Some("FROSTED GLASS"))
+}
+fn bg_frosted(s: &Settings) -> bool {
+    s.current_background.as_deref() == Some("FROSTED GLASS")
+}
+fn bg_solid_or_frosted(s: &Settings) -> bool {
+    matches!(s.current_background.as_deref(), Some("SOLID") | Some("FROSTED GLASS"))
+}
+
+/// A row that exists only while `when` holds — see `Row::when`.
+const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
+    Row { ctrl, after: Gap::Row, enabled: always, when }
 }
 
 /// The corner button a page wears, and what the body does about it.
@@ -810,19 +963,17 @@ struct Page {
 
 // --------------------------------------------------------------- the pages
 
-/// The main menu. THEMES, LOOK, LAYAUTS, SOUNDS and FONT are no longer
-/// here: all five were one question — what the desktop looks like — and
-/// they are now one door (decision §2).
-static MENU_ROWS: [Row; 7] = [
+/// The main menu. THEMES, LOOK, LAYAUTS, SOUNDS, FONT and SOUND are no
+/// longer here: all six were one question — what the desktop looks and
+/// sounds like — and they are now one door (decision §2). SOUND went
+/// the way THEMES and FONT went, and for the same reason: how loud the
+/// clips are is part of the same sitting as which clips they are, and
+/// the two used to stand on opposite sides of the window.
+static MENU_ROWS: [Row; 6] = [
     row(Ctrl::Button {
         label: Text::Fixed("LOOK AND FEEL"),
         kind: BtnKind::Listed,
         act: Act::OpenLookFeel,
-    }),
-    row(Ctrl::Button {
-        label: Text::Fixed("SOUND"),
-        kind: BtnKind::Listed,
-        act: Act::OpenSound,
     }),
     row(Ctrl::Button {
         label: Text::Fixed("GRID"),
@@ -862,24 +1013,40 @@ static MENU_ROWS: [Row; 7] = [
     }),
 ];
 
-/// LOOK AND FEEL (decision §2): three choices and two doors. Three
-/// drop-downs rather than three columns, so the page at rest fits
-/// whole and at most one list is ever unfolded — three open lists one
-/// under the other would be a page you scroll through to reach the
-/// sounds.
+/// LOOK AND FEEL (decision §2): three choices and the doors beside
+/// them. Three drop-downs rather than three columns, so the page at
+/// rest fits whole and at most one list is ever unfolded — three open
+/// lists one under the other would be a page you scroll through to
+/// reach the sounds.
+///
+/// The two flowed buttons are `BtnKind::Wide`, the same width as the
+/// three anchors above them, because they are the same KIND of thing:
+/// another way into the same subject. A centred `Listed` button among
+/// full-width rows reads as a different class of control — which is
+/// what FONTS looked like, sitting at 60 % of the width under three
+/// rows that ran edge to edge.
+///
+/// SOUND LEVELS stands directly under the SOUNDS list on purpose: the
+/// set and the loudness of the set are one sitting, and a reader who
+/// has just chosen a set is the reader who wants the dial.
 ///
 /// The footer is the page's own undo, and it is pinned rather than
-/// flowed so that the four rows above it are the five-row page the
-/// decision describes. It opens a confirmation and nothing else: what
-/// stands behind it (decision §2a) is every setting this page and its
-/// doors write, and one press may not be able to spend all of them.
-static LOOKFEEL_ROWS: [Row; 5] = [
+/// flowed so that the five rows above it are the page the decision
+/// describes. It opens a confirmation and nothing else: what stands
+/// behind it (decision §2a) is every setting this page and its doors
+/// write, and one press may not be able to spend all of them.
+static LOOKFEEL_ROWS: [Row; 6] = [
     row(Ctrl::Drop { list: ListId::Looks }),
     row(Ctrl::Drop { list: ListId::Layauts }),
     row(Ctrl::Drop { list: ListId::Sounds }),
     row(Ctrl::Button {
+        label: Text::Fixed("SOUND LEVELS"),
+        kind: BtnKind::Wide,
+        act: Act::OpenSoundLevels,
+    }),
+    row(Ctrl::Button {
         label: Text::Fixed("FONTS"),
-        kind: BtnKind::Listed,
+        kind: BtnKind::Wide,
         act: Act::OpenFont,
     }),
     row(Ctrl::Button {
@@ -937,17 +1104,166 @@ static LOOKFEEL_RESET_ROWS: [Row; 9] = [
 /// The theme editor's doorway, and nothing behind it yet.
 ///
 /// It is a page like every other one so that the way in, the way back
-/// and the Escape ladder are real before the editor is: the row that
+/// and the Escape ladder are real before the editor is: the door that
 /// opens it takes the window's content area over, exactly as it will
 /// when there is an editor to put there. Building that editor is
 /// another stage's work (decision §3, requirement 3).
-static EDITOR_ROWS: [Row; 2] = [
-    row_after(
-        Ctrl::Empty { text: Text::Fixed("THE THEME EDITOR IS NOT BUILT YET") },
-        Gap::Section,
+/// The editor's first section. The border is one kind and one colour, and
+/// the colour is three numbers because the theme writes colours as
+/// `oklch(L, C, H)` — three sliders is the shape of the value, not a
+/// choice about how many controls to offer.
+///
+/// The halo of NEON has no colour of its own; it wears the line's. So there
+/// is one colour here and not two, and the list above it switches a glow
+/// on rather than introducing a second thing to tint.
+///
+/// Nothing on this page writes a file yet. Every control shows itself
+/// immediately and SAVE is not built, which is why there is a line saying so
+/// at the bottom rather than a button that would look like it worked.
+static EDITOR_ROWS: [Row; 17] = [
+    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Borders }),
+    row(Ctrl::Slider {
+        label: "BRIGHTNESS",
+        act: Act::EditorTrack(Knob::EdgeL),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.edge[0],
+        set: |s, v| s.edge[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "SATURATION",
+        act: Act::EditorTrack(Knob::EdgeC),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.edge[1],
+        set: |s, v| s.edge[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HUE",
+        act: Act::EditorTrack(Knob::EdgeH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.edge[2],
+        set: |s, v| s.edge[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // BACKGROUND: the kind, then the glass pair — TINT multiplies the
+    // blurred scene (it can only darken), WASH lays over with alpha (the
+    // only knob that brightens). SOLID reads its colour from the WASH
+    // group, the one that behaves like an ordinary colour.
+    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Backgrounds }),
+    // The kind's own knobs appear WITH the kind: a slider for a thing the
+    // choice does not have would be a question about nothing (Row::when).
+    row_shown(
+        Ctrl::Slider {
+            label: "OPACITY",
+            act: Act::EditorTrack(Knob::BgOpacity),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bg_opacity,
+            set: |s, v| s.bg_opacity = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_chosen,
     ),
+    row_shown(
+        Ctrl::Slider {
+            label: "BLUR DEPTH",
+            act: Act::EditorTrack(Knob::BgDepth),
+            unit: Unit::None,
+            // 0..100 mapped onto the pyramid's 1.0..3.0: the emitter mixes
+            // two rungs by the fraction, so every stop is a real depth.
+            range: (0, 100),
+            step: 2,
+            get: |s| s.bg_depth,
+            set: |s, v| s.bg_depth = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_blurs,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "WASH COVERAGE",
+            act: Act::EditorTrack(Knob::BgCoverage),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bg_coverage,
+            set: |s, v| s.bg_coverage = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_frosted,
+    ),
+    row_shown(Ctrl::Slider {
+        label: "TINT BRIGHTNESS",
+        act: Act::EditorTrack(Knob::TintB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tint[0],
+        set: |s, v| s.tint[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "TINT SATURATION",
+        act: Act::EditorTrack(Knob::TintS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tint[1],
+        set: |s, v| s.tint[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "TINT HUE",
+        act: Act::EditorTrack(Knob::TintH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.tint[2],
+        set: |s, v| s.tint[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "WASH BRIGHTNESS",
+        act: Act::EditorTrack(Knob::WashB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.wash[0],
+        set: |s, v| s.wash[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
+    row_shown(Ctrl::Slider {
+        label: "WASH SATURATION",
+        act: Act::EditorTrack(Knob::WashS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.wash[1],
+        set: |s, v| s.wash[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
+    row_shown(Ctrl::Slider {
+        label: "WASH HUE",
+        act: Act::EditorTrack(Knob::WashH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.wash[2],
+        set: |s, v| s.wash[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
     row(Ctrl::Note {
-        text: Text::Fixed("IT WILL EDIT THE TOKENS OF THE THEME IN FORCE, HERE."),
+        text: Text::Fixed("SHOWN ONLY \u{2014} SAVING IS NOT BUILT YET."),
     }),
 ];
 
@@ -1050,8 +1366,13 @@ static GRID_ROWS: [Row; 5] = [
     }),
 ];
 
-/// Master volume plus the two switches that matter in daily use —
-/// typing, which fires constantly, and the ambient bed.
+/// SOUND LEVELS: master volume plus the two switches that matter in
+/// daily use — typing, which fires constantly, and the ambient bed.
+///
+/// Levels only. WHICH set of clips is playing is LOOK AND FEEL's
+/// `SOUNDS` list, and this page merely says which one that turned out
+/// to be ([`sound_set_note`]) so a silent desktop has somewhere to
+/// explain itself.
 static SOUND_ROWS: [Row; 4] = [
     row(Ctrl::Slider {
         label: "VOLUME",
@@ -1276,8 +1597,8 @@ static PAGES: [Page; 11] = [
         rows: &GRID_ROWS,
     },
     Page {
-        view: View::Sound,
-        title: "SETTINGS \u{2014} SOUND",
+        view: View::SoundLevels,
+        title: "SETTINGS \u{2014} SOUND LEVELS",
         chrome: Chrome::Back,
         lead: Gap::Section,
         cols: Cols::Measured { label: "VOLUME", value: "100 %" },
@@ -1406,7 +1727,6 @@ struct Metrics {
     hint_h: f32,
     /// One line of the empty-state role: what a page with nothing in it
     /// yet reserves for saying so.
-    empty_h: f32,
     hint_inset: f32,
     corner_w: f32,
     list_w: f32,
@@ -1415,7 +1735,8 @@ struct Metrics {
 impl Metrics {
     /// Resolved against the drawing context and not the theme alone,
     /// because two of these lengths are type: a role's px follows
-    /// `ui_font_scale` and `panel_scale`, so a page's height does too.
+    /// `panel_scale`, so a page's height does too. (The interface scale
+    /// reaches both through the bake, and needs no context.)
     fn of(ctx: &Ctx, content: Rect) -> Metrics {
         let th = theme::resolved();
         static BTN_H: OnceLock<TokenId> = OnceLock::new();
@@ -1441,7 +1762,6 @@ impl Metrics {
             block_h: th.px(tok(&BLOCK_H, "panel.title.block_h")),
             note_h: role_note(ctx).line(),
             hint_h: role_hint(ctx).line(),
-            empty_h: role_empty(ctx).line(),
             hint_inset: th.px(tok(&HINT_INSET, "settings.hint_inset")),
             corner_w: (content.w * th.px(tok(&BACK_W_FRAC, "settings.back_w_frac")))
                 .max(th.px(tok(&BACK_W_MIN, "settings.back_w_min")))
@@ -1511,6 +1831,31 @@ pub struct Settings {
     cur_weight: [Option<String>; 2],
     /// Font sizes in percent (50-200).
     cur_size: [u32; 2],
+    /// The two shapes a border can take, as the list offers them. Built in
+    /// rather than read from anywhere: they are not files, they are the
+    /// only two things the renderer can draw for a border.
+    border_kinds: Vec<String>,
+    current_border: Option<String>,
+    background_kinds: Vec<String>,
+    current_background: Option<String>,
+    /// Glass tint colour, HSV in whole slider units, like `edge`.
+    tint: [u32; 3],
+    /// Glass wash colour, HSV in whole slider units, like `edge`.
+    wash: [u32; 3],
+    /// Effect opacity in percent, every background kind.
+    bg_opacity: u32,
+    /// Blur pyramid depth, 1..=3.
+    bg_depth: u32,
+    /// Wash coverage in percent, FROSTED only.
+    bg_coverage: u32,
+    /// When the editor last re-baked the desktop during a drag; the pulse
+    /// that keeps a live slider from leaking a bake per frame.
+    editor_pulse: Option<Instant>,
+    /// The border colour the editor is showing, as OKLCh in whole units:
+    /// lightness 0..100, chroma 0..40, hue 0..359. A slider moves whole
+    /// numbers, and the theme's own colours are written to four decimal
+    /// places, so these are scaled back on the way out.
+    edge: [u32; 3],
     /// The one track a press is currently holding, if any. A track's
     /// rectangle is not kept beside it: the hit map already has it, and
     /// two copies of a geometry are two chances to disagree.
@@ -1524,7 +1869,8 @@ pub struct Settings {
     grid_rows: u32,
     /// Widget padding in px (0-40).
     grid_pad: u32,
-    /// SOUND view: master volume 0-100 and the two mute switches.
+    /// SOUND LEVELS view: master volume 0-100 and the two mute
+    /// switches. Not the sound SET, which is `current_sounds`.
     sound_volume: u32,
     sound_typing: bool,
     sound_ambient: bool,
@@ -1622,6 +1968,21 @@ impl Settings {
             cur_family: [None, None],
             cur_weight: [None, None],
             cur_size: [100, 100],
+            editor_pulse: None,
+            border_kinds: vec!["LINE".to_string(), "NEON".to_string()],
+            current_border: None,
+            background_kinds: vec![
+                "SOLID".to_string(),
+                "BLUR".to_string(),
+                "FROSTED GLASS".to_string(),
+            ],
+            current_background: None,
+            tint: [60, 20, 210],
+            wash: [20, 15, 210],
+            bg_opacity: 100,
+            bg_depth: 50,
+            bg_coverage: 42,
+            edge: [70, 12, 200],
             dragging: None,
             dropdown: None,
             dropdown_since: None,
@@ -1661,7 +2022,24 @@ impl Settings {
     /// Enters a page. The offset belongs to the page being left, so it
     /// stays with it: every `self.view =` in the window goes through
     /// here, which is the only reason a reopened page starts at its top.
+    /// Leaving the editor IS the cancel, for as long as SAVE is unbuilt:
+    /// the preview never touched a file, so dropping it puts the desktop
+    /// back the way the theme has it. Without this — a verified finding —
+    /// the first touched slider left its overlay standing for the rest of
+    /// the session, with no way back short of restarting.
+    fn leave_editor_preview(&mut self) {
+        if self.view == View::ThemeEditor {
+            nacelle::theme::clear_preview();
+            self.editor_pulse = None;
+        }
+    }
+
     fn go(&mut self, view: View) {
+        // Any road out of the editor page drops its preview — Back, Escape
+        // and every door share this one gate, so none can forget.
+        if view != View::ThemeEditor {
+            self.leave_editor_preview();
+        }
         self.view = view;
         self.scroll.reset();
     }
@@ -1708,15 +2086,96 @@ impl Settings {
     /// theme's (`scroll.*`).
     ///
     /// It is answered here and asked in the event loop, which routes the
-    /// wheel and belongs to another stage. `allow(dead_code)` says
-    /// exactly that, and comes off the day it is called; until then the
-    /// keyboard's PageUp/PageDown/Home/End move the same offset.
-    #[allow(dead_code)]
+    /// wheel and belongs to another stage. That day has come: `main.rs`
+    /// calls this from its `MouseWheel` arm, ahead of the hit test on the
+    /// board behind the window, so the `allow(dead_code)` this carried is
+    /// gone. The keyboard's PageUp/PageDown/Home/End move the same offset.
     pub fn wheel(&mut self, notches: f32) {
         if !self.open {
             return;
         }
-        self.scroll.wheel(notches, &ScrollPhysics::from_theme(), self.now);
+        // Negated, as at every other caller (search's list, the file
+        // browser): winit reports scrolling UP as positive, and a page
+        // scrolled up shows EARLIER content — a smaller offset. Passed
+        // through raw, the page ran away from the hand.
+        self.scroll.wheel(-notches, &ScrollPhysics::from_theme(), self.now);
+    }
+
+    /// Shows what the editor is set to, without writing anything.
+    ///
+    /// Called when a value SETTLES — a slider released, an arrow pressed, a
+    /// kind chosen — and never while a slider is being dragged. Each call
+    /// re-bakes the theme, and a bake is 76 031 bytes that is never freed,
+    /// so one per gesture is affordable and one per frame is not. The
+    /// slider itself moves at whatever rate the hand does; only the picture
+    /// behind it waits for the hand to stop.
+    ///
+    /// Nothing here touches the file. `theme::clear_preview` puts the
+    /// screen back, which is what CANCEL will be made of.
+    fn apply_editor_preview(&self) {
+        use nacelle::theme::edit::{border_colour_edit, border_edits, Border, Scope};
+        // The sliders are HSV — brightness, saturation, hue — and the file
+        // wants OKLCh, so the value crosses HSV -> RGB -> OKLCh here. See
+        // `hsv_to_rgb` for why HSV: brightness 100 % must be the hue's own
+        // full brightness, never white.
+        let (r, g, b) = hsv_to_rgb(
+            self.edge[2] as f32,
+            self.edge[1] as f32 / 100.0,
+            self.edge[0] as f32 / 100.0,
+        );
+        let colour = nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch();
+        let edits = match self.current_border.as_deref() {
+            // No kind chosen: the colour moves ALONE. Mapping "no choice"
+            // to LINE was a verified bug — a colour drag before the list
+            // was touched switched the halo off as a side effect.
+            None => vec![border_colour_edit(Scope::Theme, colour)],
+            other => {
+                let kind = if other == Some("NEON") { Border::Neon } else { Border::Line };
+                // Whether the THEME already dresses a visible halo — if it
+                // does, NEON keeps the theme's radius and alpha instead of
+                // flattening five themes' dress to one theme's numbers.
+                let t = nacelle::theme::resolved();
+                let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
+                let dressed =
+                    px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
+                border_edits(Scope::Theme, kind, colour, dressed)
+            }
+        };
+        let mut edits = edits;
+        // The background joins the same send. `None` means the list was
+        // never touched and the theme's own background stands — the same
+        // neutrality the border's `None` earned after verification.
+        if let Some(kind_name) = self.current_background.as_deref() {
+            use nacelle::theme::edit::{glass_edits, Glass};
+            let kind = match kind_name {
+                "BLUR" => Glass::Blur,
+                "FROSTED GLASS" => Glass::Frosted,
+                _ => Glass::Solid,
+            };
+            let of = |hsv: &[u32; 3]| {
+                let (r, g, b) = hsv_to_rgb(
+                    hsv[2] as f32,
+                    hsv[1] as f32 / 100.0,
+                    hsv[0] as f32 / 100.0,
+                );
+                nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch()
+            };
+            edits.extend(glass_edits(
+                Scope::Theme,
+                kind,
+                of(&self.tint),
+                of(&self.wash),
+                self.bg_opacity as f32 / 100.0,
+                1.0 + self.bg_depth.min(100) as f32 / 50.0,
+                self.bg_coverage as f32 / 100.0,
+            ));
+        }
+        let pairs: Vec<(&str, &str)> =
+            edits.iter().map(|e| (e.token, e.value.as_str())).collect();
+        let refused = nacelle::theme::set_preview(&pairs);
+        for r in refused {
+            eprintln!("nacelle-desktop: the theme editor could not show {r}");
+        }
     }
 
     /// Mouse move while a track is held.
@@ -1724,6 +2183,21 @@ impl Settings {
         let Some(act) = self.dragging else { return };
         self.set_from_x(act, x);
         self.mark_dirty(act);
+        // The editor's tracks show themselves WHILE dragged — the owner asked
+        // for the picture to follow the hand, not the release. Throttled,
+        // because every distinct value is a fresh 76 KB bake that is never
+        // freed: ten a second is ~0.8 MB for a second of active dragging,
+        // sixty a second would be 4.5. The slider itself still moves every
+        // frame; only the desktop behind it updates on the pulse.
+        if let Act::EditorTrack(_) = act {
+            let due = self
+                .editor_pulse
+                .map_or(true, |t| t.elapsed().as_millis() >= 100);
+            if due {
+                self.editor_pulse = Some(Instant::now());
+                self.apply_editor_preview();
+            }
+        }
     }
 
     /// Current frosted-glass preferences, for main to apply.
@@ -1860,6 +2334,9 @@ impl Settings {
         }
         match act {
             Act::Close => {
+                // Closing the window does not pass through `go`, so the
+                // editor's preview is dropped here as well.
+                self.leave_editor_preview();
                 self.open = false;
                 emit(Sfx::PanelClose);
             }
@@ -1904,6 +2381,31 @@ impl Settings {
                         ListId::Looks => config::set_engine_theme(&name),
                         ListId::Layauts => config::set_layaut_option(&name),
                         ListId::Sounds => config::set_sounds_option(&name),
+                        // No config line: a border kind is a value laid
+                        // over the theme until SAVE, so choosing one shows
+                        // it and nothing else — and it RETURNS FALSE, which
+                        // is most of the fix. The common tail below answers
+                        // true, and main takes true as "the configuration
+                        // changed, re-resolve it": a theme reload, which
+                        // builds a fresh engine with an EMPTY preview. So a
+                        // click on LINE erased its own preview in the same
+                        // breath, and looked dead until the first slider
+                        // pulse re-sent it; NEON only appeared to work
+                        // because the post-reload state (Cockpit's glow on)
+                        // matched what NEON asks for. Measured in the trace
+                        // of 2026-08-16, clicks 2313/2528.
+                        ListId::Borders => {
+                            self.current_border = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
+                        ListId::Backgrounds => {
+                            self.current_background = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
                     }
                     self.refresh_current();
                     emit(Sfx::Theme);
@@ -1911,20 +2413,87 @@ impl Settings {
                 }
             }
             Act::ThemesEditor => {
-                // Decision §3, requirement 2: the first row of the
-                // THEMES list is a door and not a choice. It writes no
-                // Theme=, moves no selection, and takes the window's
+                // Decision §3, requirement 2: the control at the head of
+                // the THEMES list is a door and not a choice. It writes
+                // no Theme=, moves no selection, and takes the window's
                 // content area over instead — which is why it answers
                 // false: nothing about the configuration changed.
                 self.dropdown = None;
+                // The editor OPENS ON THE THEME'S OWN STATE — the model's
+                // first promise, and a verified finding when it was broken:
+                // the sliders used to open on a built-in colour that
+                // replaced the theme's on first touch. The colour comes off
+                // the live bake; the kind is read from the halo switch.
+                {
+                    let t = nacelle::theme::resolved();
+                    if let Some(id) = nacelle::theme::id("elev.panel.edge.color") {
+                        let c = t.color(id);
+                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+                        self.edge = [
+                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
+                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+                        ];
+                    }
+                    let on = nacelle::theme::id("glow.panel_edge.enabled")
+                        .map(|id| t.flag(id))
+                        .unwrap_or(false);
+                    self.current_border =
+                        Some(if on { "NEON" } else { "LINE" }.to_string());
+                    // The background too: kind from the rank and the wash,
+                    // colours from whichever quads are live. A solid seeds
+                    // the WASH group from the shared fill, because that is
+                    // the group SOLID writes back through.
+                    let px = |n: &str| {
+                        nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0)
+                    };
+                    let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
+                    let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| {
+                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+                        *slot = [
+                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
+                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+                        ];
+                    };
+                    let rank = px("elev.panel.glass.rank").round() as u32;
+                    let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
+                    self.current_background = Some(
+                        match (rank, wash_a > 0.0) {
+                            (0, _) => "SOLID",
+                            (_, false) => "BLUR",
+                            (_, true) => "FROSTED GLASS",
+                        }
+                        .to_string(),
+                    );
+                    if rank == 0 {
+                        if let Some(c) = col_of("component.panel.fill") {
+                            seed(&mut self.wash, c);
+                        }
+                    } else {
+                        if let Some(c) = col_of("elev.panel.glass.tint") {
+                            seed(&mut self.tint, c);
+                        }
+                        if let Some(c) = col_of("elev.panel.glass.wash") {
+                            if c.a > 0.0 {
+                                seed(&mut self.wash, c);
+                            }
+                        }
+                    }
+                }
                 self.go(View::ThemeEditor);
             }
-            Act::OpenSound => {
+            Act::OpenSoundLevels => {
                 let (vol, typing, ambient) = config::sound_prefs();
                 self.sound_volume = vol;
                 self.sound_typing = typing;
                 self.sound_ambient = ambient;
-                self.go(View::Sound);
+                // Like every other door off this page: an anchor the
+                // next page does not draw has nothing to hang a list
+                // from, and a dropdown left standing eats the first
+                // Escape.
+                self.dropdown = None;
+                self.go(View::SoundLevels);
             }
             Act::OpenBlur => {
                 let (radius, opacity) = config::blur_prefs();
@@ -1943,7 +2512,8 @@ impl Settings {
             | Act::ColsTrack
             | Act::RowsTrack
             | Act::PadTrack
-            | Act::SizeTrack(_) => {
+            | Act::SizeTrack(_)
+            | Act::EditorTrack(_) => {
                 self.dragging = Some(act);
                 self.set_from_x(act, x);
                 self.mark_dirty(act);
@@ -2348,7 +2918,7 @@ impl Settings {
         self.button_drawn(ctx, corner, chrome_label, chrome_act, Some(ring));
         // Last, so it covers what it hangs from and the reverse hit walk
         // reaches its rows first.
-        self.draw_open_dropdown(ctx);
+        self.draw_open_dropdown(ctx, m);
     }
 
     /// The box the flowed rows live in: the content box, less the
@@ -2379,7 +2949,7 @@ impl Settings {
         let mut h = 0.0;
         let mut trailing = 0.0;
         for row in page.rows {
-            if row.ctrl.pinned() {
+            if row.ctrl.pinned() || !(row.when)(self) {
                 continue;
             }
             h += self.row_h(&row.ctrl, m, content) + m.space(row.after);
@@ -2396,8 +2966,38 @@ impl Settings {
     /// the pinned rows are placed against the content box afterwards,
     /// outside it, which is why the flow can no longer meet them.
     fn draw_body(&mut self, ctx: &mut Ctx, page: &Page, m: Metrics, content: Rect) {
+        // An inset bar takes its lane OUT of the rows' box, so it stands
+        // BESIDE the controls instead of over them — the owner's ask, and
+        // the master's `scrollbar.mode` decision. The lane is reserved at
+        // the bar's WIDEST (hover included): a lane that appeared only
+        // while scrolling would reflow every row under the pointer.
+        let look = ScrollbarLook::from_theme();
+        let lane = scroll::inset_w(&look).max(match look.mode {
+            scroll::ScrollbarMode::Inset => look.w_hover + 2.0 * look.margin,
+            _ => 0.0,
+        });
+        // The FULL box survives for the bar: the lane is carved out of the
+        // rows' box only, and the bar is drawn against the original edge —
+        // otherwise it would hug the narrowed edge and stand over the rows
+        // again, just from the other side of its own lane.
+        let content_full = content;
+        // The clip, the scroll span and the bar all live on the FULL box —
+        // the lane is carved from the ROWS' box only. A clip that ended at
+        // the lane would be a second statement of the same width, and the
+        // two would drift.
+        let content = match look.edge {
+            scroll::ScrollbarEdge::Right => {
+                Rect::new(content.x, content.y, (content.w - lane).max(0.0), content.h)
+            }
+            scroll::ScrollbarEdge::Left => Rect::new(
+                content.x + lane,
+                content.y,
+                (content.w - lane).max(0.0),
+                content.h,
+            ),
+        };
         let (label_w, value_w) = self.columns(ctx, page, content);
-        let view = self.body_box(page, m, content);
+        let view = self.body_box(page, m, content_full);
         let length = self.flow_h(page, m, content);
         // The offset, its clamp, its physics and its bar are the
         // toolkit's (`view::scroll`); the wheel, the page keys and the
@@ -2413,7 +3013,7 @@ impl Settings {
         self.clip = Some(view);
         let mut y = view.y - off;
         for row in page.rows {
-            if row.ctrl.pinned() {
+            if row.ctrl.pinned() || !(row.when)(self) {
                 continue;
             }
             let h = self.row_h(&row.ctrl, m, content);
@@ -2465,7 +3065,7 @@ impl Settings {
                 Rect::new(view.right() - reach, view.y, reach, view.h)
             }
         };
-        let hovered = band.contains(ctx.mouse.0, ctx.mouse.1);
+        let hovered = ctx.mouse.over(band);
         let Some(geom) = scroll::scrollbar(
             view,
             &look,
@@ -2500,9 +3100,9 @@ impl Settings {
                 let f = role_label(ctx);
                 let v = role_value(ctx);
                 (
-                    ctx.fonts.measure(FONT_UI, f.px, label, f.track)
+                    ctx.fonts.measure(f.face, f.px, label, f.track)
                         + th.px(tok(&LABEL_PAD, "rhythm.label_pad")),
-                    ctx.fonts.measure(FONT_UI, v.px, value, v.track)
+                    ctx.fonts.measure(v.face, v.px, value, v.track)
                         + th.px(tok(&VALUE_GUTTER, "rhythm.value_gutter")),
                 )
             }
@@ -2525,7 +3125,6 @@ impl Settings {
             Ctrl::Section { .. } => m.block_h,
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
-            Ctrl::Empty { .. } => m.empty_h,
             Ctrl::Custom { h, .. } => h(m, content),
         }
     }
@@ -2545,7 +3144,7 @@ impl Settings {
         match ctrl {
             // The whole row toggles (nacelle::object).
             Ctrl::Toggle { label, get, act } => {
-                let hover = rc.band.contains(ctx.mouse.0, ctx.mouse.1);
+                let hover = ctx.mouse.over(rc.band);
                 let on = get(self);
                 nacelle::object::checkbox::draw_focusable(
                     ctx,
@@ -2572,7 +3171,7 @@ impl Settings {
                 let vy = center_y(ctx, rc.band, v);
                 ctx.dl.text_right(
                     ctx.fonts,
-                    FONT_UI,
+                    v.face,
                     v.px,
                     rc.content.right(),
                     vy,
@@ -2620,7 +3219,7 @@ impl Settings {
                 let s = self.text_of(*text);
                 ctx.dl.text(
                     ctx.fonts,
-                    FONT_UI,
+                    n.face,
                     n.px,
                     rc.content.x,
                     ny,
@@ -2632,28 +3231,13 @@ impl Settings {
             // What a surface with nothing in it yet says about itself,
             // set the way every other empty box in the program sets it
             // (`emptystate.role`) and inked like every other aside.
-            Ctrl::Empty { text } => {
-                let v = role_empty(ctx);
-                let ty = center_y(ctx, rc.band, v);
-                let s = self.text_of(*text);
-                ctx.dl.text_center(
-                    ctx.fonts,
-                    FONT_UI,
-                    v.px,
-                    rc.content.cx(),
-                    ty,
-                    &s,
-                    col(th.color(tok(&MUTED_FG, "text.muted"))),
-                    v.track,
-                );
-            }
             // One line that explains the other way in (settings.hint.role).
             Ctrl::Hint { text } => {
                 let n = role_hint(ctx);
                 let s = self.text_of(*text);
                 ctx.dl.text_center(
                     ctx.fonts,
-                    FONT_UI,
+                    n.face,
                     n.px,
                     rc.content.cx(),
                     rc.content.bottom() - rc.m.hint_inset,
@@ -2680,7 +3264,7 @@ impl Settings {
         let s = self.text_of(*label);
         ctx.dl.text_center(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             r.cx(),
             ty,
@@ -2698,7 +3282,7 @@ impl Settings {
         let ty = center_y(ctx, rc.band, f);
         ctx.dl.text(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             rc.content.x,
             ty,
@@ -2762,7 +3346,7 @@ impl Settings {
                 cw,
                 rc.band.h,
             );
-            let hover = r.contains(ctx.mouse.0, ctx.mouse.1);
+            let hover = ctx.mouse.over(r);
             let on = cur == *bits;
             let st = ladder(
                 th,
@@ -2791,7 +3375,7 @@ impl Settings {
             let ty = center_y(ctx, rc.band, f);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 r.cx(),
                 ty,
@@ -2821,7 +3405,7 @@ impl Settings {
             rc.content.w - rc.label_w,
             rc.band.h,
         );
-        let hover = r.contains(ctx.mouse.0, ctx.mouse.1);
+        let hover = ctx.mouse.over(r);
         let st = ladder(
             th,
             &BTN_CLASS,
@@ -2839,7 +3423,7 @@ impl Settings {
         let ty = center_y(ctx, rc.band, f);
         ctx.dl.text_center(
             ctx.fonts,
-            FONT_UI,
+            f.face,
             f.px,
             r.cx(),
             ty,
@@ -2856,6 +3440,8 @@ impl Settings {
             ListId::Looks => &self.themes,
             ListId::Layauts => &self.layauts,
             ListId::Sounds => &self.sounds,
+            ListId::Borders => &self.border_kinds,
+            ListId::Backgrounds => &self.background_kinds,
         }
     }
 
@@ -2865,7 +3451,51 @@ impl Settings {
             ListId::Looks => self.current_look.as_ref(),
             ListId::Layauts => self.current_layaut.as_ref(),
             ListId::Sounds => self.current_sounds.as_ref(),
+            ListId::Borders => self.current_border.as_ref(),
+            ListId::Backgrounds => self.current_background.as_ref(),
         }
+    }
+
+    /// Which ROW of the open list is the member already in force — the
+    /// theme now applied, the layout now loaded — for the object to
+    /// draw on its ladder's `selected` rung
+    /// ([`nacelle::object::dropdown::AccordionStyle::current`]).
+    ///
+    /// The three of these answer one question and are written as three
+    /// functions because the three lists number their rows differently,
+    /// and each one's answer must be the SAME index its `Act` carries:
+    /// a mark that disagreed with the pick would show one row and apply
+    /// another, which is worse than no mark at all.
+    ///
+    /// `None` is a real answer here: the configuration can name a theme
+    /// that is not installed on this machine, and then no member of the
+    /// set is standing — which is not "the first one".
+    fn current_row(&self, list: ListId) -> Option<usize> {
+        let cur = self.current_of(list)?;
+        self.names(list).iter().position(|n| n == cur)
+    }
+
+    /// [`Settings::current_row`] for a font family. Row zero is the
+    /// `DEFAULT` entry this file puts in front of the families, so an
+    /// unset family IS row zero — that is what the desktop resolves it
+    /// to — and every other family stands one past its place in the
+    /// scan, the same shift [`Act::FamilyPick`] undoes.
+    fn family_row(&self, sect: Sect) -> Option<usize> {
+        let si = Self::sect_idx(sect);
+        match self.cur_family[si].as_deref() {
+            None => Some(0),
+            Some(f) => self.families[si].iter().position(|x| x == f).map(|i| i + 1),
+        }
+    }
+
+    /// [`Settings::current_row`] for a font weight. [`WEIGHTS`] is a
+    /// fixed table with nothing in front of it, so the row is the place
+    /// in it — matched without case, because the table is spelled
+    /// `SemiBold` and the configuration keeps whatever was written.
+    fn weight_row(&self, sect: Sect) -> Option<usize> {
+        let si = Self::sect_idx(sect);
+        let w = self.cur_weight[si].as_deref()?;
+        WEIGHTS.iter().position(|k| k.eq_ignore_ascii_case(w))
     }
 
     /// The name one list is set to, for the page that has to say what
@@ -2904,9 +3534,13 @@ impl Settings {
     }
 
     /// The triangle at the tail of an anchor: the toolkit's own
-    /// disclosure glyph ([`nacelle::view::paint::disclosure`]), turned
-    /// down while its list is unfolded and pointing along it when it is
-    /// not. The state turns the GLYPH and not its colour, which is the
+    /// disclosure glyph ([`nacelle::view::paint::disclosure`]) in its
+    /// DROP grammar — closed it points down, at the direction the list
+    /// will unfold, and open it points back up at the edge the list
+    /// folds into. The tree's grammar (closed points along the row) is
+    /// the other sentence the same primitive speaks, and it belongs to
+    /// file trees; a `▷` on a drop-down reads as "go into this row".
+    /// The state turns the GLYPH and not its colour, which is the
     /// primitive's rule and not this window's.
     ///
     /// Sized and inked like the BACK arrow at the other end of a button
@@ -2933,6 +3567,7 @@ impl Settings {
             r.y + (r.h - s) / 2.0,
             s,
             s,
+            nacelle::view::paint::Disclosure::Drop,
             open,
             ink,
         );
@@ -2944,7 +3579,7 @@ impl Settings {
     /// second copy of a geometry. That is the VISIBLE part of the
     /// button: a list hangs from the edge the eye sees, and an anchor
     /// scrolled off the page has nothing to hang from at all.
-    fn draw_open_dropdown(&mut self, ctx: &mut Ctx) {
+    fn draw_open_dropdown(&mut self, ctx: &mut Ctx, m: Metrics) {
         static MENU_ROW_H: OnceLock<TokenId> = OnceLock::new();
         let Some(d) = self.dropdown else { return };
         let Some(anchor) = self.rect_of_act(anchor_act(d)) else { return };
@@ -2955,49 +3590,91 @@ impl Settings {
                 // First entry: DEFAULT (auto-detected font).
                 let mut names = vec!["DEFAULT".to_string()];
                 names.extend(self.families[si].iter().map(|f| f.to_uppercase()));
-                self.draw_dropdown(ctx, anchor, item_h, &names, dropdown_base(d), |i| {
-                    Act::FamilyPick(sect, i)
-                });
+                let current = self.family_row(sect);
+                self.draw_dropdown(
+                    ctx,
+                    anchor,
+                    item_h,
+                    &names,
+                    dropdown_base(d),
+                    current,
+                    |i| Act::FamilyPick(sect, i),
+                );
             }
             Dropdown::Weight(sect) => {
                 let names: Vec<String> =
                     WEIGHTS.iter().map(|w| w.to_uppercase()).collect();
-                self.draw_dropdown(ctx, anchor, item_h, &names, dropdown_base(d), |i| {
-                    Act::WeightPick(sect, i)
-                });
+                let current = self.weight_row(sect);
+                self.draw_dropdown(
+                    ctx,
+                    anchor,
+                    item_h,
+                    &names,
+                    dropdown_base(d),
+                    current,
+                    |i| Act::WeightPick(sect, i),
+                );
             }
             Dropdown::List(list) => {
-                // What the list carries in front of its names first —
-                // THEMES carries the editor's door — then the names.
-                let mut names: Vec<String> = Vec::new();
-                if list.head() > 0 {
-                    names.push(EDITOR_ROW.to_string());
-                }
-                names.extend(self.names(list).iter().map(|n| n.to_uppercase()));
-                let rows = self
-                    .draw_dropdown(ctx, anchor, item_h, &names, dropdown_base(d), |i| {
-                        list_row_act(list, i)
-                    });
-                // Decision §3, requirement 1: the row that is NOT a
-                // choice must not read as one. The toolkit's own
-                // hairline (`ui::rule`) draws the seam between the door
-                // and the names under it — the whole of the difference
-                // an accordion row can carry today, and the reason the
-                // fleet's report asks for a list row that can say for
-                // itself that it is an action.
-                if list.head() > 0 {
-                    if let Some(&(r, full)) = rows.first() {
-                        // Only once the row has finished unfolding: a
-                        // line on a rect that is still moving is the
-                        // same fault the accordion refuses to make with
-                        // its focus ring.
-                        if full {
-                            nacelle::ui::rule(ctx, Rect::new(r.x, r.bottom(), r.w, 0.0));
-                        }
-                    }
-                }
+                // Decision §3, requirement 1: what is NOT a choice may
+                // not read as one. So the door is not handed to the
+                // list object at all — it is a BUTTON, drawn above the
+                // rows, and the object is given the names alone. That
+                // is the whole difference and it is a real one: a
+                // different object, `button.h` tall against
+                // `menu.row_h`, on the `button` class's ladder against
+                // `menu.item`'s, with its label in the `button` type
+                // role. A hairline between two identical rows was not,
+                // and could not be — every row of an accordion already
+                // has a seam above it.
+                let below = if list.carries_door() {
+                    self.door(ctx, anchor, m)
+                } else {
+                    anchor
+                };
+                let names: Vec<String> =
+                    self.names(list).iter().map(|n| n.to_uppercase()).collect();
+                let current = self.current_row(list);
+                self.draw_dropdown(
+                    ctx,
+                    below,
+                    item_h,
+                    &names,
+                    dropdown_base(d),
+                    current,
+                    |i| Act::Pick(list, i),
+                );
             }
         }
+    }
+
+    /// The control at the head of an unfolded list that is not a member
+    /// of it — today only the THEMES editor (decision §3). Drawn as the
+    /// toolkit's button, flush under the anchor and exactly as wide,
+    /// and answering with the rect the NAMES then hang from, so the
+    /// caller has no second geometry to keep in step.
+    ///
+    /// It does not unfold with the list: a plate whose height is still
+    /// moving cannot hold a label, and this one is not a member of the
+    /// set being revealed — it is the list's own furniture, there from
+    /// the moment the list is.
+    fn door(&mut self, ctx: &mut Ctx, anchor: Rect, m: Metrics) -> Rect {
+        let act = Act::ThemesEditor;
+        let r = Rect::new(anchor.x, anchor.bottom(), anchor.w, m.btn_h);
+        // Not [`Settings::button_state`]: that one refuses hover while
+        // a dropdown is open, which is right for the page underneath
+        // and exactly wrong here — the door stands INSIDE the open
+        // list and is one of the two things the pointer can reach.
+        let st = nacelle::object::button::ButtonState {
+            hover: ctx.mouse.over(r),
+            flash: self.flashing(act),
+            selected: false,
+        };
+        nacelle::object::button::draw_focusable(ctx, r, EDITOR_ROW, st, focus_id(act));
+        // Unclipped, like the rows below it: the list hangs past the
+        // window's edge and stays pressable there.
+        self.hits.push((r, act));
+        r
     }
 
     /// The boards laid out the way they sit in the world — the
@@ -3030,7 +3707,7 @@ impl Settings {
             let y = center_y(ctx, area, v);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                v.face,
                 v.px,
                 area.cx(),
                 y,
@@ -3061,7 +3738,7 @@ impl Settings {
                 Cow::Borrowed(line.as_str())
             };
             let y = center_y(ctx, band, n);
-            ctx.dl.text(ctx.fonts, FONT_UI, n.px, area.x, y, &text, ink, n.track);
+            ctx.dl.text(ctx.fonts, n.face, n.px, area.x, y, &text, ink, n.track);
         }
     }
 
@@ -3147,7 +3824,7 @@ impl Settings {
         for b in &self.boards {
             let (bx, by) = b.id;
             let tile = tile_at(bx, by);
-            let hover = tile.contains(ctx.mouse.0, ctx.mouse.1);
+            let hover = ctx.mouse.over(tile);
             ctx.dl.rect(tile.x, tile.y, tile.w, tile.h, bed);
             let proxy_min = th.px(tok(&PROXY_MIN, "boards.tile.proxy_min_px"));
             for ps in &b.panels {
@@ -3197,7 +3874,7 @@ impl Settings {
             );
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 tile.cx(),
                 tile.bottom() + th.px(tok(&CAP_GAP, "boards.tile.caption_gap")),
@@ -3213,7 +3890,7 @@ impl Settings {
                     th.px(tok(&CLOSE_SIZE, "boards.tile.close_size")).min(tile.w * 0.2);
                 let inset = th.px(tok(&CLOSE_INSET, "boards.tile.close_inset"));
                 let xr = Rect::new(tile.right() - xs - inset, tile.y + inset, xs, xs);
-                let x_hot = xr.contains(ctx.mouse.0, ctx.mouse.1);
+                let x_hot = ctx.mouse.over(xr);
                 // A destructive control: hovering takes the close glyph's
                 // severity colour, not the plain hover.
                 let c = if x_hot { wc_close } else { wc_idle };
@@ -3240,7 +3917,7 @@ impl Settings {
         ];
         for ((cx, cy), dir) in ends {
             let pr = Rect::new(cx - plus / 2.0, cy - plus / 2.0, plus, plus);
-            let hot = pr.contains(ctx.mouse.0, ctx.mouse.1);
+            let hot = ctx.mouse.over(pr);
             let c = if hot { wc_hover } else { wc_idle };
             ctx.dl.rect(pr.x, pr.y, pr.w, pr.h, bed);
             ctx.dl.rect_outline(pr.x, pr.y, pr.w, pr.h, ring_w, c);
@@ -3259,10 +3936,16 @@ impl Settings {
     /// row as `base.item(i)` itself, the same derivation
     /// [`focus_id`] uses for the pick acts.
     ///
+    /// `current` is the place IN `names` of the member already in force
+    /// — the theme now applied, the family now loaded — which the list
+    /// object draws on the `menu.item` ladder's `selected` rung. It has
+    /// to be the very index `make_act` turns into a pick, or the marked
+    /// row and the row a click applies would be two different rows.
+    /// `None` says the set has no standing member, which is not the
+    /// same as "the first one".
+    ///
     /// Returns the rows the object drew, in order, each with whether it
-    /// is done unfolding: a caller that has something to say about ONE
-    /// row (the THEMES list's door) can only say it where that row was
-    /// actually put.
+    /// is done unfolding.
     fn draw_dropdown<F: Fn(usize) -> Act>(
         &mut self,
         ctx: &mut Ctx,
@@ -3270,6 +3953,7 @@ impl Settings {
         item_h: f32,
         names: &[String],
         base: FocusId,
+        current: Option<usize>,
         make_act: F,
     ) -> Vec<(Rect, bool)> {
         // Accordion animation: the list unfolds from the anchor's edge.
@@ -3287,8 +3971,21 @@ impl Settings {
             .unwrap_or(1.0);
         // motion.menu_unfold.easing = ease_out, awaiting a motion resolver.
         let p = 1.0 - (1.0 - t) * (1.0 - t);
-        let rows =
-            nacelle::object::dropdown::accordion_focusable(ctx, anchor, item_h, names, p, base);
+        // Nothing about the standing row's dress is stated here: the
+        // wash, the ring's colour, its width and the label's brightness
+        // all come off the `menu.item` class's ladder inside the object.
+        let rows = nacelle::object::dropdown::accordion(
+            ctx,
+            anchor,
+            item_h,
+            names,
+            p,
+            &nacelle::object::dropdown::AccordionStyle {
+                focus: Some(base),
+                current,
+                ..Default::default()
+            },
+        );
         for (i, (r, _full)) in rows.iter().copied().enumerate() {
             // Deliberately unclipped: the list hangs past the window's
             // edge and stays pressable there, which is the one place in
@@ -3314,20 +4011,27 @@ impl Settings {
         r: Rect,
         act: Act,
     ) -> nacelle::object::button::ButtonState {
-        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
-        let th = theme::resolved();
         // With an open dropdown only its items react to the mouse.
-        let hover = self.dropdown.is_none() && r.contains(ctx.mouse.0, ctx.mouse.1);
-        let press_s = th.px(tok(&PRESS_MS, "motion.press.duration_ms")) / 1000.0;
-        let flash = self
-            .flash
-            .map(|(a, t)| a == act && t.elapsed().as_secs_f32() < press_s)
-            .unwrap_or(false);
+        let hover = self.dropdown.is_none() && ctx.mouse.over(r);
+        let flash = self.flashing(act);
         // An anchor whose list is unfolded is the one button on the
         // page that is switched ON, and the ladder already has the rung
         // for it: a list left open is a state the eye should see.
         let selected = self.dropdown.map_or(false, |d| anchor_act(d) == act);
         nacelle::object::button::ButtonState { hover, flash, selected }
+    }
+
+    /// Whether an act's click flash is still decaying
+    /// (`motion.press.duration_ms`). Split out of
+    /// [`Settings::button_state`] because the door inside an open list
+    /// wants the flash and NOT that method's hover rule.
+    fn flashing(&self, act: Act) -> bool {
+        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
+        let press_s =
+            theme::resolved().px(tok(&PRESS_MS, "motion.press.duration_ms")) / 1000.0;
+        self.flash
+            .map(|(a, t)| a == act && t.elapsed().as_secs_f32() < press_s)
+            .unwrap_or(false)
     }
 
     /// [`Settings::button_state`]'s ladder rung, for a caller that
@@ -3395,7 +4099,7 @@ impl Settings {
                 .quad([[ax - s, cy], [ax + s, cy - s], [ax + s, cy + s], [ax + s, cy + s]], color);
             ctx.dl.text_center(
                 ctx.fonts,
-                FONT_UI,
+                f.face,
                 f.px,
                 r.cx() + s,
                 ty,
@@ -3421,7 +4125,7 @@ mod tests {
             Act::Back,
             Act::OpenLookFeel,
             Act::OpenFont,
-            Act::OpenSound,
+            Act::OpenSoundLevels,
             Act::OpenGrid,
             Act::OpenBoards,
             Act::OpenColor,
@@ -3502,41 +4206,35 @@ mod tests {
             focus_id(Act::FamilyBtn(Sect::Term))
         );
         // The three lists of LOOK AND FEEL derive theirs the same way,
-        // counting from the ROW and not from the name: the THEMES list
-        // carries a door in front of its first theme, and the door owns
-        // row zero.
+        // and all three count from ZERO: the object is handed the names
+        // and nothing else, so the first name is the first row on every
+        // one of them — the THEMES door is no longer a row of the list
+        // and takes no place out of its numbering.
         let themes = dropdown_base(Dropdown::List(ListId::Looks));
-        assert_eq!(focus_id(Act::ThemesEditor), themes.item(0));
-        assert_eq!(focus_id(Act::Pick(ListId::Looks, 0)), themes.item(1));
+        assert_eq!(focus_id(Act::Pick(ListId::Looks, 0)), themes.item(0));
         assert_eq!(
             focus_id(Act::Pick(ListId::Sounds, 0)),
             dropdown_base(Dropdown::List(ListId::Sounds)).item(0)
         );
+        // And the door stands outside that numbering entirely — an id
+        // derived from the list would now BE its first theme's.
+        assert_ne!(focus_id(Act::ThemesEditor), themes.item(0));
     }
 
-    /// Decision §3, requirements 1 and 2 — the first row of the THEMES
-    /// list is a door, not a theme.
+    /// Decision §3, requirements 1 and 2 — the control at the head of
+    /// the THEMES list is a door, not a theme.
     ///
-    /// It stands where a theme stands, in a list whose entire role is
-    /// "choose one of these", so the only thing keeping it from writing
-    /// `Theme=` is that the row carries a different act. The derivation
-    /// is asserted first — row 0 is the door, row 1 is the first theme,
-    /// and the other two lists carry no door at all — and then the act
-    /// is performed: [`Settings::perform`] answers true exactly when
+    /// It stands at the top of a list whose entire role is "choose one
+    /// of these", so what keeps it from writing `Theme=` has to be
+    /// stated and kept: only THEMES has one, and pressing it changes no
+    /// configuration. [`Settings::perform`] answers true exactly when
     /// the configuration changed, and this one may not.
     #[test]
     fn the_themes_editor_row_is_a_door_and_writes_no_theme() {
-        assert!(
-            list_row_act(ListId::Looks, 0) == Act::ThemesEditor,
-            "the THEMES list does not open with its door"
-        );
-        assert!(
-            list_row_act(ListId::Looks, 1) == Act::Pick(ListId::Looks, 0),
-            "the row under the door picks the wrong theme"
-        );
+        assert!(ListId::Looks.carries_door(), "the THEMES list lost its door");
         for list in [ListId::Layauts, ListId::Sounds] {
             assert!(
-                list_row_act(list, 0) == Act::Pick(list, 0),
+                !list.carries_door(),
                 "{} carries a door it has no editor for",
                 list.label()
             );
@@ -3592,18 +4290,26 @@ mod tests {
     }
 
     /// Decision §3, requirement 1 — the door is set apart from the
-    /// choices under it.
+    /// choices under it, and set apart by MORE than a line.
     ///
-    /// A list whose whole role is "choose one of these" now opens with
-    /// a row that is not a choice, and it may not read as one. What
-    /// separates them is the toolkit's own hairline (`ui::rule`, which
-    /// had no consumer in this program either), drawn along the seam
-    /// between the door and the first theme. It is thin cover for the
-    /// requirement — see the fleet's report: an accordion row cannot
-    /// yet carry emphasis of its own — but it is drawn from the
-    /// theme's ink and width and not from numbers written here.
+    /// A list whose whole role is "choose one of these" opens with a
+    /// control that is not a choice, and it may not read as one. It
+    /// used to be an accordion row with a hairline drawn along its
+    /// bottom edge, which the owner rejected on sight: every row of an
+    /// accordion already has a seam above it, so one more hair among
+    /// hairs is invisible, and the door had the theme rows' height,
+    /// their ink, their type and their centring.
+    ///
+    /// It is now a different OBJECT — the toolkit's button — so the
+    /// four things the owner listed all move at once. Two of them are
+    /// readable headless and are what this test reads: the door's box
+    /// is a different height from a name's, and its label is set at a
+    /// different size, because the two come off two different type
+    /// roles (`button.role` against `menu.item.role`). Both differences
+    /// are the THEME's to state; the test only insists that the theme
+    /// has in fact stated them.
     #[test]
-    fn the_door_is_ruled_off_from_the_themes() {
+    fn the_door_is_more_than_a_hairline_apart_from_the_themes() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
         let mut s = furnished();
@@ -3613,23 +4319,300 @@ mod tests {
         let mut dl = nacelle::draw::DrawList::recording();
         let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         s.draw(&mut ctx);
-        let door = s
-            .hits
-            .iter()
-            .find(|&&(_, a)| a == Act::ThemesEditor)
-            .map(|&(r, _)| r)
-            .expect("the open THEMES list drew no door");
-        let seam = dl.cmds().iter().any(|c| match c {
-            nacelle::draw::DrawCmd::Line { from, to, stroke, .. } => {
-                *stroke > 0.0
-                    && (from[1] - door.bottom()).abs() < 0.51
-                    && (to[1] - from[1]).abs() < 0.01
-                    && (from[0] - door.x).abs() < 0.51
-                    && (to[0] - door.right()).abs() < 0.51
+        let rect_of = |act: Act, what: &str| {
+            s.hits
+                .iter()
+                .find(|&&(_, a)| a == act)
+                .map(|&(r, _)| r)
+                .unwrap_or_else(|| panic!("the open THEMES list drew no {what}"))
+        };
+        let door = rect_of(Act::ThemesEditor, "door");
+        let first = rect_of(Act::Pick(ListId::Looks, 0), "first theme");
+        // Flush under the anchor, and the names start under the DOOR —
+        // one column, in the order the decision names.
+        assert!(door.y < first.y, "the door does not stand above the themes");
+        // ONE term, and it is the toolkit's. There is no box any more
+        // (libnacelle a449763: a drop-down is a column of anchor-dressed
+        // elements on a blind, not a container with rows inside), so there
+        // is no inner pad to add — the first element simply hangs
+        // `menu.anchor_gap` under the door, the same air that stands
+        // between every pair of elements below it.
+        //
+        // Written as the token and not as the 2.7 px it bakes to: a theme
+        // that widens the air widens this gap, and a number here would turn
+        // that into a failure instead of a following.
+        let t = nacelle::theme::resolved();
+        let px = |n: &str| t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("{n} must exist")));
+        let want = px("menu.anchor_gap");
+        assert!(
+            (first.y - door.bottom() - want).abs() < 0.51,
+            "the first theme hangs {} px under the door, not the {want} px of air",
+            first.y - door.bottom()
+        );
+        assert!(
+            (door.h - first.h).abs() > 1.0,
+            "the door is a theme's height ({} px against {} px): it is still \
+             a row of the list",
+            door.h,
+            first.h
+        );
+        // The two labels, at the size each was actually set in.
+        let px_of = |label: &str| {
+            dl.cmds()
+                .iter()
+                .find_map(|c| match c {
+                    nacelle::draw::DrawCmd::Text { text, px, .. } if text == label => {
+                        Some(*px)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} was never written"))
+        };
+        assert!(
+            (px_of(EDITOR_ROW) - px_of(&s.themes[0].to_uppercase())).abs() > 0.5,
+            "the door is set in the theme names' own type"
+        );
+    }
+
+    /// The three anchors and the two doors are one column.
+    ///
+    /// FONTS used to be a `Listed` button — `settings.list_w_frac` of
+    /// the content, centred — under three anchors that ran the full
+    /// width, and it read as a different class of control although it
+    /// is the same kind of thing: another way into the same subject.
+    /// The footer is deliberately not in this set: it is pinned, it is
+    /// destructive, and looking unlike the page is its job.
+    #[test]
+    fn the_pages_choices_and_doors_stand_in_one_column() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let boxes: Vec<(Act, Rect)> = [
+            Act::ListBtn(ListId::Looks),
+            Act::ListBtn(ListId::Layauts),
+            Act::ListBtn(ListId::Sounds),
+            Act::OpenSoundLevels,
+            Act::OpenFont,
+        ]
+        .into_iter()
+        .map(|act| {
+            let r = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == act)
+                .map(|&(r, _)| r)
+                .expect("a row of LOOK AND FEEL was not drawn");
+            (act, r)
+        })
+        .collect();
+        let (_, first) = boxes[0];
+        for (i, (_, r)) in boxes.iter().enumerate() {
+            assert!(
+                (r.x - first.x).abs() < 0.01 && (r.w - first.w).abs() < 0.01,
+                "row {i} is {} px wide at x {}, the lists are {} px at x {}",
+                r.w,
+                r.x,
+                first.w,
+                first.x
+            );
+        }
+    }
+
+    /// SOUND LEVELS is the page's other door, and it is not the SOUNDS
+    /// list wearing a second name.
+    ///
+    /// The two stand one under the other and a single word "SOUND"
+    /// would run them together, so the guard is three-sided: the labels
+    /// differ, the button stands directly above FONTS where the owner
+    /// put it and no longer in the main menu, and pressing it opens the
+    /// LEVELS — writing no `Sounds=` and moving no set, which a door
+    /// mistakenly wired to the list would do.
+    #[test]
+    fn the_sound_button_opens_the_levels_and_never_a_set() {
+        fn button_at(rows: &[Row], act: Act) -> Option<usize> {
+            rows.iter()
+                .position(|r| matches!(r.ctrl, Ctrl::Button { act: a, .. } if a == act))
+        }
+        let levels = button_at(&LOOKFEEL_ROWS, Act::OpenSoundLevels)
+            .expect("LOOK AND FEEL has no SOUND LEVELS door");
+        let fonts_at =
+            button_at(&LOOKFEEL_ROWS, Act::OpenFont).expect("LOOK AND FEEL lost FONTS");
+        assert_eq!(levels + 1, fonts_at, "SOUND LEVELS does not stand above FONTS");
+        assert!(
+            button_at(&MENU_ROWS, Act::OpenSoundLevels).is_none(),
+            "SOUND is still an entry of the main menu"
+        );
+        let Ctrl::Button { label: Text::Fixed(word), .. } = LOOKFEEL_ROWS[levels].ctrl
+        else {
+            panic!("the door lost its fixed label")
+        };
+        assert_ne!(
+            word,
+            ListId::Sounds.label(),
+            "the door and the list wear one word: a reader cannot tell the \
+             set from the levels"
+        );
+
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.dropdown = Some(Dropdown::List(ListId::Sounds));
+        let before = s.current_sounds.clone();
+        assert!(
+            !s.perform(Act::OpenSoundLevels, 0.0),
+            "the door reported a configuration change"
+        );
+        assert!(s.view == View::SoundLevels, "the door opened the wrong page");
+        assert_eq!(s.current_sounds, before, "the door changed the sound SET");
+        assert!(s.dropdown.is_none(), "the list stayed open behind the page");
+        // What it opened really is the levels: every act that page
+        // describes is one of the three, and none of them is a pick.
+        for act in described_acts(&s, page(View::SoundLevels)) {
+            assert!(
+                matches!(
+                    act,
+                    Act::Back
+                        | Act::VolumeTrack
+                        | Act::ToggleTyping
+                        | Act::ToggleAmbient
+                ),
+                "the levels page describes a control that is not a level"
+            );
+        }
+        // And the way back out is the page the door stands on.
+        assert!(parent_view(View::SoundLevels) == Some(View::LookFeel));
+    }
+
+    /// The row drawn as the one IN FORCE is the row a click applies.
+    ///
+    /// The mark and the pick are two derivations of one index, made in
+    /// two places ([`Settings::current_row`] against `Act::Pick`), and a
+    /// list that marked row 2 while its click wrote row 3 would be
+    /// worse than a list that marked nothing: it would lie about what
+    /// is standing. So the index is walked over every name of every
+    /// list, and over the one shift there is — the `DEFAULT` entry the
+    /// font families are drawn behind.
+    #[test]
+    fn the_marked_row_is_the_row_a_click_applies() {
+        let mut s = furnished();
+        // BORDER is in the loop with the three file-backed lists on
+        // purpose: its members are built in rather than found on disk, and
+        // that is exactly the kind of difference that makes a list behave
+        // subtly unlike its neighbours unless something checks.
+        for list in [
+            ListId::Looks,
+            ListId::Layauts,
+            ListId::Sounds,
+            ListId::Borders,
+            ListId::Backgrounds,
+        ] {
+            for i in 0..s.names(list).len() {
+                let name = s.names(list)[i].clone();
+                match list {
+                    ListId::Looks => s.current_look = Some(name),
+                    ListId::Layauts => s.current_layaut = Some(name),
+                    ListId::Sounds => s.current_sounds = Some(name),
+                    ListId::Borders => s.current_border = Some(name),
+                    ListId::Backgrounds => s.current_background = Some(name),
+                }
+                assert_eq!(
+                    s.current_row(list),
+                    Some(i),
+                    "{}: the mark is not on the name in force",
+                    list.label()
+                );
             }
-            _ => false,
-        });
-        assert!(seam, "the door and the first theme share one look");
+            // A set whose standing member is not installed here has no
+            // standing member — and no mark, rather than a mark on the
+            // first name.
+            match list {
+                ListId::Looks => s.current_look = Some("not installed".into()),
+                ListId::Layauts => s.current_layaut = Some("not installed".into()),
+                ListId::Sounds => s.current_sounds = Some("not installed".into()),
+                ListId::Borders => s.current_border = Some("not installed".into()),
+                ListId::Backgrounds => s.current_background = Some("not installed".into()),
+            }
+            assert_eq!(
+                s.current_row(list),
+                None,
+                "{}: a name nobody has is marked as standing",
+                list.label()
+            );
+        }
+
+        // The families are drawn behind a DEFAULT entry this file adds,
+        // so their rows are shifted by exactly one — and an unset
+        // family is that entry, because that is what the desktop
+        // resolves it to.
+        let si = Settings::sect_idx(Sect::Ui);
+        s.families[si] = ["alpha", "beta"].iter().map(|f| f.to_string()).collect();
+        s.cur_family[si] = None;
+        assert_eq!(s.family_row(Sect::Ui), Some(0), "DEFAULT is not the standing family");
+        s.cur_family[si] = Some("beta".to_string());
+        assert_eq!(s.family_row(Sect::Ui), Some(2));
+        s.cur_family[si] = Some("gamma".to_string());
+        assert_eq!(s.family_row(Sect::Ui), None, "a family nobody has is marked");
+        // The weights are a fixed table with nothing in front of it,
+        // and the configuration keeps whatever case was written.
+        s.cur_weight[si] = Some("semibold".to_string());
+        assert_eq!(s.weight_row(Sect::Ui), WEIGHTS.iter().position(|w| *w == "SemiBold"));
+        s.cur_weight[si] = None;
+        assert_eq!(s.weight_row(Sect::Ui), None);
+    }
+
+    /// Every position of the page is one Tab away — with a list open
+    /// as well as at rest.
+    ///
+    /// [`every_described_control_is_reachable`] asks this of the page's
+    /// DESCRIPTION, which cannot speak for what an unfolded list puts
+    /// on the screen: the names, and the door standing over them. Those
+    /// are the rows a keyboard user would lose, and the door is the one
+    /// most easily lost, because it is the only control of this window
+    /// drawn outside the row walker. So this walks the chain the way
+    /// the user does — press Tab until it comes back round — and
+    /// insists that everything the pointer could press was landed on.
+    #[test]
+    fn every_position_of_look_and_feel_is_a_tab_away() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let open: [Option<ListId>; 4] =
+            [None, Some(ListId::Looks), Some(ListId::Layauts), Some(ListId::Sounds)];
+        for list in open {
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            s.dropdown = list.map(Dropdown::List);
+            // Fully unfolded: a row still in flight registers nothing,
+            // by the list object's own rule.
+            s.dropdown_since = None;
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            ctx.focus = Some(&mut fc);
+            s.draw(&mut ctx);
+            // Navigation walks the last COMPLETED frame, so the frame
+            // the drawing built has to be closed before Tab can see it.
+            fc.begin_frame();
+            let mut landed: Vec<FocusId> = Vec::new();
+            for _ in 0..s.hits.len() * 2 + 8 {
+                fc.nav(Nav::Next);
+                if let Some(id) = fc.focused() {
+                    landed.push(id);
+                }
+            }
+            for &(_, act) in &s.hits {
+                assert!(
+                    landed.contains(&focus_id(act)),
+                    "a control the pointer can press is not on the Tab round: \
+                     {} names {} controls",
+                    list.map_or("the page at rest", |l| l.label()),
+                    s.hits.len()
+                );
+            }
+        }
     }
 
     /// Every anchor wears the toolkit's disclosure triangle, and the
@@ -3637,10 +4620,13 @@ mod tests {
     ///
     /// The affordance is the only thing on the page that says a row is
     /// a list and not a button, and it is the toolkit's glyph
-    /// ([`nacelle::view::paint::disclosure`], which had no consumer in
-    /// this program at all): closed it points along the row, open it
-    /// points down. The state turns the GLYPH, so the shape is what
-    /// this test reads.
+    /// ([`nacelle::view::paint::disclosure`]) in its DROP grammar:
+    /// closed it points DOWN, at the direction the list will unfold,
+    /// and open it points back up at the edge the list folds into. A
+    /// caret announces where the list goes, not the fact that it is
+    /// currently shut — `▷` is the tree's sentence, and it reads here
+    /// as "go into this row". The state turns the GLYPH, so the shape
+    /// is what this test reads.
     #[test]
     fn every_list_anchor_wears_a_caret_that_turns() {
         /// The closed three-point outlines one frame drew — the shape
@@ -3672,17 +4658,23 @@ mod tests {
         let rest = drawn(&mut fonts, None);
         assert_eq!(rest.len(), 3, "one caret per list, and no more");
         for pts in &rest {
-            // Pointing along the row: the two ends of its upright edge
-            // stand on one x.
+            // ▼ — a flat top edge (its two ends on one y) with the apex
+            // below them, pointing at where the list will unfold.
             assert!(
-                (pts[0][0] - pts[2][0]).abs() < 0.01,
-                "a closed list's caret is not pointing at its list"
+                (pts[0][1] - pts[1][1]).abs() < 0.01 && pts[2][1] > pts[0][1],
+                "a closed list's caret is not pointing at where its list goes"
             );
         }
         let open = drawn(&mut fonts, Some(ListId::Looks));
         assert_eq!(open.len(), 3, "an open list took a caret with it");
-        assert!(
-            open.iter().any(|p| (p[0][1] - p[1][1]).abs() < 0.01),
+        // ▲ — the same triangle upside down: a flat BOTTOM edge with the
+        // apex above it, back at the edge the list folds into. Exactly
+        // one caret turns, because only one list is ever unfolded.
+        assert_eq!(
+            open.iter()
+                .filter(|p| (p[1][1] - p[2][1]).abs() < 0.01 && p[0][1] < p[1][1])
+                .count(),
+            1,
             "the open list's caret never turned"
         );
     }
@@ -4017,7 +5009,7 @@ mod tests {
             }
             assert_eq!(
                 acts.contains(&Act::ThemesEditor),
-                list.head() > 0,
+                list.carries_door(),
                 "{}: the editor door is on the wrong list",
                 list.label()
             );
@@ -4112,6 +5104,48 @@ mod tests {
         }
     }
 
+    /// The wheel reaches this window, and stops at it.
+    ///
+    /// Both halves were broken together and are worth stating together.
+    /// `wheel` existed but nothing called it — it carried an
+    /// `allow(dead_code)` saying so — while the event loop's `MouseWheel`
+    /// arm guarded an open menu and an open editor and NOT an open
+    /// settings window. So the notch fell past the window to
+    /// `content_layout()` and turned a widget on the board BEHIND it,
+    /// and the pages themselves could not be scrolled at all.
+    ///
+    /// This measures the half that lives in this file: an open window
+    /// takes the notch, a closed one refuses it, so the event loop can
+    /// hand the wheel over and trust the guard. That the loop now hands
+    /// it over is `main.rs`'s line, and no unit test here can see it.
+    #[test]
+    fn an_open_window_takes_the_wheel_and_a_closed_one_does_not() {
+        let mut s = furnished();
+        assert!(s.open, "the furnished window is the open one");
+        let before = s.scroll.offset();
+        s.wheel(-3.0);
+        let after = s.scroll.offset();
+        assert_ne!(
+            before, after,
+            "an open settings window ignored the wheel — the pages cannot \
+             be scrolled and the notch has nowhere to go but the board behind"
+        );
+
+        // Closed, the same notch must not move anything: the event loop
+        // asks this method before it knows whether to keep the event, so
+        // a window that scrolled while shut would swallow every turn of
+        // the wheel meant for the desktop.
+        let mut shut = furnished();
+        shut.open = false;
+        let before = shut.scroll.offset();
+        shut.wheel(-3.0);
+        assert_eq!(
+            before,
+            shut.scroll.offset(),
+            "a closed settings window moved on the wheel"
+        );
+    }
+
     /// A window with enough in it to draw every page: three names in
     /// every list, colour enabled, one board.
     fn furnished() -> Settings {
@@ -4131,6 +5165,11 @@ mod tests {
     /// A drawing context at one window height and one interface scale:
     /// no pointer, no focus, no panel shrink — the resting state every
     /// measurement below is taken in.
+    ///
+    /// `ui_font_scale` is carried the way a frame carries it and is NOT a
+    /// lever on the drawing: the interface scale reaches the window
+    /// through `theme::set_viewport`, so a test that wants to move it
+    /// moves the viewport (`crate::widgets::assert_scales_once`).
     fn probe<'a>(
         dl: &'a mut nacelle::draw::DrawList,
         fonts: &'a mut nacelle::font::FontSystem,
@@ -4143,13 +5182,101 @@ mod tests {
             w: h * 16.0 / 9.0,
             h,
             t: 0.0,
-            mouse: (-1.0, -1.0),
+            mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
             term_font_scale: 1.0,
             ui_font_scale,
             panel_scale: 1.0,
             focus: None,
             tips: None,
         }
+    }
+
+    /// The editor's colour maths, pinned on both directions and the edges.
+    ///
+    /// The vector set was drafted by the owner's local model and CHECKED BY
+    /// HAND before use — two of its eight rows were wrong (it answered grey
+    /// for dark red and a violet for a steel blue), which is the working
+    /// demonstration of the rule this project runs delegation under: a
+    /// draft is welcome, an unverified draft is not.
+    #[test]
+    fn hsv_conversions_agree_with_the_checked_vectors() {
+        // (h, s, v) -> (r, g, b) in 0..255.
+        const VECTORS: [(f32, f32, f32, u8, u8, u8); 8] = [
+            (0.0, 1.0, 1.0, 255, 0, 0),
+            (0.0, 0.0, 1.0, 255, 255, 255),
+            (0.0, 0.0, 0.0, 0, 0, 0),
+            (0.0, 1.0, 0.5, 128, 0, 0),
+            (360.0, 1.0, 1.0, 255, 0, 0),
+            (120.0, 1.0, 1.0, 0, 255, 0),
+            (240.0, 1.0, 1.0, 0, 0, 255),
+            (200.0, 0.5, 0.75, 96, 159, 191),
+        ];
+        for (h, sat, v, r, g, b) in VECTORS {
+            let (fr, fg, fb) = hsv_to_rgb(h, sat, v);
+            let got = (
+                (fr * 255.0).round() as u8,
+                (fg * 255.0).round() as u8,
+                (fb * 255.0).round() as u8,
+            );
+            assert_eq!(
+                got,
+                (r, g, b),
+                "hsv({h}, {sat}, {v}) landed on {got:?}, the checked vector says {:?}",
+                (r, g, b)
+            );
+            // And back: the seed path reads the theme's colour into the
+            // sliders, so a round trip must land on the same numbers.
+            let (h2, s2, v2) = rgb_to_hsv(fr, fg, fb);
+            let (fr2, fg2, fb2) = hsv_to_rgb(h2, s2, v2);
+            assert!(
+                (fr - fr2).abs() < 0.005 && (fg - fg2).abs() < 0.005 && (fb - fb2).abs() < 0.005,
+                "hsv({h}, {sat}, {v}) did not survive the round trip"
+            );
+        }
+    }
+
+    /// The owner's own gesture, end to end: open the editor page, unfold
+    /// the BORDER list, click NEON — and the click must NOT report a
+    /// configuration change. `true` from `perform` tells main to re-resolve
+    /// the configuration, which reloads the theme, which builds a fresh
+    /// engine with an EMPTY preview: a border pick would erase its own
+    /// preview in the same breath. That was a real bug, and its shape was
+    /// deceptive — NEON looked fine because the post-reload state (a theme
+    /// with its glow on) matched what NEON asks for, while LINE looked dead
+    /// until the first slider pulse re-sent the set.
+    #[test]
+    fn choosing_a_border_kind_does_not_reload_the_theme() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::ThemeEditor;
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let anchor = s.hits.iter().find(|&&(_, a)| a == Act::ListBtn(ListId::Borders))
+            .map(|&(r, _)| r).expect("the editor page drew no BORDER anchor");
+        let (w, h) = (1080.0 * 16.0 / 9.0, 1080.0);
+        s.click(anchor.x + anchor.w / 2.0, anchor.y + anchor.h / 2.0, w, h, None);
+        assert!(matches!(s.dropdown, Some(Dropdown::List(ListId::Borders))),
+            "the anchor did not open the list");
+        // A second frame: the list is drawn and its rows registered.
+        let mut dl2 = nacelle::draw::DrawList::recording();
+        let mut ctx2 = probe(&mut dl2, &mut fonts, 1080.0, 1.0);
+        s.dropdown_since = None; // fully unfolded, no animation
+        s.draw(&mut ctx2);
+        let neon = s.hits.iter().find(|&&(_, a)| a == Act::Pick(ListId::Borders, 1))
+            .map(|&(r, _)| r).expect("the open BORDER list registered no NEON row");
+        assert!(
+            !s.click(neon.x + neon.w / 2.0, neon.y + neon.h / 2.0, w, h, None),
+            "a border pick reported a configuration change — main will \
+             reload the theme and erase the preview the pick just set"
+        );
+        assert_eq!(
+            s.current_border.as_deref(),
+            Some("NEON"),
+            "the pick did not set the border kind"
+        );
     }
 
     /// Every window height the program is built for. A page's geometry
@@ -4236,7 +5363,10 @@ mod tests {
                 let mut y = view.y - furthest;
                 let mut last = None;
                 for row in p.rows {
-                    if row.ctrl.pinned() {
+                    // Hidden rows are NOT THERE (Row::when) — the walk has
+                    // to skip exactly what the flow skips or it measures a
+                    // page that is not on screen.
+                    if row.ctrl.pinned() || !(row.when)(&s) {
                         continue;
                     }
                     let rh = s.row_h(&row.ctrl, m, content);
@@ -4419,64 +5549,47 @@ mod tests {
         viewport_home();
     }
 
-    /// §5.3 — the window's text answers UIFontSize=, all of it.
+    /// §5.3 — the window's text answers UIFontSize=, all of it, once.
     ///
-    /// Every page is drawn twice, at the two ends of the range the FONT
-    /// view's own INTERFACE slider offers (30 % and 125 %), and the two
-    /// frames' text commands are paired in call order. A run whose size
-    /// did not move between them is a run set from a px the preference
-    /// never reached — which is what this window used to be made of:
-    /// `object::button` scaled its labels while the row labels, values,
-    /// notes, captions and the title around them stayed at 100 %, so the
-    /// one screen that sets the interface size was the one screen where
-    /// setting it half worked.
+    /// Every page is drawn twice, at 100 % and at 125 %, and every string
+    /// both frames wrote has to be exactly 25 % bigger in the second. A
+    /// run that did not move is a run the preference never reached —
+    /// which is what this window used to be made of: `object::button`
+    /// scaled its labels while the row labels, values, notes, captions
+    /// and the title around them stayed at 100 %, so the one screen that
+    /// sets the interface size was the one screen where setting it half
+    /// worked.
+    ///
+    /// A run that moved by MORE than 25 % is the other half of the same
+    /// bug, and the one this window was likeliest to have: the preference
+    /// is `metric.ui_scale`, the frame hands it to the viewport, and a
+    /// drawer that multiplies a baked px by it as well squares it. The
+    /// scale is therefore driven through the viewport here — the way the
+    /// program drives it — and not through `Ctx::ui_font_scale`, which no
+    /// longer moves a token and must not.
     #[test]
-    fn every_run_in_the_window_answers_the_interface_scale() {
-        /// Every run one frame wrote, as (text, px) in call order.
-        fn runs(dl: &nacelle::draw::DrawList) -> Vec<(String, f32)> {
-            dl.cmds()
-                .iter()
-                .filter_map(|c| match c {
-                    nacelle::draw::DrawCmd::Text { text, px, .. } => {
-                        Some((text.clone(), *px))
-                    }
-                    nacelle::draw::DrawCmd::ModuleTitle { left, px, .. } => {
-                        Some((left.clone(), *px))
-                    }
-                    _ => None,
-                })
-                .collect()
-        }
+    fn every_run_in_the_window_answers_the_interface_scale_exactly_once() {
         let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
         for p in PAGES.iter() {
-            let mut frames: Vec<Vec<(String, f32)>> = Vec::new();
-            for scale in [0.3f32, 1.25] {
+            crate::widgets::assert_scales_once(p.title, 1080.0, 0.0, |ctx| {
+                // A window of its own per frame: `draw` settles hover and
+                // animation state, and the two frames must be one picture.
                 let mut s = furnished();
                 s.view = p.view;
-                let mut dl = nacelle::draw::DrawList::recording();
-                let mut ctx = probe(&mut dl, &mut fonts, 1080.0, scale);
-                s.draw(&mut ctx);
-                frames.push(runs(&dl));
-            }
-            let (small, big) = (&frames[0], &frames[1]);
-            assert_eq!(
-                small.len(),
-                big.len(),
-                "{}: the two frames drew different text",
-                p.title
-            );
-            assert!(!small.is_empty(), "{}: the page wrote nothing", p.title);
-            for ((ts, ps), (tb, pb)) in small.iter().zip(big) {
-                assert_eq!(ts, tb, "{}: the runs fell out of step", p.title);
-                assert!(
-                    pb > ps,
-                    "{}: \"{ts}\" is {ps} px either way — it does not \
-                     read the interface scale",
-                    p.title
-                );
-            }
+                s.draw(ctx);
+            });
         }
+        // And at every height the program is built for, because u is
+        // clamped at both ends and `metric.ui_scale` multiplies after the
+        // clamp: a viewport already sitting on `unit_max_px` must still
+        // answer the preference.
+        for h in HEIGHTS {
+            crate::widgets::assert_scales_once("the settings window", h, 0.0, |ctx| {
+                let mut s = furnished();
+                s.draw(ctx);
+            });
+        }
+        viewport_home();
     }
 
     /// §8.3/2 — everything a page describes is reachable.
@@ -4500,11 +5613,19 @@ mod tests {
             let mut chained: Vec<Act> = Vec::new();
             let mut reference = furnished();
             reference.view = p.view;
-            for at_end in [false, true] {
+            reference.current_background = Some("FROSTED GLASS".to_string());
+            // Five stops instead of two: the editor page grew past what a
+            // top-and-bottom sweep can see at 1080 lines, and a control
+            // that only ever stands mid-page was reported unreachable by
+            // the sweep rather than by the window.
+            for stop in [0.0, 300.0, 600.0, 900.0, f32::MAX / 4.0] {
                 let mut s = furnished();
                 s.view = p.view;
-                if at_end {
-                    s.scroll.set_offset(f32::MAX / 4.0);
+                // FROSTED shows every conditional row of the editor page
+                // at once, so the reachability sweep covers them as well.
+                s.current_background = Some("FROSTED GLASS".to_string());
+                if stop > 0.0 {
+                    s.scroll.set_offset(stop);
                 }
                 let mut fc = FocusCtl::new();
                 let mut dl = nacelle::draw::DrawList::new();
@@ -4545,7 +5666,10 @@ mod tests {
             Chrome::Back => Act::Back,
         }];
         for row in page.rows {
-            if !(row.enabled)(s) {
+            // A hidden row IS NOT THERE (Row::when), so it is not owed a
+            // hit either; the loop below draws with every condition set so
+            // the conditional rows are exercised too.
+            if !(row.enabled)(s) || !(row.when)(s) {
                 continue;
             }
             match &row.ctrl {
@@ -4562,7 +5686,6 @@ mod tests {
                 Ctrl::Drop { list } => out.push(Act::ListBtn(*list)),
                 Ctrl::Section { .. }
                 | Ctrl::Note { .. }
-                | Ctrl::Empty { .. }
                 | Ctrl::Hint { .. }
                 | Ctrl::Custom { .. } => {}
             }
