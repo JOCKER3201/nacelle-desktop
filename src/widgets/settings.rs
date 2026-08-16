@@ -126,6 +126,20 @@ enum Knob {
     EdgeL,
     EdgeC,
     EdgeH,
+    /// The glass TINT — the multiply quad, the one that can only darken.
+    TintB,
+    TintS,
+    TintH,
+    /// The glass WASH — the alpha-over quad, the only one that brightens.
+    WashB,
+    WashS,
+    WashH,
+    /// The whole effect's opacity, every kind.
+    BgOpacity,
+    /// The blur pyramid depth, BLUR and FROSTED.
+    BgDepth,
+    /// The wash's coverage, FROSTED only.
+    BgCoverage,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -262,12 +276,22 @@ fn focus_id(act: Act) -> FocusId {
             Knob::EdgeL => "settings.editor.edge.l",
             Knob::EdgeC => "settings.editor.edge.c",
             Knob::EdgeH => "settings.editor.edge.h",
+            Knob::TintB => "settings.editor.tint.b",
+            Knob::TintS => "settings.editor.tint.s",
+            Knob::TintH => "settings.editor.tint.h",
+            Knob::WashB => "settings.editor.wash.b",
+            Knob::WashS => "settings.editor.wash.s",
+            Knob::WashH => "settings.editor.wash.h",
+            Knob::BgOpacity => "settings.editor.bg.opacity",
+            Knob::BgDepth => "settings.editor.bg.depth",
+            Knob::BgCoverage => "settings.editor.bg.coverage",
         }),
         ListBtn(l) => FocusId::of(match l {
             ListId::Looks => "settings.lookfeel.themes",
             ListId::Layauts => "settings.lookfeel.layauts",
             ListId::Sounds => "settings.lookfeel.sounds",
             ListId::Borders => "settings.editor.border",
+            ListId::Backgrounds => "settings.editor.background",
         }),
         // A name's row is its index, with nothing added: the list
         // object is handed the names alone, so `base.item(i)` is what
@@ -328,6 +352,7 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::Layauts) => "settings.lookfeel.layauts.list",
         Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
         Dropdown::List(ListId::Borders) => "settings.editor.border.list",
+        Dropdown::List(ListId::Backgrounds) => "settings.editor.background.list",
     })
 }
 
@@ -571,7 +596,6 @@ static ROLE_VALUE: OnceLock<TokenId> = OnceLock::new();
 static ROLE_NOTE: OnceLock<TokenId> = OnceLock::new();
 static ROLE_HINT: OnceLock<TokenId> = OnceLock::new();
 static ROLE_CAPTION: OnceLock<TokenId> = OnceLock::new();
-static ROLE_EMPTY: OnceLock<TokenId> = OnceLock::new();
 static ROLE_BUTTON: OnceLock<TokenId> = OnceLock::new();
 static ROLE_TITLE: OnceLock<TokenId> = OnceLock::new();
 static ROLE_SECTION: OnceLock<TokenId> = OnceLock::new();
@@ -601,10 +625,6 @@ fn role_caption(ctx: &Ctx) -> Type {
     bound(ctx, &ROLE_CAPTION, "boards.tile.caption_role")
 }
 
-/// NO … FOUND.
-fn role_empty(ctx: &Ctx) -> Type {
-    bound(ctx, &ROLE_EMPTY, "emptystate.role")
-}
 
 /// A button's label, for the two this file letters itself — BACK, and a
 /// row its page turned off. `object::button` reads the same binding for
@@ -743,6 +763,9 @@ enum ListId {
     /// file: its members are the two shapes a border can take, and choosing
     /// one lays a value over the theme instead of writing a config line.
     Borders,
+    /// The editor's background kind — the same arrangement as `Borders`,
+    /// over the three shapes a surface's back can take.
+    Backgrounds,
 }
 
 /// The label of the button that opens the theme editor. It stands
@@ -758,6 +781,7 @@ impl ListId {
             ListId::Layauts => "LAYAUTS",
             ListId::Sounds => "SOUNDS",
             ListId::Borders => "BORDER",
+            ListId::Backgrounds => "BACKGROUND",
         }
     }
 
@@ -770,6 +794,7 @@ impl ListId {
             // anyway: an empty list is a state this type has to have a
             // word for, not a case to leave to whatever draws it.
             ListId::Borders => "NO BORDER KINDS",
+            ListId::Backgrounds => "NO BACKGROUND KINDS",
         }
     }
 
@@ -828,9 +853,6 @@ enum Ctrl {
     Section { title: &'static str },
     /// A left-aligned aside in the flow.
     Note { text: Text },
-    /// The centred line a surface with nothing in it yet says about
-    /// itself (`emptystate.role`).
-    Empty { text: Text },
     /// A centred one-liner pinned to the bottom edge
     /// (`settings.hint_inset`) — the BOARDS view's gesture hint.
     Hint { text: Text },
@@ -860,6 +882,13 @@ struct Row {
     /// registers nothing — no hit, no place in the focus chain. The one
     /// genuinely disabled control in the program takes this road.
     enabled: fn(&Settings) -> bool,
+    /// A row that answers false here IS NOT THERE: no height in the flow,
+    /// no draw, no grey ghost. Distinct from `enabled` on purpose — a
+    /// disabled control says "not now", a hidden one says "not for this
+    /// choice". The editor's per-kind sliders are the first users: a
+    /// COVERAGE slider next to a SOLID background would be a question
+    /// about a thing that does not exist.
+    when: fn(&Settings) -> bool,
 }
 
 fn always(_: &Settings) -> bool {
@@ -867,15 +896,33 @@ fn always(_: &Settings) -> bool {
 }
 
 const fn row(ctrl: Ctrl) -> Row {
-    Row { ctrl, after: Gap::Row, enabled: always }
+    Row { ctrl, after: Gap::Row, enabled: always, when: always }
 }
 
 const fn row_after(ctrl: Ctrl, after: Gap) -> Row {
-    Row { ctrl, after, enabled: always }
+    Row { ctrl, after, enabled: always, when: always }
 }
 
 const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
-    Row { ctrl, after: Gap::Row, enabled }
+    Row { ctrl, after: Gap::Row, enabled, when: always }
+}
+
+fn bg_chosen(s: &Settings) -> bool {
+    s.current_background.is_some()
+}
+fn bg_blurs(s: &Settings) -> bool {
+    matches!(s.current_background.as_deref(), Some("BLUR") | Some("FROSTED GLASS"))
+}
+fn bg_frosted(s: &Settings) -> bool {
+    s.current_background.as_deref() == Some("FROSTED GLASS")
+}
+fn bg_solid_or_frosted(s: &Settings) -> bool {
+    matches!(s.current_background.as_deref(), Some("SOLID") | Some("FROSTED GLASS"))
+}
+
+/// A row that exists only while `when` holds — see `Row::when`.
+const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
+    Row { ctrl, after: Gap::Row, enabled: always, when }
 }
 
 /// The corner button a page wears, and what the body does about it.
@@ -1040,7 +1087,7 @@ static LOOKFEEL_RESET_ROWS: [Row; 8] = [
 /// Nothing on this page writes a file yet. Every control shows itself
 /// immediately and SAVE is not built, which is why there is a line saying so
 /// at the bottom rather than a button that would look like it worked.
-static EDITOR_ROWS: [Row; 8] = [
+static EDITOR_ROWS: [Row; 17] = [
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
     row(Ctrl::Slider {
@@ -1073,14 +1120,118 @@ static EDITOR_ROWS: [Row; 8] = [
         set: |s, v| s.edge[2] = v,
         save: |s| s.apply_editor_preview(),
     }),
+    // BACKGROUND: the kind, then the glass pair — TINT multiplies the
+    // blurred scene (it can only darken), WASH lays over with alpha (the
+    // only knob that brightens). SOLID reads its colour from the WASH
+    // group, the one that behaves like an ordinary colour.
+    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Backgrounds }),
+    // The kind's own knobs appear WITH the kind: a slider for a thing the
+    // choice does not have would be a question about nothing (Row::when).
+    row_shown(
+        Ctrl::Slider {
+            label: "OPACITY",
+            act: Act::EditorTrack(Knob::BgOpacity),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bg_opacity,
+            set: |s, v| s.bg_opacity = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "BLUR DEPTH",
+            act: Act::EditorTrack(Knob::BgDepth),
+            unit: Unit::None,
+            // 0..100 mapped onto the pyramid's 1.0..3.0: the emitter mixes
+            // two rungs by the fraction, so every stop is a real depth.
+            range: (0, 100),
+            step: 2,
+            get: |s| s.bg_depth,
+            set: |s, v| s.bg_depth = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_blurs,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "WASH COVERAGE",
+            act: Act::EditorTrack(Knob::BgCoverage),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bg_coverage,
+            set: |s, v| s.bg_coverage = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_frosted,
+    ),
+    row_shown(Ctrl::Slider {
+        label: "TINT BRIGHTNESS",
+        act: Act::EditorTrack(Knob::TintB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tint[0],
+        set: |s, v| s.tint[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "TINT SATURATION",
+        act: Act::EditorTrack(Knob::TintS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tint[1],
+        set: |s, v| s.tint[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "TINT HUE",
+        act: Act::EditorTrack(Knob::TintH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.tint[2],
+        set: |s, v| s.tint[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_blurs),
+    row_shown(Ctrl::Slider {
+        label: "WASH BRIGHTNESS",
+        act: Act::EditorTrack(Knob::WashB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.wash[0],
+        set: |s, v| s.wash[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
+    row_shown(Ctrl::Slider {
+        label: "WASH SATURATION",
+        act: Act::EditorTrack(Knob::WashS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.wash[1],
+        set: |s, v| s.wash[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
+    row_shown(Ctrl::Slider {
+        label: "WASH HUE",
+        act: Act::EditorTrack(Knob::WashH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.wash[2],
+        set: |s, v| s.wash[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }, bg_solid_or_frosted),
     row(Ctrl::Note {
         text: Text::Fixed("SHOWN ONLY \u{2014} SAVING IS NOT BUILT YET."),
     }),
-    // The section says what it will hold and admits it holds nothing, in
-    // the control the master keeps for exactly that (`emptystate.role`).
-    // A page that quietly omits half of itself reads as finished.
-    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
-    row(Ctrl::Empty { text: Text::Fixed("NOT BUILT YET") }),
 ];
 
 /// The FONT view's two sections. The section header takes no gap under
@@ -1457,7 +1608,6 @@ struct Metrics {
     hint_h: f32,
     /// One line of the empty-state role: what a page with nothing in it
     /// yet reserves for saying so.
-    empty_h: f32,
     hint_inset: f32,
     corner_w: f32,
     list_w: f32,
@@ -1493,7 +1643,6 @@ impl Metrics {
             block_h: th.px(tok(&BLOCK_H, "panel.title.block_h")),
             note_h: role_note(ctx).line(),
             hint_h: role_hint(ctx).line(),
-            empty_h: role_empty(ctx).line(),
             hint_inset: th.px(tok(&HINT_INSET, "settings.hint_inset")),
             corner_w: (content.w * th.px(tok(&BACK_W_FRAC, "settings.back_w_frac")))
                 .max(th.px(tok(&BACK_W_MIN, "settings.back_w_min")))
@@ -1568,6 +1717,18 @@ pub struct Settings {
     /// only two things the renderer can draw for a border.
     border_kinds: Vec<String>,
     current_border: Option<String>,
+    background_kinds: Vec<String>,
+    current_background: Option<String>,
+    /// Glass tint colour, HSV in whole slider units, like `edge`.
+    tint: [u32; 3],
+    /// Glass wash colour, HSV in whole slider units, like `edge`.
+    wash: [u32; 3],
+    /// Effect opacity in percent, every background kind.
+    bg_opacity: u32,
+    /// Blur pyramid depth, 1..=3.
+    bg_depth: u32,
+    /// Wash coverage in percent, FROSTED only.
+    bg_coverage: u32,
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
@@ -1685,6 +1846,17 @@ impl Settings {
             editor_pulse: None,
             border_kinds: vec!["LINE".to_string(), "NEON".to_string()],
             current_border: None,
+            background_kinds: vec![
+                "SOLID".to_string(),
+                "BLUR".to_string(),
+                "FROSTED GLASS".to_string(),
+            ],
+            current_background: None,
+            tint: [60, 20, 210],
+            wash: [20, 15, 210],
+            bg_opacity: 100,
+            bg_depth: 50,
+            bg_coverage: 42,
             edge: [70, 12, 200],
             dragging: None,
             dropdown: None,
@@ -1796,7 +1968,11 @@ impl Settings {
         if !self.open {
             return;
         }
-        self.scroll.wheel(notches, &ScrollPhysics::from_theme(), self.now);
+        // Negated, as at every other caller (search's list, the file
+        // browser): winit reports scrolling UP as positive, and a page
+        // scrolled up shows EARLIER content — a smaller offset. Passed
+        // through raw, the page ran away from the hand.
+        self.scroll.wheel(-notches, &ScrollPhysics::from_theme(), self.now);
     }
 
     /// Shows what the editor is set to, without writing anything.
@@ -1839,6 +2015,35 @@ impl Settings {
                 border_edits(Scope::Theme, kind, colour, dressed)
             }
         };
+        let mut edits = edits;
+        // The background joins the same send. `None` means the list was
+        // never touched and the theme's own background stands — the same
+        // neutrality the border's `None` earned after verification.
+        if let Some(kind_name) = self.current_background.as_deref() {
+            use nacelle::theme::edit::{glass_edits, Glass};
+            let kind = match kind_name {
+                "BLUR" => Glass::Blur,
+                "FROSTED GLASS" => Glass::Frosted,
+                _ => Glass::Solid,
+            };
+            let of = |hsv: &[u32; 3]| {
+                let (r, g, b) = hsv_to_rgb(
+                    hsv[2] as f32,
+                    hsv[1] as f32 / 100.0,
+                    hsv[0] as f32 / 100.0,
+                );
+                nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch()
+            };
+            edits.extend(glass_edits(
+                Scope::Theme,
+                kind,
+                of(&self.tint),
+                of(&self.wash),
+                self.bg_opacity as f32 / 100.0,
+                1.0 + self.bg_depth.min(100) as f32 / 50.0,
+                self.bg_coverage as f32 / 100.0,
+            ));
+        }
         let pairs: Vec<(&str, &str)> =
             edits.iter().map(|e| (e.token, e.value.as_str())).collect();
         let refused = nacelle::theme::set_preview(&pairs);
@@ -2069,6 +2274,12 @@ impl Settings {
                             emit(Sfx::Theme);
                             return false;
                         }
+                        ListId::Backgrounds => {
+                            self.current_background = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
                     }
                     self.refresh_current();
                     emit(Sfx::Theme);
@@ -2103,6 +2314,46 @@ impl Settings {
                         .unwrap_or(false);
                     self.current_border =
                         Some(if on { "NEON" } else { "LINE" }.to_string());
+                    // The background too: kind from the rank and the wash,
+                    // colours from whichever quads are live. A solid seeds
+                    // the WASH group from the shared fill, because that is
+                    // the group SOLID writes back through.
+                    let px = |n: &str| {
+                        nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0)
+                    };
+                    let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
+                    let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| {
+                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+                        *slot = [
+                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
+                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+                        ];
+                    };
+                    let rank = px("elev.panel.glass.rank").round() as u32;
+                    let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
+                    self.current_background = Some(
+                        match (rank, wash_a > 0.0) {
+                            (0, _) => "SOLID",
+                            (_, false) => "BLUR",
+                            (_, true) => "FROSTED GLASS",
+                        }
+                        .to_string(),
+                    );
+                    if rank == 0 {
+                        if let Some(c) = col_of("component.panel.fill") {
+                            seed(&mut self.wash, c);
+                        }
+                    } else {
+                        if let Some(c) = col_of("elev.panel.glass.tint") {
+                            seed(&mut self.tint, c);
+                        }
+                        if let Some(c) = col_of("elev.panel.glass.wash") {
+                            if c.a > 0.0 {
+                                seed(&mut self.wash, c);
+                            }
+                        }
+                    }
                 }
                 self.go(View::ThemeEditor);
             }
@@ -2589,7 +2840,7 @@ impl Settings {
         let mut h = 0.0;
         let mut trailing = 0.0;
         for row in page.rows {
-            if row.ctrl.pinned() {
+            if row.ctrl.pinned() || !(row.when)(self) {
                 continue;
             }
             h += self.row_h(&row.ctrl, m, content) + m.space(row.after);
@@ -2606,8 +2857,38 @@ impl Settings {
     /// the pinned rows are placed against the content box afterwards,
     /// outside it, which is why the flow can no longer meet them.
     fn draw_body(&mut self, ctx: &mut Ctx, page: &Page, m: Metrics, content: Rect) {
+        // An inset bar takes its lane OUT of the rows' box, so it stands
+        // BESIDE the controls instead of over them — the owner's ask, and
+        // the master's `scrollbar.mode` decision. The lane is reserved at
+        // the bar's WIDEST (hover included): a lane that appeared only
+        // while scrolling would reflow every row under the pointer.
+        let look = ScrollbarLook::from_theme();
+        let lane = scroll::inset_w(&look).max(match look.mode {
+            scroll::ScrollbarMode::Inset => look.w_hover + 2.0 * look.margin,
+            _ => 0.0,
+        });
+        // The FULL box survives for the bar: the lane is carved out of the
+        // rows' box only, and the bar is drawn against the original edge —
+        // otherwise it would hug the narrowed edge and stand over the rows
+        // again, just from the other side of its own lane.
+        let content_full = content;
+        // The clip, the scroll span and the bar all live on the FULL box —
+        // the lane is carved from the ROWS' box only. A clip that ended at
+        // the lane would be a second statement of the same width, and the
+        // two would drift.
+        let content = match look.edge {
+            scroll::ScrollbarEdge::Right => {
+                Rect::new(content.x, content.y, (content.w - lane).max(0.0), content.h)
+            }
+            scroll::ScrollbarEdge::Left => Rect::new(
+                content.x + lane,
+                content.y,
+                (content.w - lane).max(0.0),
+                content.h,
+            ),
+        };
         let (label_w, value_w) = self.columns(ctx, page, content);
-        let view = self.body_box(page, m, content);
+        let view = self.body_box(page, m, content_full);
         let length = self.flow_h(page, m, content);
         // The offset, its clamp, its physics and its bar are the
         // toolkit's (`view::scroll`); the wheel, the page keys and the
@@ -2623,7 +2904,7 @@ impl Settings {
         self.clip = Some(view);
         let mut y = view.y - off;
         for row in page.rows {
-            if row.ctrl.pinned() {
+            if row.ctrl.pinned() || !(row.when)(self) {
                 continue;
             }
             let h = self.row_h(&row.ctrl, m, content);
@@ -2735,7 +3016,6 @@ impl Settings {
             Ctrl::Section { .. } => m.block_h,
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
-            Ctrl::Empty { .. } => m.empty_h,
             Ctrl::Custom { h, .. } => h(m, content),
         }
     }
@@ -2842,21 +3122,6 @@ impl Settings {
             // What a surface with nothing in it yet says about itself,
             // set the way every other empty box in the program sets it
             // (`emptystate.role`) and inked like every other aside.
-            Ctrl::Empty { text } => {
-                let v = role_empty(ctx);
-                let ty = center_y(ctx, rc.band, v);
-                let s = self.text_of(*text);
-                ctx.dl.text_center(
-                    ctx.fonts,
-                    v.face,
-                    v.px,
-                    rc.content.cx(),
-                    ty,
-                    &s,
-                    col(th.color(tok(&MUTED_FG, "text.muted"))),
-                    v.track,
-                );
-            }
             // One line that explains the other way in (settings.hint.role).
             Ctrl::Hint { text } => {
                 let n = role_hint(ctx);
@@ -3067,6 +3332,7 @@ impl Settings {
             ListId::Layauts => &self.layauts,
             ListId::Sounds => &self.sounds,
             ListId::Borders => &self.border_kinds,
+            ListId::Backgrounds => &self.background_kinds,
         }
     }
 
@@ -3077,6 +3343,7 @@ impl Settings {
             ListId::Layauts => self.current_layaut.as_ref(),
             ListId::Sounds => self.current_sounds.as_ref(),
             ListId::Borders => self.current_border.as_ref(),
+            ListId::Backgrounds => self.current_background.as_ref(),
         }
     }
 
@@ -4068,7 +4335,13 @@ mod tests {
         // purpose: its members are built in rather than found on disk, and
         // that is exactly the kind of difference that makes a list behave
         // subtly unlike its neighbours unless something checks.
-        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds, ListId::Borders] {
+        for list in [
+            ListId::Looks,
+            ListId::Layauts,
+            ListId::Sounds,
+            ListId::Borders,
+            ListId::Backgrounds,
+        ] {
             for i in 0..s.names(list).len() {
                 let name = s.names(list)[i].clone();
                 match list {
@@ -4076,6 +4349,7 @@ mod tests {
                     ListId::Layauts => s.current_layaut = Some(name),
                     ListId::Sounds => s.current_sounds = Some(name),
                     ListId::Borders => s.current_border = Some(name),
+                    ListId::Backgrounds => s.current_background = Some(name),
                 }
                 assert_eq!(
                     s.current_row(list),
@@ -4092,6 +4366,7 @@ mod tests {
                 ListId::Layauts => s.current_layaut = Some("not installed".into()),
                 ListId::Sounds => s.current_sounds = Some("not installed".into()),
                 ListId::Borders => s.current_border = Some("not installed".into()),
+                ListId::Backgrounds => s.current_background = Some("not installed".into()),
             }
             assert_eq!(
                 s.current_row(list),
@@ -4589,6 +4864,50 @@ mod tests {
         }
     }
 
+    /// The editor's colour maths, pinned on both directions and the edges.
+    ///
+    /// The vector set was drafted by the owner's local model and CHECKED BY
+    /// HAND before use — two of its eight rows were wrong (it answered grey
+    /// for dark red and a violet for a steel blue), which is the working
+    /// demonstration of the rule this project runs delegation under: a
+    /// draft is welcome, an unverified draft is not.
+    #[test]
+    fn hsv_conversions_agree_with_the_checked_vectors() {
+        // (h, s, v) -> (r, g, b) in 0..255.
+        const VECTORS: [(f32, f32, f32, u8, u8, u8); 8] = [
+            (0.0, 1.0, 1.0, 255, 0, 0),
+            (0.0, 0.0, 1.0, 255, 255, 255),
+            (0.0, 0.0, 0.0, 0, 0, 0),
+            (0.0, 1.0, 0.5, 128, 0, 0),
+            (360.0, 1.0, 1.0, 255, 0, 0),
+            (120.0, 1.0, 1.0, 0, 255, 0),
+            (240.0, 1.0, 1.0, 0, 0, 255),
+            (200.0, 0.5, 0.75, 96, 159, 191),
+        ];
+        for (h, sat, v, r, g, b) in VECTORS {
+            let (fr, fg, fb) = hsv_to_rgb(h, sat, v);
+            let got = (
+                (fr * 255.0).round() as u8,
+                (fg * 255.0).round() as u8,
+                (fb * 255.0).round() as u8,
+            );
+            assert_eq!(
+                got,
+                (r, g, b),
+                "hsv({h}, {sat}, {v}) landed on {got:?}, the checked vector says {:?}",
+                (r, g, b)
+            );
+            // And back: the seed path reads the theme's colour into the
+            // sliders, so a round trip must land on the same numbers.
+            let (h2, s2, v2) = rgb_to_hsv(fr, fg, fb);
+            let (fr2, fg2, fb2) = hsv_to_rgb(h2, s2, v2);
+            assert!(
+                (fr - fr2).abs() < 0.005 && (fg - fg2).abs() < 0.005 && (fb - fb2).abs() < 0.005,
+                "hsv({h}, {sat}, {v}) did not survive the round trip"
+            );
+        }
+    }
+
     /// The owner's own gesture, end to end: open the editor page, unfold
     /// the BORDER list, click NEON — and the click must NOT report a
     /// configuration change. `true` from `perform` tells main to re-resolve
@@ -4717,7 +5036,10 @@ mod tests {
                 let mut y = view.y - furthest;
                 let mut last = None;
                 for row in p.rows {
-                    if row.ctrl.pinned() {
+                    // Hidden rows are NOT THERE (Row::when) — the walk has
+                    // to skip exactly what the flow skips or it measures a
+                    // page that is not on screen.
+                    if row.ctrl.pinned() || !(row.when)(&s) {
                         continue;
                     }
                     let rh = s.row_h(&row.ctrl, m, content);
@@ -4964,11 +5286,19 @@ mod tests {
             let mut chained: Vec<Act> = Vec::new();
             let mut reference = furnished();
             reference.view = p.view;
-            for at_end in [false, true] {
+            reference.current_background = Some("FROSTED GLASS".to_string());
+            // Five stops instead of two: the editor page grew past what a
+            // top-and-bottom sweep can see at 1080 lines, and a control
+            // that only ever stands mid-page was reported unreachable by
+            // the sweep rather than by the window.
+            for stop in [0.0, 300.0, 600.0, 900.0, f32::MAX / 4.0] {
                 let mut s = furnished();
                 s.view = p.view;
-                if at_end {
-                    s.scroll.set_offset(f32::MAX / 4.0);
+                // FROSTED shows every conditional row of the editor page
+                // at once, so the reachability sweep covers them as well.
+                s.current_background = Some("FROSTED GLASS".to_string());
+                if stop > 0.0 {
+                    s.scroll.set_offset(stop);
                 }
                 let mut fc = FocusCtl::new();
                 let mut dl = nacelle::draw::DrawList::new();
@@ -5009,7 +5339,10 @@ mod tests {
             Chrome::Back => Act::Back,
         }];
         for row in page.rows {
-            if !(row.enabled)(s) {
+            // A hidden row IS NOT THERE (Row::when), so it is not owed a
+            // hit either; the loop below draws with every condition set so
+            // the conditional rows are exercised too.
+            if !(row.enabled)(s) || !(row.when)(s) {
                 continue;
             }
             match &row.ctrl {
@@ -5026,7 +5359,6 @@ mod tests {
                 Ctrl::Drop { list } => out.push(Act::ListBtn(*list)),
                 Ctrl::Section { .. }
                 | Ctrl::Note { .. }
-                | Ctrl::Empty { .. }
                 | Ctrl::Hint { .. }
                 | Ctrl::Custom { .. } => {}
             }
