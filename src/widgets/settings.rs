@@ -115,6 +115,19 @@ fn parent_view(v: View) -> Option<View> {
     }
 }
 
+/// Which number of the editor's colour a track moves.
+///
+/// The theme writes colours as `oklch(L, C, H)`, so a colour is three
+/// numbers and a slider moves one of them. Named rather than indexed
+/// because a swapped pair would be a colour that is merely wrong instead
+/// of a compile error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Knob {
+    EdgeL,
+    EdgeC,
+    EdgeH,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
     Close,
@@ -165,6 +178,8 @@ enum Act {
     PadTrack,
     EditGrid,
     SizeTrack(Sect),
+    /// One of the theme editor's colour tracks.
+    EditorTrack(Knob),
     FamilyBtn(Sect),
     WeightBtn(Sect),
     FamilyPick(Sect, usize),
@@ -243,10 +258,16 @@ fn focus_id(act: Act) -> FocusId {
         OpenBoards => FocusId::of("settings.menu.boards"),
         OpenColor => FocusId::of("settings.menu.color"),
         OpenBlur => FocusId::of("settings.menu.blur"),
+        EditorTrack(k) => FocusId::of(match k {
+            Knob::EdgeL => "settings.editor.edge.l",
+            Knob::EdgeC => "settings.editor.edge.c",
+            Knob::EdgeH => "settings.editor.edge.h",
+        }),
         ListBtn(l) => FocusId::of(match l {
             ListId::Looks => "settings.lookfeel.themes",
             ListId::Layauts => "settings.lookfeel.layauts",
             ListId::Sounds => "settings.lookfeel.sounds",
+            ListId::Borders => "settings.editor.border",
         }),
         // A name's row is its index, with nothing added: the list
         // object is handed the names alone, so `base.item(i)` is what
@@ -306,6 +327,7 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::Looks) => "settings.lookfeel.themes.list",
         Dropdown::List(ListId::Layauts) => "settings.lookfeel.layauts.list",
         Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
+        Dropdown::List(ListId::Borders) => "settings.editor.border.list",
     })
 }
 
@@ -342,6 +364,47 @@ fn hit_into(hits: &mut Vec<(Rect, Act)>, clip: Option<Rect>, ctx: &mut Ctx, r: R
 /// Answered by ASKING THE DESCRIPTION, not by a list kept beside it: a
 /// slider is a slider because some page says so, so the keyboard cannot
 /// disagree with what is drawn.
+/// HSV -> RGB, all components 0..1 (hue in degrees). The editor's colour
+/// model is HSV because that is how the owner thinks about it: brightness
+/// at 100 % is the FULL brightness of the chosen hue — red lands on
+/// #FF0000 — never white. OKLCh's lightness at 1.0 is white by definition,
+/// which read as a broken slider. The theme file still receives `oklch`:
+/// the conversion runs at the seam, so the editor speaks HSV and the file
+/// keeps its native space.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (r + m, g + m, b + m)
+}
+
+/// RGB -> HSV, the way back for seeding the sliders off the live theme.
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max == 0.0 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
 fn is_track(act: Act) -> bool {
     slider_of(act).is_some()
 }
@@ -676,6 +739,10 @@ enum ListId {
     Looks,
     Layauts,
     Sounds,
+    /// The theme editor's border kind. Unlike the three above it names no
+    /// file: its members are the two shapes a border can take, and choosing
+    /// one lays a value over the theme instead of writing a config line.
+    Borders,
 }
 
 /// The label of the button that opens the theme editor. It stands
@@ -690,6 +757,7 @@ impl ListId {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
             ListId::Sounds => "SOUNDS",
+            ListId::Borders => "BORDER",
         }
     }
 
@@ -698,6 +766,10 @@ impl ListId {
             ListId::Looks => "NO LOOKS FOUND",
             ListId::Layauts => "NO LAYAUTS FOUND",
             ListId::Sounds => "NO SOUND THEMES FOUND",
+            // Unreachable while the two kinds are built in, and stated
+            // anyway: an empty list is a state this type has to have a
+            // word for, not a case to leave to whatever draws it.
+            ListId::Borders => "NO BORDER KINDS",
         }
     }
 
@@ -956,14 +1028,59 @@ static LOOKFEEL_RESET_ROWS: [Row; 8] = [
 /// opens it takes the window's content area over, exactly as it will
 /// when there is an editor to put there. Building that editor is
 /// another stage's work (decision §3, requirement 3).
-static EDITOR_ROWS: [Row; 2] = [
-    row_after(
-        Ctrl::Empty { text: Text::Fixed("THE THEME EDITOR IS NOT BUILT YET") },
-        Gap::Section,
-    ),
-    row(Ctrl::Note {
-        text: Text::Fixed("IT WILL EDIT THE TOKENS OF THE THEME IN FORCE, HERE."),
+/// The editor's first section. The border is one kind and one colour, and
+/// the colour is three numbers because the theme writes colours as
+/// `oklch(L, C, H)` — three sliders is the shape of the value, not a
+/// choice about how many controls to offer.
+///
+/// The halo of NEON has no colour of its own; it wears the line's. So there
+/// is one colour here and not two, and the list above it switches a glow
+/// on rather than introducing a second thing to tint.
+///
+/// Nothing on this page writes a file yet. Every control shows itself
+/// immediately and SAVE is not built, which is why there is a line saying so
+/// at the bottom rather than a button that would look like it worked.
+static EDITOR_ROWS: [Row; 8] = [
+    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Borders }),
+    row(Ctrl::Slider {
+        label: "BRIGHTNESS",
+        act: Act::EditorTrack(Knob::EdgeL),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.edge[0],
+        set: |s, v| s.edge[0] = v,
+        save: |s| s.apply_editor_preview(),
     }),
+    row(Ctrl::Slider {
+        label: "SATURATION",
+        act: Act::EditorTrack(Knob::EdgeC),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.edge[1],
+        set: |s, v| s.edge[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HUE",
+        act: Act::EditorTrack(Knob::EdgeH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.edge[2],
+        set: |s, v| s.edge[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Note {
+        text: Text::Fixed("SHOWN ONLY \u{2014} SAVING IS NOT BUILT YET."),
+    }),
+    // The section says what it will hold and admits it holds nothing, in
+    // the control the master keeps for exactly that (`emptystate.role`).
+    // A page that quietly omits half of itself reads as finished.
+    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
+    row(Ctrl::Empty { text: Text::Fixed("NOT BUILT YET") }),
 ];
 
 /// The FONT view's two sections. The section header takes no gap under
@@ -1446,6 +1563,19 @@ pub struct Settings {
     cur_weight: [Option<String>; 2],
     /// Font sizes in percent (50-200).
     cur_size: [u32; 2],
+    /// The two shapes a border can take, as the list offers them. Built in
+    /// rather than read from anywhere: they are not files, they are the
+    /// only two things the renderer can draw for a border.
+    border_kinds: Vec<String>,
+    current_border: Option<String>,
+    /// When the editor last re-baked the desktop during a drag; the pulse
+    /// that keeps a live slider from leaking a bake per frame.
+    editor_pulse: Option<Instant>,
+    /// The border colour the editor is showing, as OKLCh in whole units:
+    /// lightness 0..100, chroma 0..40, hue 0..359. A slider moves whole
+    /// numbers, and the theme's own colours are written to four decimal
+    /// places, so these are scaled back on the way out.
+    edge: [u32; 3],
     /// The one track a press is currently holding, if any. A track's
     /// rectangle is not kept beside it: the hit map already has it, and
     /// two copies of a geometry are two chances to disagree.
@@ -1552,6 +1682,10 @@ impl Settings {
             cur_family: [None, None],
             cur_weight: [None, None],
             cur_size: [100, 100],
+            editor_pulse: None,
+            border_kinds: vec!["LINE".to_string(), "NEON".to_string()],
+            current_border: None,
+            edge: [70, 12, 200],
             dragging: None,
             dropdown: None,
             dropdown_since: None,
@@ -1590,7 +1724,24 @@ impl Settings {
     /// Enters a page. The offset belongs to the page being left, so it
     /// stays with it: every `self.view =` in the window goes through
     /// here, which is the only reason a reopened page starts at its top.
+    /// Leaving the editor IS the cancel, for as long as SAVE is unbuilt:
+    /// the preview never touched a file, so dropping it puts the desktop
+    /// back the way the theme has it. Without this — a verified finding —
+    /// the first touched slider left its overlay standing for the rest of
+    /// the session, with no way back short of restarting.
+    fn leave_editor_preview(&mut self) {
+        if self.view == View::ThemeEditor {
+            nacelle::theme::clear_preview();
+            self.editor_pulse = None;
+        }
+    }
+
     fn go(&mut self, view: View) {
+        // Any road out of the editor page drops its preview — Back, Escape
+        // and every door share this one gate, so none can forget.
+        if view != View::ThemeEditor {
+            self.leave_editor_preview();
+        }
         self.view = view;
         self.scroll.reset();
     }
@@ -1637,10 +1788,10 @@ impl Settings {
     /// theme's (`scroll.*`).
     ///
     /// It is answered here and asked in the event loop, which routes the
-    /// wheel and belongs to another stage. `allow(dead_code)` says
-    /// exactly that, and comes off the day it is called; until then the
-    /// keyboard's PageUp/PageDown/Home/End move the same offset.
-    #[allow(dead_code)]
+    /// wheel and belongs to another stage. That day has come: `main.rs`
+    /// calls this from its `MouseWheel` arm, ahead of the hit test on the
+    /// board behind the window, so the `allow(dead_code)` this carried is
+    /// gone. The keyboard's PageUp/PageDown/Home/End move the same offset.
     pub fn wheel(&mut self, notches: f32) {
         if !self.open {
             return;
@@ -1648,11 +1799,74 @@ impl Settings {
         self.scroll.wheel(notches, &ScrollPhysics::from_theme(), self.now);
     }
 
+    /// Shows what the editor is set to, without writing anything.
+    ///
+    /// Called when a value SETTLES — a slider released, an arrow pressed, a
+    /// kind chosen — and never while a slider is being dragged. Each call
+    /// re-bakes the theme, and a bake is 76 031 bytes that is never freed,
+    /// so one per gesture is affordable and one per frame is not. The
+    /// slider itself moves at whatever rate the hand does; only the picture
+    /// behind it waits for the hand to stop.
+    ///
+    /// Nothing here touches the file. `theme::clear_preview` puts the
+    /// screen back, which is what CANCEL will be made of.
+    fn apply_editor_preview(&self) {
+        use nacelle::theme::edit::{border_colour_edit, border_edits, Border, Scope};
+        // The sliders are HSV — brightness, saturation, hue — and the file
+        // wants OKLCh, so the value crosses HSV -> RGB -> OKLCh here. See
+        // `hsv_to_rgb` for why HSV: brightness 100 % must be the hue's own
+        // full brightness, never white.
+        let (r, g, b) = hsv_to_rgb(
+            self.edge[2] as f32,
+            self.edge[1] as f32 / 100.0,
+            self.edge[0] as f32 / 100.0,
+        );
+        let colour = nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch();
+        let edits = match self.current_border.as_deref() {
+            // No kind chosen: the colour moves ALONE. Mapping "no choice"
+            // to LINE was a verified bug — a colour drag before the list
+            // was touched switched the halo off as a side effect.
+            None => vec![border_colour_edit(Scope::Theme, colour)],
+            other => {
+                let kind = if other == Some("NEON") { Border::Neon } else { Border::Line };
+                // Whether the THEME already dresses a visible halo — if it
+                // does, NEON keeps the theme's radius and alpha instead of
+                // flattening five themes' dress to one theme's numbers.
+                let t = nacelle::theme::resolved();
+                let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
+                let dressed =
+                    px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
+                border_edits(Scope::Theme, kind, colour, dressed)
+            }
+        };
+        let pairs: Vec<(&str, &str)> =
+            edits.iter().map(|e| (e.token, e.value.as_str())).collect();
+        let refused = nacelle::theme::set_preview(&pairs);
+        for r in refused {
+            eprintln!("nacelle-desktop: the theme editor could not show {r}");
+        }
+    }
+
     /// Mouse move while a track is held.
     pub fn drag(&mut self, x: f32) {
         let Some(act) = self.dragging else { return };
         self.set_from_x(act, x);
         self.mark_dirty(act);
+        // The editor's tracks show themselves WHILE dragged — the owner asked
+        // for the picture to follow the hand, not the release. Throttled,
+        // because every distinct value is a fresh 76 KB bake that is never
+        // freed: ten a second is ~0.8 MB for a second of active dragging,
+        // sixty a second would be 4.5. The slider itself still moves every
+        // frame; only the desktop behind it updates on the pulse.
+        if let Act::EditorTrack(_) = act {
+            let due = self
+                .editor_pulse
+                .map_or(true, |t| t.elapsed().as_millis() >= 100);
+            if due {
+                self.editor_pulse = Some(Instant::now());
+                self.apply_editor_preview();
+            }
+        }
     }
 
     /// Current frosted-glass preferences, for main to apply.
@@ -1789,6 +2003,9 @@ impl Settings {
         }
         match act {
             Act::Close => {
+                // Closing the window does not pass through `go`, so the
+                // editor's preview is dropped here as well.
+                self.leave_editor_preview();
                 self.open = false;
                 emit(Sfx::PanelClose);
             }
@@ -1833,6 +2050,25 @@ impl Settings {
                         ListId::Looks => config::set_engine_theme(&name),
                         ListId::Layauts => config::set_layaut_option(&name),
                         ListId::Sounds => config::set_sounds_option(&name),
+                        // No config line: a border kind is a value laid
+                        // over the theme until SAVE, so choosing one shows
+                        // it and nothing else — and it RETURNS FALSE, which
+                        // is most of the fix. The common tail below answers
+                        // true, and main takes true as "the configuration
+                        // changed, re-resolve it": a theme reload, which
+                        // builds a fresh engine with an EMPTY preview. So a
+                        // click on LINE erased its own preview in the same
+                        // breath, and looked dead until the first slider
+                        // pulse re-sent it; NEON only appeared to work
+                        // because the post-reload state (Cockpit's glow on)
+                        // matched what NEON asks for. Measured in the trace
+                        // of 2026-08-16, clicks 2313/2528.
+                        ListId::Borders => {
+                            self.current_border = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
                     }
                     self.refresh_current();
                     emit(Sfx::Theme);
@@ -1846,6 +2082,28 @@ impl Settings {
                 // content area over instead — which is why it answers
                 // false: nothing about the configuration changed.
                 self.dropdown = None;
+                // The editor OPENS ON THE THEME'S OWN STATE — the model's
+                // first promise, and a verified finding when it was broken:
+                // the sliders used to open on a built-in colour that
+                // replaced the theme's on first touch. The colour comes off
+                // the live bake; the kind is read from the halo switch.
+                {
+                    let t = nacelle::theme::resolved();
+                    if let Some(id) = nacelle::theme::id("elev.panel.edge.color") {
+                        let c = t.color(id);
+                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+                        self.edge = [
+                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
+                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+                        ];
+                    }
+                    let on = nacelle::theme::id("glow.panel_edge.enabled")
+                        .map(|id| t.flag(id))
+                        .unwrap_or(false);
+                    self.current_border =
+                        Some(if on { "NEON" } else { "LINE" }.to_string());
+                }
                 self.go(View::ThemeEditor);
             }
             Act::OpenSoundLevels => {
@@ -1877,7 +2135,8 @@ impl Settings {
             | Act::ColsTrack
             | Act::RowsTrack
             | Act::PadTrack
-            | Act::SizeTrack(_) => {
+            | Act::SizeTrack(_)
+            | Act::EditorTrack(_) => {
                 self.dragging = Some(act);
                 self.set_from_x(act, x);
                 self.mark_dirty(act);
@@ -2807,6 +3066,7 @@ impl Settings {
             ListId::Looks => &self.themes,
             ListId::Layauts => &self.layauts,
             ListId::Sounds => &self.sounds,
+            ListId::Borders => &self.border_kinds,
         }
     }
 
@@ -2816,6 +3076,7 @@ impl Settings {
             ListId::Looks => self.current_look.as_ref(),
             ListId::Layauts => self.current_layaut.as_ref(),
             ListId::Sounds => self.current_sounds.as_ref(),
+            ListId::Borders => self.current_border.as_ref(),
         }
     }
 
@@ -3803,13 +4064,18 @@ mod tests {
     #[test]
     fn the_marked_row_is_the_row_a_click_applies() {
         let mut s = furnished();
-        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds] {
+        // BORDER is in the loop with the three file-backed lists on
+        // purpose: its members are built in rather than found on disk, and
+        // that is exactly the kind of difference that makes a list behave
+        // subtly unlike its neighbours unless something checks.
+        for list in [ListId::Looks, ListId::Layauts, ListId::Sounds, ListId::Borders] {
             for i in 0..s.names(list).len() {
                 let name = s.names(list)[i].clone();
                 match list {
                     ListId::Looks => s.current_look = Some(name),
                     ListId::Layauts => s.current_layaut = Some(name),
                     ListId::Sounds => s.current_sounds = Some(name),
+                    ListId::Borders => s.current_border = Some(name),
                 }
                 assert_eq!(
                     s.current_row(list),
@@ -3825,6 +4091,7 @@ mod tests {
                 ListId::Looks => s.current_look = Some("not installed".into()),
                 ListId::Layauts => s.current_layaut = Some("not installed".into()),
                 ListId::Sounds => s.current_sounds = Some("not installed".into()),
+                ListId::Borders => s.current_border = Some("not installed".into()),
             }
             assert_eq!(
                 s.current_row(list),
@@ -4235,6 +4502,48 @@ mod tests {
         }
     }
 
+    /// The wheel reaches this window, and stops at it.
+    ///
+    /// Both halves were broken together and are worth stating together.
+    /// `wheel` existed but nothing called it — it carried an
+    /// `allow(dead_code)` saying so — while the event loop's `MouseWheel`
+    /// arm guarded an open menu and an open editor and NOT an open
+    /// settings window. So the notch fell past the window to
+    /// `content_layout()` and turned a widget on the board BEHIND it,
+    /// and the pages themselves could not be scrolled at all.
+    ///
+    /// This measures the half that lives in this file: an open window
+    /// takes the notch, a closed one refuses it, so the event loop can
+    /// hand the wheel over and trust the guard. That the loop now hands
+    /// it over is `main.rs`'s line, and no unit test here can see it.
+    #[test]
+    fn an_open_window_takes_the_wheel_and_a_closed_one_does_not() {
+        let mut s = furnished();
+        assert!(s.open, "the furnished window is the open one");
+        let before = s.scroll.offset();
+        s.wheel(-3.0);
+        let after = s.scroll.offset();
+        assert_ne!(
+            before, after,
+            "an open settings window ignored the wheel — the pages cannot \
+             be scrolled and the notch has nowhere to go but the board behind"
+        );
+
+        // Closed, the same notch must not move anything: the event loop
+        // asks this method before it knows whether to keep the event, so
+        // a window that scrolled while shut would swallow every turn of
+        // the wheel meant for the desktop.
+        let mut shut = furnished();
+        shut.open = false;
+        let before = shut.scroll.offset();
+        shut.wheel(-3.0);
+        assert_eq!(
+            before,
+            shut.scroll.offset(),
+            "a closed settings window moved on the wheel"
+        );
+    }
+
     /// A window with enough in it to draw every page: three names in
     /// every list, colour enabled, one board.
     fn furnished() -> Settings {
@@ -4278,6 +4587,50 @@ mod tests {
             focus: None,
             tips: None,
         }
+    }
+
+    /// The owner's own gesture, end to end: open the editor page, unfold
+    /// the BORDER list, click NEON — and the click must NOT report a
+    /// configuration change. `true` from `perform` tells main to re-resolve
+    /// the configuration, which reloads the theme, which builds a fresh
+    /// engine with an EMPTY preview: a border pick would erase its own
+    /// preview in the same breath. That was a real bug, and its shape was
+    /// deceptive — NEON looked fine because the post-reload state (a theme
+    /// with its glow on) matched what NEON asks for, while LINE looked dead
+    /// until the first slider pulse re-sent the set.
+    #[test]
+    fn choosing_a_border_kind_does_not_reload_the_theme() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::ThemeEditor;
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let anchor = s.hits.iter().find(|&&(_, a)| a == Act::ListBtn(ListId::Borders))
+            .map(|&(r, _)| r).expect("the editor page drew no BORDER anchor");
+        let (w, h) = (1080.0 * 16.0 / 9.0, 1080.0);
+        s.click(anchor.x + anchor.w / 2.0, anchor.y + anchor.h / 2.0, w, h, None);
+        assert!(matches!(s.dropdown, Some(Dropdown::List(ListId::Borders))),
+            "the anchor did not open the list");
+        // A second frame: the list is drawn and its rows registered.
+        let mut dl2 = nacelle::draw::DrawList::recording();
+        let mut ctx2 = probe(&mut dl2, &mut fonts, 1080.0, 1.0);
+        s.dropdown_since = None; // fully unfolded, no animation
+        s.draw(&mut ctx2);
+        let neon = s.hits.iter().find(|&&(_, a)| a == Act::Pick(ListId::Borders, 1))
+            .map(|&(r, _)| r).expect("the open BORDER list registered no NEON row");
+        assert!(
+            !s.click(neon.x + neon.w / 2.0, neon.y + neon.h / 2.0, w, h, None),
+            "a border pick reported a configuration change — main will \
+             reload the theme and erase the preview the pick just set"
+        );
+        assert_eq!(
+            s.current_border.as_deref(),
+            Some("NEON"),
+            "the pick did not set the border kind"
+        );
     }
 
     /// Every window height the program is built for. A page's geometry
