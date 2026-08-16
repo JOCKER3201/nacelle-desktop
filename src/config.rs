@@ -1733,6 +1733,25 @@ mod tests {
         // has to bring it into being.
         let _env = env_lock();
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        // The shipped variants left with 2026-08-16 — `default` is the one
+        // look compiled in, every other theme is a person's file. So the
+        // test WRITES the themes it is about to select, which is also the
+        // road every theme takes from now on: out of the editor, into a
+        // file, found by the loader's walk.
+        let themes = dir.join("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::env::set_var("NACELLE_THEME_DIR", &themes);
+        for (name, accent) in [
+            ("proba-red", "#E03A3A"),
+            ("proba-blue", "#2A6BE0"),
+            ("proba-green", "#2AB05A"),
+        ] {
+            std::fs::write(
+                themes.join(format!("{name}.theme")),
+                format!("[palette]\naccent = {accent}\n"),
+            )
+            .unwrap();
+        }
 
         let colour_of = |name: &str| {
             set_engine_theme(name);
@@ -1745,22 +1764,23 @@ mod tests {
             )
         };
 
-        let crimson = colour_of("crimson");
+        let red = colour_of("proba-red");
         assert!(
             dir.join(FAMILY_DIR).join(CONF_FILE).is_file(),
             "the first settings change must create the user's configuration file"
         );
-        let azure = colour_of("azure");
-        let pure = colour_of("pure");
+        let blue = colour_of("proba-blue");
+        let green = colour_of("proba-green");
 
-        // Each is its own hue, and each is the hue its reference image shows.
-        assert!(crimson.r > crimson.b + 0.2, "crimson accent is not red: {crimson:?}");
-        assert!(azure.b > azure.r + 0.2, "azure accent is not blue: {azure:?}");
-        assert!(pure.g > pure.r + 0.2, "pure accent is not green: {pure:?}");
+        // Each is its own hue — the hue its file just declared.
+        assert!(red.r > red.b + 0.2, "the red theme's accent is not red: {red:?}");
+        assert!(blue.b > blue.r + 0.2, "the blue theme's accent is not blue: {blue:?}");
+        assert!(green.g > green.r + 0.2, "the green theme's accent is not green: {green:?}");
         // And switching really moves the value, rather than returning a cached
         // theme from the first load.
-        assert!(crimson.r != azure.r, "the accent did not change at all");
+        assert!(red.r != blue.r, "the accent did not change at all");
 
+        std::env::remove_var("NACELLE_THEME_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

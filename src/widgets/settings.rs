@@ -140,6 +140,103 @@ enum Knob {
     BgDepth,
     /// The wash's coverage, FROSTED only.
     BgCoverage,
+    // ---- the whole-theme groups (2026-08-16): one knob per number the
+    // ---- model in theme/edit.rs takes, nothing that has no set to join.
+    /// The one seed the interface re-derives itself from
+    /// (`palette.accent`, written opaque by the model).
+    AccentB,
+    AccentS,
+    AccentH,
+    /// The surface ladder's own hue, degrees — only while OWN HUE is on;
+    /// off, the set writes the reference `@hue.accent` back instead.
+    SurfHue,
+    /// `surface.lift`, the bake's -0.09..0.09 on a 0..100 track.
+    SurfLift,
+    /// `surface.chroma`, the bake's 0..4 scale on a 0..100 track.
+    SurfChroma,
+    /// `text.lift`, -0.10..0.10 likewise.
+    TextLift,
+    /// `text.chroma`, 0..3 likewise.
+    TextChroma,
+    /// The chosen severity role's author colour (`severity.<role>.text`).
+    SevB,
+    SevS,
+    SevH,
+    /// The three preset radii and the two counts of the shape set —
+    /// radii on 0..100 tracks over the model's 4u wall, the kerf over
+    /// its 1u wall, segments a bare 3..16.
+    CornerSm,
+    CornerMd,
+    CornerLg,
+    CornerSeg,
+    Hairline,
+    /// The focus ring's stroke and rhythm, 0..100 over the declared
+    /// walls (width/offset 2u, dash/gap open-ended — 4u of track).
+    RingW,
+    RingOffset,
+    RingB,
+    RingS,
+    RingH,
+    RingDash,
+    RingGap,
+    /// `glow.focus_ring.alpha`, 0..1.
+    HaloAlpha,
+    /// `focus.unfocused_dim`, the declared 0.3..1.0 floor kept by the
+    /// track's own range (30..100).
+    UnfocusedDim,
+    /// The context menu's four tokens: bed, ring, ring width, hint ink.
+    MenuFillB,
+    MenuFillS,
+    MenuFillH,
+    MenuEdgeB,
+    MenuEdgeS,
+    MenuEdgeH,
+    MenuEdgeW,
+    MenuHintB,
+    MenuHintS,
+    MenuHintH,
+    /// The tooltip's four, the menu's sibling float.
+    TipFillB,
+    TipFillS,
+    TipFillH,
+    TipEdgeB,
+    TipEdgeS,
+    TipEdgeH,
+    TipEdgeW,
+    TipTextB,
+    TipTextS,
+    TipTextH,
+    /// The scrollbar's widths (0..100 over 0.5u..4u), its fade
+    /// (0..100 over 0..2000ms) and the groove's colour.
+    BarW,
+    BarWHover,
+    BarFade,
+    BarTrackB,
+    BarTrackS,
+    BarTrackH,
+}
+
+/// Which of the editor's switches a toggle row flips. Named like [`Knob`]
+/// and for the same reason: a swapped pair would be a switch that is
+/// merely wrong instead of a compile error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flip {
+    /// OFF restores `surface.hue = @hue.accent` as a REFERENCE (the
+    /// model's `SurfaceHue::FollowAccent`); ON cuts the surfaces loose
+    /// with plain degrees from the HUE track under it.
+    SurfaceOwnHue,
+    /// `focus.ring.enabled`. OFF is the flag alone — the model leaves
+    /// the ring's whole dress standing, LINE's lesson.
+    Ring,
+    /// `glow.focus_ring.enabled`, dressing itself like NEON on a theme
+    /// whose halo has no radius yet.
+    Halo,
+    /// `scrollbar.auto_hide`; the FADE track appears with it, because
+    /// the declaration reads the fade only while this is on.
+    BarAutoHide,
+    /// `scrollbar.track`; OFF is the switch alone and the theme's own
+    /// groove colour survives the trip.
+    BarTrack,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -194,6 +291,15 @@ enum Act {
     SizeTrack(Sect),
     /// One of the theme editor's colour tracks.
     EditorTrack(Knob),
+    /// One of the theme editor's switches ([`Flip`]).
+    EditorFlip(Flip),
+    /// Write the edit set into the theme in force — or, for `default`,
+    /// fall through to SAVE AS: the master is not a file.
+    EditorSave,
+    /// Write the edit set under a new name, asked for in a prompt.
+    EditorSaveAs,
+    /// Drop the preview and reseed the controls from the theme.
+    EditorCancel,
     FamilyBtn(Sect),
     WeightBtn(Sect),
     FamilyPick(Sect, usize),
@@ -272,6 +378,9 @@ fn focus_id(act: Act) -> FocusId {
         OpenBoards => FocusId::of("settings.menu.boards"),
         OpenColor => FocusId::of("settings.menu.color"),
         OpenBlur => FocusId::of("settings.menu.blur"),
+        EditorSave => FocusId::of("settings.editor.save"),
+        EditorSaveAs => FocusId::of("settings.editor.saveas"),
+        EditorCancel => FocusId::of("settings.editor.cancel"),
         EditorTrack(k) => FocusId::of(match k {
             Knob::EdgeL => "settings.editor.edge.l",
             Knob::EdgeC => "settings.editor.edge.c",
@@ -285,6 +394,64 @@ fn focus_id(act: Act) -> FocusId {
             Knob::BgOpacity => "settings.editor.bg.opacity",
             Knob::BgDepth => "settings.editor.bg.depth",
             Knob::BgCoverage => "settings.editor.bg.coverage",
+            Knob::AccentB => "settings.editor.accent.b",
+            Knob::AccentS => "settings.editor.accent.s",
+            Knob::AccentH => "settings.editor.accent.h",
+            Knob::SurfHue => "settings.editor.surface.hue",
+            Knob::SurfLift => "settings.editor.surface.lift",
+            Knob::SurfChroma => "settings.editor.surface.chroma",
+            Knob::TextLift => "settings.editor.text.lift",
+            Knob::TextChroma => "settings.editor.text.chroma",
+            Knob::SevB => "settings.editor.severity.b",
+            Knob::SevS => "settings.editor.severity.s",
+            Knob::SevH => "settings.editor.severity.h",
+            Knob::CornerSm => "settings.editor.corner.sm",
+            Knob::CornerMd => "settings.editor.corner.md",
+            Knob::CornerLg => "settings.editor.corner.lg",
+            Knob::CornerSeg => "settings.editor.corner.segments",
+            Knob::Hairline => "settings.editor.stroke.hair",
+            Knob::RingW => "settings.editor.ring.w",
+            Knob::RingOffset => "settings.editor.ring.offset",
+            Knob::RingB => "settings.editor.ring.b",
+            Knob::RingS => "settings.editor.ring.s",
+            Knob::RingH => "settings.editor.ring.h",
+            Knob::RingDash => "settings.editor.ring.dash",
+            Knob::RingGap => "settings.editor.ring.gap",
+            Knob::HaloAlpha => "settings.editor.ring.halo_alpha",
+            Knob::UnfocusedDim => "settings.editor.focus.dim",
+            Knob::MenuFillB => "settings.editor.menu.fill.b",
+            Knob::MenuFillS => "settings.editor.menu.fill.s",
+            Knob::MenuFillH => "settings.editor.menu.fill.h",
+            Knob::MenuEdgeB => "settings.editor.menu.edge.b",
+            Knob::MenuEdgeS => "settings.editor.menu.edge.s",
+            Knob::MenuEdgeH => "settings.editor.menu.edge.h",
+            Knob::MenuEdgeW => "settings.editor.menu.edge.w",
+            Knob::MenuHintB => "settings.editor.menu.hint.b",
+            Knob::MenuHintS => "settings.editor.menu.hint.s",
+            Knob::MenuHintH => "settings.editor.menu.hint.h",
+            Knob::TipFillB => "settings.editor.tooltip.fill.b",
+            Knob::TipFillS => "settings.editor.tooltip.fill.s",
+            Knob::TipFillH => "settings.editor.tooltip.fill.h",
+            Knob::TipEdgeB => "settings.editor.tooltip.edge.b",
+            Knob::TipEdgeS => "settings.editor.tooltip.edge.s",
+            Knob::TipEdgeH => "settings.editor.tooltip.edge.h",
+            Knob::TipEdgeW => "settings.editor.tooltip.edge.w",
+            Knob::TipTextB => "settings.editor.tooltip.text.b",
+            Knob::TipTextS => "settings.editor.tooltip.text.s",
+            Knob::TipTextH => "settings.editor.tooltip.text.h",
+            Knob::BarW => "settings.editor.scrollbar.w",
+            Knob::BarWHover => "settings.editor.scrollbar.w_hover",
+            Knob::BarFade => "settings.editor.scrollbar.fade",
+            Knob::BarTrackB => "settings.editor.scrollbar.track.b",
+            Knob::BarTrackS => "settings.editor.scrollbar.track.s",
+            Knob::BarTrackH => "settings.editor.scrollbar.track.h",
+        }),
+        EditorFlip(f) => FocusId::of(match f {
+            Flip::SurfaceOwnHue => "settings.editor.surface.own_hue",
+            Flip::Ring => "settings.editor.ring.on",
+            Flip::Halo => "settings.editor.ring.halo",
+            Flip::BarAutoHide => "settings.editor.scrollbar.auto_hide",
+            Flip::BarTrack => "settings.editor.scrollbar.track_on",
         }),
         ListBtn(l) => FocusId::of(match l {
             ListId::Looks => "settings.lookfeel.themes",
@@ -292,6 +459,11 @@ fn focus_id(act: Act) -> FocusId {
             ListId::Sounds => "settings.lookfeel.sounds",
             ListId::Borders => "settings.editor.border",
             ListId::Backgrounds => "settings.editor.background",
+            ListId::Severities => "settings.editor.severity",
+            ListId::Corners => "settings.editor.corner",
+            ListId::RingStyles => "settings.editor.ring.style",
+            ListId::ScrollModes => "settings.editor.scrollbar.mode",
+            ListId::ScrollEdges => "settings.editor.scrollbar.edge",
         }),
         // A name's row is its index, with nothing added: the list
         // object is handed the names alone, so `base.item(i)` is what
@@ -353,6 +525,11 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
         Dropdown::List(ListId::Borders) => "settings.editor.border.list",
         Dropdown::List(ListId::Backgrounds) => "settings.editor.background.list",
+        Dropdown::List(ListId::Severities) => "settings.editor.severity.list",
+        Dropdown::List(ListId::Corners) => "settings.editor.corner.list",
+        Dropdown::List(ListId::RingStyles) => "settings.editor.ring.style.list",
+        Dropdown::List(ListId::ScrollModes) => "settings.editor.scrollbar.mode.list",
+        Dropdown::List(ListId::ScrollEdges) => "settings.editor.scrollbar.edge.list",
     })
 }
 
@@ -428,6 +605,37 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     };
     let s = if max == 0.0 { 0.0 } else { d / max };
     (h, s, max)
+}
+
+// The editor's slider unit maps, one pair per SHAPE of range. Both
+// directions live here so a value survives the round trip seed ->
+// slider -> file: a map written twice is a slider that reopens a notch
+// away from where it was left. The walls the spans run to are the
+// MODEL's clamps (theme/edit.rs), never numbers of this file's own.
+
+/// A 0..100 track over a symmetric span: 50 is zero, the ends are ±span.
+fn span_of(v: u32, span: f32) -> f32 {
+    (v.min(100) as f32 - 50.0) / 50.0 * span
+}
+fn span_back(x: f32, span: f32) -> u32 {
+    (50.0 + x / span * 50.0).round().clamp(0.0, 100.0) as u32
+}
+
+/// A 0..100 track over 0..hi — the radii (4u), the kerf and the ring
+/// widths (1u, 2u), the halo's 0..1, the fade's 0..2000ms.
+fn scale_of(v: u32, hi: f32) -> f32 {
+    v.min(100) as f32 / 100.0 * hi
+}
+fn scale_back(x: f32, hi: f32) -> u32 {
+    (x / hi * 100.0).round().clamp(0.0, 100.0) as u32
+}
+
+/// A 0..100 track over lo..hi — the scrollbar widths (0.5u..4u).
+fn band_of(v: u32, lo: f32, hi: f32) -> f32 {
+    lo + v.min(100) as f32 / 100.0 * (hi - lo)
+}
+fn band_back(x: f32, lo: f32, hi: f32) -> u32 {
+    ((x - lo) / (hi - lo) * 100.0).round().clamp(0.0, 100.0) as u32
 }
 
 fn is_track(act: Act) -> bool {
@@ -766,7 +974,34 @@ enum ListId {
     /// The editor's background kind — the same arrangement as `Borders`,
     /// over the three shapes a surface's back can take.
     Backgrounds,
+    /// The severity role the three sliders under it pin — §5.10's closed
+    /// set, offered whole because each role is its own author token.
+    Severities,
+    /// The one corner cut the whole interface wears (`corner.mode`).
+    Corners,
+    /// How the focus ring is stroked (`focus.ring.style`).
+    RingStyles,
+    /// Whether the scrollbar takes layout space (`scrollbar.mode`).
+    ScrollModes,
+    /// Which side of the content the bar sits on (`scrollbar.edge`).
+    ScrollEdges,
 }
+
+/// §5.10's severity roles in declaration order: the name the list offers,
+/// the author token the pin writes, and the model's own name for the role
+/// — ONE table, so the three spellings cannot drift apart.
+const SEVERITY_ROLES: [(&str, &str, nacelle::theme::edit::SeverityRole); 7] = {
+    use nacelle::theme::edit::SeverityRole as R;
+    [
+        ("OK", "severity.ok.text", R::Ok),
+        ("INFO", "severity.info.text", R::Info),
+        ("WARNING", "severity.warning.text", R::Warning),
+        ("CRITICAL", "severity.critical.text", R::Critical),
+        ("CONTAINED", "severity.contained.text", R::Contained),
+        ("OFFLINE", "severity.offline.text", R::Offline),
+        ("UNKNOWN", "severity.unknown.text", R::Unknown),
+    ]
+};
 
 /// The label of the button that opens the theme editor. It stands
 /// INSIDE the unfolded THEMES list, at the top (decision §3) — a door
@@ -782,6 +1017,11 @@ impl ListId {
             ListId::Sounds => "SOUNDS",
             ListId::Borders => "BORDER",
             ListId::Backgrounds => "BACKGROUND",
+            ListId::Severities => "SEVERITY ROLE",
+            ListId::Corners => "CORNER CUT",
+            ListId::RingStyles => "RING STYLE",
+            ListId::ScrollModes => "SCROLLBAR MODE",
+            ListId::ScrollEdges => "SCROLLBAR EDGE",
         }
     }
 
@@ -790,11 +1030,16 @@ impl ListId {
             ListId::Looks => "NO LOOKS FOUND",
             ListId::Layauts => "NO LAYAUTS FOUND",
             ListId::Sounds => "NO SOUND THEMES FOUND",
-            // Unreachable while the two kinds are built in, and stated
+            // Unreachable while the kinds are built in, and stated
             // anyway: an empty list is a state this type has to have a
             // word for, not a case to leave to whatever draws it.
             ListId::Borders => "NO BORDER KINDS",
             ListId::Backgrounds => "NO BACKGROUND KINDS",
+            ListId::Severities => "NO SEVERITY ROLES",
+            ListId::Corners => "NO CORNER CUTS",
+            ListId::RingStyles => "NO RING STYLES",
+            ListId::ScrollModes => "NO SCROLLBAR MODES",
+            ListId::ScrollEdges => "NO SCROLLBAR EDGES",
         }
     }
 
@@ -918,6 +1163,48 @@ fn bg_frosted(s: &Settings) -> bool {
 }
 fn bg_solid_or_frosted(s: &Settings) -> bool {
     matches!(s.current_background.as_deref(), Some("SOLID") | Some("FROSTED GLASS"))
+}
+
+// The whole-theme sections' conditions, one small function per question so
+// the rows and `editor_edits` ask the SAME one: a slider is on screen
+// exactly when the set it feeds is in the edit — the iron rule's UI half,
+// a control over a set that would not be written is a control that looks
+// like it works.
+
+/// OWN HUE on: the surfaces' HUE track exists, and the set writes degrees.
+fn surface_own(s: &Settings) -> bool {
+    s.surface_own_hue
+}
+/// A severity role stands in the list: the three sliders pin ITS author.
+fn severity_chosen(s: &Settings) -> bool {
+    s.current_severity.is_some()
+}
+/// A corner cut stands: the shape set is in the edit at all.
+fn corner_chosen(s: &Settings) -> bool {
+    s.current_corner.is_some()
+}
+/// The ring is on AND its style is known — the model's enabled branch
+/// cannot be written without a style word.
+fn ring_dressed(s: &Settings) -> bool {
+    s.ring_on && s.current_ring_style.is_some()
+}
+fn ring_dashed(s: &Settings) -> bool {
+    ring_dressed(s) && s.current_ring_style.as_deref() == Some("DASHED")
+}
+fn ring_haloed(s: &Settings) -> bool {
+    ring_dressed(s) && s.ring_halo
+}
+/// Both scrollbar words stand: the bar set is in the edit at all.
+fn bar_chosen(s: &Settings) -> bool {
+    s.current_scroll_mode.is_some() && s.current_scroll_edge.is_some()
+}
+/// The declaration reads the fade only while auto_hide is on.
+fn bar_fades(s: &Settings) -> bool {
+    bar_chosen(s) && s.bar_auto_hide
+}
+/// Track OFF is the switch alone; the groove's colour is only written on.
+fn bar_tracked(s: &Settings) -> bool {
+    bar_chosen(s) && s.bar_track
 }
 
 /// A row that exists only while `when` holds — see `Row::when`.
@@ -1084,10 +1371,16 @@ static LOOKFEEL_RESET_ROWS: [Row; 8] = [
 /// is one colour here and not two, and the list above it switches a glow
 /// on rather than introducing a second thing to tint.
 ///
-/// Nothing on this page writes a file yet. Every control shows itself
-/// immediately and SAVE is not built, which is why there is a line saying so
-/// at the bottom rather than a button that would look like it worked.
-static EDITOR_ROWS: [Row; 17] = [
+/// Since 2026-08-16 the page carries the WHOLE THEME: after the border
+/// and the background come one section per set of `theme/edit.rs` —
+/// accent, surfaces, text, severity, shape, focus ring, menu, tooltip,
+/// scrollbar — in the model's own order, every control live through the
+/// same preview pulse and every value landing in the same builder
+/// (`editor_edits`) that SAVE writes to a file. A control exists here
+/// ONLY for a number the model takes, and the model takes only tokens
+/// with a named reader in Rust — the iron rule, held on both sides of
+/// the seam.
+static EDITOR_ROWS: [Row; 89] = [
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
     row(Ctrl::Slider {
@@ -1229,8 +1522,694 @@ static EDITOR_ROWS: [Row; 17] = [
         set: |s, v| s.wash[2] = v,
         save: |s| s.apply_editor_preview(),
     }, bg_solid_or_frosted),
-    row(Ctrl::Note {
-        text: Text::Fixed("SHOWN ONLY \u{2014} SAVING IS NOT BUILT YET."),
+    // ------------------------------------------------------------------
+    // The whole-theme sections (2026-08-16): one section per set of
+    // theme/edit.rs, in the model's own order. Every slider's save is
+    // the preview pulse, like every editor track above — the SAVE
+    // buttons at the bottom write the same builder's answer to a file.
+    // ------------------------------------------------------------------
+    // ACCENT: the one seed the master re-derives the interface from.
+    // Three sliders because a colour is three numbers; no alpha knob,
+    // because the model writes the seed opaque by force.
+    row_after(Ctrl::Section { title: "ACCENT" }, Gap::None),
+    row(Ctrl::Slider {
+        label: "BRIGHTNESS",
+        act: Act::EditorTrack(Knob::AccentB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.accent[0],
+        set: |s, v| s.accent[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "SATURATION",
+        act: Act::EditorTrack(Knob::AccentS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.accent[1],
+        set: |s, v| s.accent[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HUE",
+        act: Act::EditorTrack(Knob::AccentH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.accent[2],
+        set: |s, v| s.accent[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // SURFACES: the three meta-knobs over the six-level ladder — never
+    // eighteen sliders, the rungs are §5.5's. The HUE track appears
+    // with OWN HUE, because off it the set restores `@hue.accent` as a
+    // reference and a hue slider would be a question about nothing.
+    row_after(Ctrl::Section { title: "SURFACES" }, Gap::None),
+    row(Ctrl::Toggle {
+        label: "OWN HUE",
+        get: |s| s.surface_own_hue,
+        act: Act::EditorFlip(Flip::SurfaceOwnHue),
+    }),
+    row_shown(
+        Ctrl::Slider {
+            label: "HUE",
+            act: Act::EditorTrack(Knob::SurfHue),
+            unit: Unit::None,
+            range: (0, 359),
+            step: 5,
+            get: |s| s.surface_hue,
+            set: |s, v| s.surface_hue = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        surface_own,
+    ),
+    row(Ctrl::Slider {
+        // 0..100 over the bake's -0.09..0.09, 50 the ladder as derived.
+        label: "LIFT",
+        act: Act::EditorTrack(Knob::SurfLift),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.surface_lift,
+        set: |s, v| s.surface_lift = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        // 0..100 over the bake's 0..4, 25 the derived scale of 1.
+        label: "CHROMA",
+        act: Act::EditorTrack(Knob::SurfChroma),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.surface_chroma,
+        set: |s, v| s.surface_chroma = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // TEXT: the two meta-knobs over the seven roles. No per-role colour
+    // on purpose — the roles ride the accent's hue and chroma by §5.6.
+    row_after(Ctrl::Section { title: "TEXT" }, Gap::None),
+    row(Ctrl::Slider {
+        label: "LIFT",
+        act: Act::EditorTrack(Knob::TextLift),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.text_lift,
+        set: |s, v| s.text_lift = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "CHROMA",
+        act: Act::EditorTrack(Knob::TextChroma),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.text_chroma,
+        set: |s, v| s.text_chroma = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // SEVERITY: pick a role, pin its author colour. The sliders write
+    // the CHOSEN role and only a touched role joins the edit — six
+    // untouched roles keep the theme's own words.
+    row_after(Ctrl::Section { title: "SEVERITY" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Severities }),
+    row_shown(
+        Ctrl::Slider {
+            label: "BRIGHTNESS",
+            act: Act::EditorTrack(Knob::SevB),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][0]),
+            set: |s, v| s.set_severity(0, v),
+            save: |s| s.apply_editor_preview(),
+        },
+        severity_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "SATURATION",
+            act: Act::EditorTrack(Knob::SevS),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][1]),
+            set: |s, v| s.set_severity(1, v),
+            save: |s| s.apply_editor_preview(),
+        },
+        severity_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "HUE",
+            act: Act::EditorTrack(Knob::SevH),
+            unit: Unit::None,
+            range: (0, 359),
+            step: 5,
+            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][2]),
+            set: |s, v| s.set_severity(2, v),
+            save: |s| s.apply_editor_preview(),
+        },
+        severity_chosen,
+    ),
+    // SHAPE: the corner language, its three radii, the tessellation and
+    // the hairline. The sliders appear with the cut, because the model
+    // writes the six as ONE set and a radius without its cut is half a
+    // decision — the theme file's own words.
+    row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Corners }),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over the model's 4u wall, here and for MD and LG.
+            label: "CORNER SM",
+            act: Act::EditorTrack(Knob::CornerSm),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.corner_sm,
+            set: |s, v| s.corner_sm = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        corner_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "CORNER MD",
+            act: Act::EditorTrack(Knob::CornerMd),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.corner_md,
+            set: |s, v| s.corner_md = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        corner_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "CORNER LG",
+            act: Act::EditorTrack(Knob::CornerLg),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.corner_lg,
+            set: |s, v| s.corner_lg = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        corner_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            // The declared range itself (3..16): a fraction of a
+            // tessellation quad does not exist, so the track is bare.
+            label: "SEGMENTS",
+            act: Act::EditorTrack(Knob::CornerSeg),
+            unit: Unit::None,
+            range: (3, 16),
+            step: 1,
+            get: |s| s.corner_segments,
+            set: |s, v| s.corner_segments = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        corner_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over the kerf's 1u wall.
+            label: "HAIRLINE",
+            act: Act::EditorTrack(Knob::Hairline),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.stroke_hair,
+            set: |s, v| s.stroke_hair = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        corner_chosen,
+    ),
+    // FOCUS RING: the switch first — OFF is one flag and the dress
+    // stands, so everything under it folds away. DASH and GAP appear
+    // with DASHED (SOLID leaves the rhythm alone), the halo's alpha
+    // with the halo. The dim is the section's one always-on track: it
+    // is read on the window, not on the ring, and works with it off.
+    row_after(Ctrl::Section { title: "FOCUS RING" }, Gap::None),
+    row(Ctrl::Toggle {
+        label: "FOCUS RING",
+        get: |s| s.ring_on,
+        act: Act::EditorFlip(Flip::Ring),
+    }),
+    row_shown(Ctrl::Drop { list: ListId::RingStyles }, ring_dressed),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over the declared 2u, WIDTH and OFFSET alike.
+            label: "WIDTH",
+            act: Act::EditorTrack(Knob::RingW),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_width,
+            set: |s, v| s.ring_width = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "OFFSET",
+            act: Act::EditorTrack(Knob::RingOffset),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_offset,
+            set: |s, v| s.ring_offset = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "BRIGHTNESS",
+            act: Act::EditorTrack(Knob::RingB),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_colour[0],
+            set: |s, v| s.ring_colour[0] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "SATURATION",
+            act: Act::EditorTrack(Knob::RingS),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_colour[1],
+            set: |s, v| s.ring_colour[1] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "HUE",
+            act: Act::EditorTrack(Knob::RingH),
+            unit: Unit::None,
+            range: (0, 359),
+            step: 5,
+            get: |s| s.ring_colour[2],
+            set: |s, v| s.ring_colour[2] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over 4u of rhythm, DASH and GAP alike — the model
+            // only floors these at zero.
+            label: "DASH",
+            act: Act::EditorTrack(Knob::RingDash),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_dash,
+            set: |s, v| s.ring_dash = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dashed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "GAP",
+            act: Act::EditorTrack(Knob::RingGap),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_gap,
+            set: |s, v| s.ring_gap = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_dashed,
+    ),
+    row_shown(
+        Ctrl::Toggle {
+            label: "HALO",
+            get: |s| s.ring_halo,
+            act: Act::EditorFlip(Flip::Halo),
+        },
+        ring_dressed,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "HALO ALPHA",
+            act: Act::EditorTrack(Knob::HaloAlpha),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.ring_halo_alpha,
+            set: |s, v| s.ring_halo_alpha = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        ring_haloed,
+    ),
+    row(Ctrl::Slider {
+        // The declared floor is the track's own start: dimming an
+        // unfocused window must not hide it (30 = the model's 0.3).
+        label: "UNFOCUSED DIM",
+        act: Act::EditorTrack(Knob::UnfocusedDim),
+        unit: Unit::None,
+        range: (30, 100),
+        step: 1,
+        get: |s| s.unfocused_dim,
+        set: |s, v| s.unfocused_dim = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // MENU: the four tokens menu.rs and winframe.rs read — bed, ring,
+    // ring width, hint ink. The colours' alphas are the SEED's and stay
+    // with it: there is no opacity knob here to own the channel.
+    row_after(Ctrl::Section { title: "MENU" }, Gap::None),
+    row(Ctrl::Slider {
+        label: "FILL BRIGHTNESS",
+        act: Act::EditorTrack(Knob::MenuFillB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_fill[0],
+        set: |s, v| s.menu_fill[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "FILL SATURATION",
+        act: Act::EditorTrack(Knob::MenuFillS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_fill[1],
+        set: |s, v| s.menu_fill[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "FILL HUE",
+        act: Act::EditorTrack(Knob::MenuFillH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.menu_fill[2],
+        set: |s, v| s.menu_fill[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "BORDER BRIGHTNESS",
+        act: Act::EditorTrack(Knob::MenuEdgeB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_edge[0],
+        set: |s, v| s.menu_edge[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "BORDER SATURATION",
+        act: Act::EditorTrack(Knob::MenuEdgeS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_edge[1],
+        set: |s, v| s.menu_edge[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "BORDER HUE",
+        act: Act::EditorTrack(Knob::MenuEdgeH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.menu_edge[2],
+        set: |s, v| s.menu_edge[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        // 0..100 over 1u; zero is a legal answer — no ring at all,
+        // menu.rs's own floor.
+        label: "BORDER WIDTH",
+        act: Act::EditorTrack(Knob::MenuEdgeW),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_edge_w,
+        set: |s, v| s.menu_edge_w = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HINT BRIGHTNESS",
+        act: Act::EditorTrack(Knob::MenuHintB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_hint[0],
+        set: |s, v| s.menu_hint[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HINT SATURATION",
+        act: Act::EditorTrack(Knob::MenuHintS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.menu_hint[1],
+        set: |s, v| s.menu_hint[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "HINT HUE",
+        act: Act::EditorTrack(Knob::MenuHintH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.menu_hint[2],
+        set: |s, v| s.menu_hint[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // TOOLTIP: the menu's sibling float, the four tokens tooltip.rs
+    // reads, the same arrangement row for row.
+    row_after(Ctrl::Section { title: "TOOLTIP" }, Gap::None),
+    row(Ctrl::Slider {
+        label: "FILL BRIGHTNESS",
+        act: Act::EditorTrack(Knob::TipFillB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_fill[0],
+        set: |s, v| s.tip_fill[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "FILL SATURATION",
+        act: Act::EditorTrack(Knob::TipFillS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_fill[1],
+        set: |s, v| s.tip_fill[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "FILL HUE",
+        act: Act::EditorTrack(Knob::TipFillH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.tip_fill[2],
+        set: |s, v| s.tip_fill[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "EDGE BRIGHTNESS",
+        act: Act::EditorTrack(Knob::TipEdgeB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_edge[0],
+        set: |s, v| s.tip_edge[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "EDGE SATURATION",
+        act: Act::EditorTrack(Knob::TipEdgeS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_edge[1],
+        set: |s, v| s.tip_edge[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "EDGE HUE",
+        act: Act::EditorTrack(Knob::TipEdgeH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.tip_edge[2],
+        set: |s, v| s.tip_edge[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "EDGE WIDTH",
+        act: Act::EditorTrack(Knob::TipEdgeW),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_edge_w,
+        set: |s, v| s.tip_edge_w = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "TEXT BRIGHTNESS",
+        act: Act::EditorTrack(Knob::TipTextB),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_text[0],
+        set: |s, v| s.tip_text[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "TEXT SATURATION",
+        act: Act::EditorTrack(Knob::TipTextS),
+        unit: Unit::None,
+        range: (0, 100),
+        step: 1,
+        get: |s| s.tip_text[1],
+        set: |s, v| s.tip_text[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "TEXT HUE",
+        act: Act::EditorTrack(Knob::TipTextH),
+        unit: Unit::None,
+        range: (0, 359),
+        step: 5,
+        get: |s| s.tip_text[2],
+        set: |s, v| s.tip_text[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    // SCROLLBAR: the two words, the two widths, and the two switches
+    // with the rows each one alone makes real — the fade is read only
+    // while the bar auto-hides, the groove's colour only while the
+    // groove is drawn.
+    row_after(Ctrl::Section { title: "SCROLLBAR" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::ScrollModes }),
+    row(Ctrl::Drop { list: ListId::ScrollEdges }),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over the model's 0.5u..4u, WIDTH and HOVER alike.
+            label: "WIDTH",
+            act: Act::EditorTrack(Knob::BarW),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bar_w,
+            set: |s, v| s.bar_w = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "HOVER WIDTH",
+            act: Act::EditorTrack(Knob::BarWHover),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bar_w_hover,
+            set: |s, v| s.bar_w_hover = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_chosen,
+    ),
+    row_shown(
+        Ctrl::Toggle {
+            label: "AUTO HIDE",
+            get: |s| s.bar_auto_hide,
+            act: Act::EditorFlip(Flip::BarAutoHide),
+        },
+        bar_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            // 0..100 over the declared 0..2000ms.
+            label: "FADE",
+            act: Act::EditorTrack(Knob::BarFade),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bar_fade,
+            set: |s, v| s.bar_fade = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_fades,
+    ),
+    row_shown(
+        Ctrl::Toggle {
+            label: "TRACK",
+            get: |s| s.bar_track,
+            act: Act::EditorFlip(Flip::BarTrack),
+        },
+        bar_chosen,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "TRACK BRIGHTNESS",
+            act: Act::EditorTrack(Knob::BarTrackB),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bar_track_colour[0],
+            set: |s, v| s.bar_track_colour[0] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_tracked,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "TRACK SATURATION",
+            act: Act::EditorTrack(Knob::BarTrackS),
+            unit: Unit::None,
+            range: (0, 100),
+            step: 1,
+            get: |s| s.bar_track_colour[1],
+            set: |s, v| s.bar_track_colour[1] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_tracked,
+    ),
+    row_shown(
+        Ctrl::Slider {
+            label: "TRACK HUE",
+            act: Act::EditorTrack(Knob::BarTrackH),
+            unit: Unit::None,
+            range: (0, 359),
+            step: 5,
+            get: |s| s.bar_track_colour[2],
+            set: |s, v| s.bar_track_colour[2] = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bar_tracked,
+    ),
+    row(Ctrl::Button { label: Text::Fixed("SAVE"), kind: BtnKind::Listed, act: Act::EditorSave }),
+    row(Ctrl::Button {
+        label: Text::Fixed("SAVE AS"),
+        kind: BtnKind::Listed,
+        act: Act::EditorSaveAs,
+    }),
+    row(Ctrl::Button {
+        label: Text::Fixed("CANCEL"),
+        kind: BtnKind::Listed,
+        act: Act::EditorCancel,
     }),
 ];
 
@@ -1729,6 +2708,10 @@ pub struct Settings {
     bg_depth: u32,
     /// Wash coverage in percent, FROSTED only.
     bg_coverage: u32,
+    /// The SAVE AS prompt, when it is open — the same `InputModel` the
+    /// layout editor names its files with, driven here purely by the
+    /// keyboard: the field is focused on open, Enter saves, Esc closes.
+    naming: Option<nacelle::object::text_input::InputModel>,
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
@@ -1737,6 +2720,89 @@ pub struct Settings {
     /// numbers, and the theme's own colours are written to four decimal
     /// places, so these are scaled back on the way out.
     edge: [u32; 3],
+    // ---- the whole-theme sections' state (2026-08-16). Every numeric
+    // ---- field is in SLIDER units (whole numbers on the track's own
+    // ---- range); the maps to the model's units live in editor_edits
+    // ---- and seed_editor_from_theme, one each way.
+    /// The accent seed, HSV like `edge`.
+    accent: [u32; 3],
+    /// Whether the surfaces' hue is their own number (ON) or the
+    /// restored reference `@hue.accent` (OFF).
+    surface_own_hue: bool,
+    /// The own hue in degrees, only meaningful while the switch is on.
+    surface_hue: u32,
+    /// 0..100 over the bake's -0.09..0.09 and 0..4 respectively.
+    surface_lift: u32,
+    surface_chroma: u32,
+    /// 0..100 over the bake's -0.10..0.10 and 0..3.
+    text_lift: u32,
+    text_chroma: u32,
+    /// The severity list's names ([`SEVERITY_ROLES`]' first column).
+    severity_kinds: Vec<String>,
+    current_severity: Option<String>,
+    /// One HSV per role, all seeded from the theme — switching roles
+    /// must not lose an edit already made.
+    severity: [[u32; 3]; 7],
+    /// Which roles a slider actually moved: only these are written.
+    /// A seeded-but-untouched role keeps the theme's own words, spelling
+    /// included — a reference author survives the editor untouched.
+    severity_touched: [bool; 7],
+    corner_kinds: Vec<String>,
+    current_corner: Option<String>,
+    /// 0..100 over 4u (radii), 3..16 bare (segments), 0..100 over 1u.
+    corner_sm: u32,
+    corner_md: u32,
+    corner_lg: u32,
+    corner_segments: u32,
+    stroke_hair: u32,
+    ring_style_kinds: Vec<String>,
+    current_ring_style: Option<String>,
+    ring_on: bool,
+    /// 0..100 over 2u each.
+    ring_width: u32,
+    ring_offset: u32,
+    ring_colour: [u32; 3],
+    /// 0..100 over 4u each.
+    ring_dash: u32,
+    ring_gap: u32,
+    ring_halo: bool,
+    /// 0..100 over 0..1.
+    ring_halo_alpha: u32,
+    /// 30..100 over the declared 0.3..1.0.
+    unfocused_dim: u32,
+    /// The menu's and tooltip's colours, HSV plus the SEED's alpha kept
+    /// beside it: the model passes a colour's alpha through, the three
+    /// sliders have no say over the channel, and flattening a
+    /// translucent bed to opaque just by saving would be an edit nobody
+    /// made.
+    menu_fill: [u32; 3],
+    menu_fill_a: f32,
+    menu_edge: [u32; 3],
+    menu_edge_a: f32,
+    /// 0..100 over 1u.
+    menu_edge_w: u32,
+    menu_hint: [u32; 3],
+    menu_hint_a: f32,
+    tip_fill: [u32; 3],
+    tip_fill_a: f32,
+    tip_edge: [u32; 3],
+    tip_edge_a: f32,
+    tip_edge_w: u32,
+    tip_text: [u32; 3],
+    tip_text_a: f32,
+    scroll_mode_kinds: Vec<String>,
+    current_scroll_mode: Option<String>,
+    scroll_edge_kinds: Vec<String>,
+    current_scroll_edge: Option<String>,
+    /// 0..100 over the model's 0.5u..4u walls.
+    bar_w: u32,
+    bar_w_hover: u32,
+    bar_auto_hide: bool,
+    /// 0..100 over the declared 0..2000ms.
+    bar_fade: u32,
+    bar_track: bool,
+    bar_track_colour: [u32; 3],
+    bar_track_a: f32,
     /// The one track a press is currently holding, if any. A track's
     /// rectangle is not kept beside it: the hit map already has it, and
     /// two copies of a geometry are two chances to disagree.
@@ -1857,7 +2923,74 @@ impl Settings {
             bg_opacity: 100,
             bg_depth: 50,
             bg_coverage: 42,
+            naming: None,
             edge: [70, 12, 200],
+            // The whole-theme sections. OPENING VALUES ONLY, and never a
+            // frame's: the one road onto the editor page
+            // (`Act::ThemesEditor`) and its CANCEL both run
+            // `seed_editor_from_theme`, which overwrites every one of
+            // these from the live bake before anything is drawn. The
+            // documented exception the no-baked-look rule allows.
+            accent: [70, 60, 200],
+            surface_own_hue: false,
+            surface_hue: 200,
+            surface_lift: 50,
+            surface_chroma: 25,
+            text_lift: 50,
+            text_chroma: 33,
+            severity_kinds: SEVERITY_ROLES.iter().map(|r| r.0.to_string()).collect(),
+            current_severity: None,
+            severity: [[70, 60, 200]; 7],
+            severity_touched: [false; 7],
+            corner_kinds: ["SQUARE", "ROUND", "CHAMFER"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
+            current_corner: None,
+            corner_sm: 20,
+            corner_md: 30,
+            corner_lg: 55,
+            corner_segments: 6,
+            stroke_hair: 25,
+            ring_style_kinds: ["SOLID", "DASHED"].iter().map(|k| k.to_string()).collect(),
+            current_ring_style: None,
+            ring_on: false,
+            ring_width: 25,
+            ring_offset: 20,
+            ring_colour: [70, 60, 200],
+            ring_dash: 40,
+            ring_gap: 20,
+            ring_halo: false,
+            ring_halo_alpha: 30,
+            unfocused_dim: 62,
+            menu_fill: [33, 10, 210],
+            menu_fill_a: 1.0,
+            menu_edge: [60, 40, 210],
+            menu_edge_a: 1.0,
+            menu_edge_w: 25,
+            menu_hint: [60, 10, 210],
+            menu_hint_a: 1.0,
+            tip_fill: [33, 10, 210],
+            tip_fill_a: 1.0,
+            tip_edge: [60, 40, 210],
+            tip_edge_a: 1.0,
+            tip_edge_w: 25,
+            tip_text: [90, 10, 210],
+            tip_text_a: 1.0,
+            scroll_mode_kinds: ["OVERLAY", "INSET", "NONE"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
+            current_scroll_mode: None,
+            scroll_edge_kinds: ["RIGHT", "LEFT"].iter().map(|k| k.to_string()).collect(),
+            current_scroll_edge: None,
+            bar_w: 20,
+            bar_w_hover: 43,
+            bar_auto_hide: true,
+            bar_fade: 13,
+            bar_track: false,
+            bar_track_colour: [30, 10, 210],
+            bar_track_a: 0.5,
             dragging: None,
             dropdown: None,
             dropdown_since: None,
@@ -1968,11 +3101,211 @@ impl Settings {
         if !self.open {
             return;
         }
+        // The SAVE AS prompt already swallows clicks and keys; the wheel
+        // joins them, or the page scrolls under the scrim.
+        if self.naming.is_some() {
+            return;
+        }
         // Negated, as at every other caller (search's list, the file
         // browser): winit reports scrolling UP as positive, and a page
         // scrolled up shows EARLIER content — a smaller offset. Passed
         // through raw, the page ran away from the hand.
         self.scroll.wheel(-notches, &ScrollPhysics::from_theme(), self.now);
+    }
+
+    /// The place of the CHOSEN severity role in [`SEVERITY_ROLES`] — the
+    /// index the three severity sliders read and write through. `None`
+    /// while no role stands in the list, in which case the sliders are
+    /// not on screen at all (`severity_chosen`).
+    fn severity_idx(&self) -> Option<usize> {
+        let cur = self.current_severity.as_deref()?;
+        self.severity_kinds.iter().position(|k| k == cur)
+    }
+
+    /// One severity slider's write: the chosen role's component, and the
+    /// role marked TOUCHED — the mark `editor_edits` gates the write on,
+    /// so six untouched roles keep the theme's own words.
+    fn set_severity(&mut self, component: usize, v: u32) {
+        if let Some(i) = self.severity_idx() {
+            self.severity[i][component] = v;
+            self.severity_touched[i] = true;
+        }
+    }
+
+    /// The whole of what the editor is set to, as the token edits both the
+    /// PREVIEW and a SAVE are made of — one builder, or the file and the
+    /// screen would drift.
+    fn editor_edits(&self) -> Vec<nacelle::theme::edit::Edit> {
+        use nacelle::theme::edit::{
+            accent_edit, border_colour_edit, border_edits, focus_ring_edits, glass_edits,
+            menu_edits, scrollbar_edits, severity_role_edit, shape_edits, surface_edits,
+            text_edits, tooltip_edits, unfocused_dim_edit, Border, CornerCut, FocusRing,
+            Glass, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
+        };
+        // The sliders are HSV — brightness, saturation, hue — and the file
+        // wants OKLCh, so the value crosses HSV -> RGB -> OKLCh here. See
+        // `hsv_to_rgb` for why HSV: brightness 100 % must be the hue's own
+        // full brightness, never white. The alpha is the CALLER's: 1.0
+        // where the model forces opacity anyway, the seed's own where the
+        // model passes a colour's channel through (menu, tooltip, track).
+        let of = |hsv: &[u32; 3], a: f32| {
+            let (r, g, b) = hsv_to_rgb(
+                hsv[2] as f32,
+                hsv[1] as f32 / 100.0,
+                hsv[0] as f32 / 100.0,
+            );
+            nacelle::theme::Color { r, g, b, a }.to_oklch()
+        };
+        // What the LIVE theme already dresses — the two `halo_dressed`
+        // answers the model asks its caller for, read off the bake here so
+        // the model itself stays pure.
+        let t = nacelle::theme::resolved();
+        let live = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
+        let colour = of(&self.edge, 1.0);
+        let mut edits = match self.current_border.as_deref() {
+            // No kind chosen: the colour moves ALONE. Mapping "no choice"
+            // to LINE was a verified bug — a colour drag before the list
+            // was touched switched the halo off as a side effect.
+            None => vec![border_colour_edit(Scope::Theme, colour)],
+            other => {
+                let kind = if other == Some("NEON") { Border::Neon } else { Border::Line };
+                // Whether the THEME already dresses a visible halo — if it
+                // does, NEON keeps the theme's radius and alpha instead of
+                // flattening five themes' dress to one theme's numbers.
+                let dressed = live("glow.panel_edge.radius") > 0.0
+                    && live("glow.panel_edge.alpha") > 0.0;
+                border_edits(Scope::Theme, kind, colour, dressed)
+            }
+        };
+        // The background joins the same set. `None` means the list was
+        // never touched and the theme's own background stands — the same
+        // neutrality the border's `None` earned after verification.
+        if let Some(kind_name) = self.current_background.as_deref() {
+            let kind = match kind_name {
+                "BLUR" => Glass::Blur,
+                "FROSTED GLASS" => Glass::Frosted,
+                _ => Glass::Solid,
+            };
+            edits.extend(glass_edits(
+                Scope::Theme,
+                kind,
+                of(&self.tint, 1.0),
+                of(&self.wash, 1.0),
+                self.bg_opacity as f32 / 100.0,
+                1.0 + self.bg_depth.min(100) as f32 / 50.0,
+                self.bg_coverage as f32 / 100.0,
+            ));
+        }
+        // ---- the whole-theme sets (2026-08-16), in the model's order.
+        // Everything below is SEEDED off the live bake on the way into the
+        // page, so carrying it whole is carrying the theme's own state
+        // back — the two exceptions with a real side to choose are gated:
+        // severity on its TOUCHED marks, and any set whose word could not
+        // be read at all is left out rather than guessed.
+        edits.push(accent_edit(Scope::Theme, of(&self.accent, 1.0)));
+        let hue = if self.surface_own_hue {
+            SurfaceHue::Own(self.surface_hue.min(359) as f32)
+        } else {
+            // OFF restores the derivation AS A REFERENCE, so a later
+            // accent drag keeps moving the surfaces — the model's test
+            // pins this exact string.
+            SurfaceHue::FollowAccent
+        };
+        edits.extend(surface_edits(
+            Scope::Theme,
+            hue,
+            span_of(self.surface_lift, 0.09),
+            scale_of(self.surface_chroma, 4.0),
+        ));
+        edits.extend(text_edits(
+            Scope::Theme,
+            span_of(self.text_lift, 0.10),
+            scale_of(self.text_chroma, 3.0),
+        ));
+        // Only the roles a slider actually moved: six untouched authors
+        // keep the theme's own words, references included.
+        for (i, (_, _, role)) in SEVERITY_ROLES.iter().enumerate() {
+            if self.severity_touched[i] {
+                edits.push(severity_role_edit(Scope::Theme, *role, of(&self.severity[i], 1.0)));
+            }
+        }
+        if let Some(cut) = self.current_corner.as_deref() {
+            let cut = match cut {
+                "SQUARE" => CornerCut::Square,
+                "CHAMFER" => CornerCut::Chamfer,
+                _ => CornerCut::Round,
+            };
+            edits.extend(shape_edits(
+                Scope::Theme,
+                cut,
+                scale_of(self.corner_sm, 4.0),
+                scale_of(self.corner_md, 4.0),
+                scale_of(self.corner_lg, 4.0),
+                self.corner_segments.clamp(3, 16) as u8,
+                scale_of(self.stroke_hair, 1.0),
+            ));
+        }
+        if let Some(style) = self.current_ring_style.as_deref() {
+            let ring = FocusRing {
+                style: if style == "DASHED" { RingStyle::Dashed } else { RingStyle::Solid },
+                width_u: scale_of(self.ring_width, 2.0),
+                offset_u: scale_of(self.ring_offset, 2.0),
+                colour: of(&self.ring_colour, 1.0),
+                dash_u: scale_of(self.ring_dash, 4.0),
+                gap_u: scale_of(self.ring_gap, 4.0),
+                halo: self.ring_halo,
+                halo_alpha: self.ring_halo_alpha.min(100) as f32 / 100.0,
+                // The same live-dress contract as the border's NEON: a
+                // theme that has dressed its halo keeps its radius.
+                halo_dressed: live("glow.focus_ring.radius") > 0.0
+                    && live("glow.focus_ring.alpha") > 0.0,
+            };
+            edits.extend(focus_ring_edits(Scope::Theme, self.ring_on, &ring));
+        }
+        edits.push(unfocused_dim_edit(
+            Scope::Theme,
+            self.unfocused_dim.min(100) as f32 / 100.0,
+        ));
+        // The floats' colours carry the SEED's alphas — the model passes
+        // a colour's channel through, and the sliders have no say in it.
+        edits.extend(menu_edits(
+            Scope::Theme,
+            of(&self.menu_fill, self.menu_fill_a),
+            of(&self.menu_edge, self.menu_edge_a),
+            scale_of(self.menu_edge_w, 1.0),
+            of(&self.menu_hint, self.menu_hint_a),
+        ));
+        edits.extend(tooltip_edits(
+            Scope::Theme,
+            of(&self.tip_fill, self.tip_fill_a),
+            of(&self.tip_edge, self.tip_edge_a),
+            scale_of(self.tip_edge_w, 1.0),
+            of(&self.tip_text, self.tip_text_a),
+        ));
+        if let (Some(mode), Some(edge)) =
+            (self.current_scroll_mode.as_deref(), self.current_scroll_edge.as_deref())
+        {
+            let mode = match mode {
+                "OVERLAY" => ScrollbarMode::Overlay,
+                "NONE" => ScrollbarMode::None,
+                _ => ScrollbarMode::Inset,
+            };
+            let edge = if edge == "LEFT" { ScrollbarEdge::Left } else { ScrollbarEdge::Right };
+            edits.extend(scrollbar_edits(
+                Scope::Theme,
+                mode,
+                edge,
+                band_of(self.bar_w, 0.5, 4.0),
+                band_of(self.bar_w_hover, 0.5, 4.0),
+                self.bar_auto_hide,
+                scale_of(self.bar_fade, 2000.0),
+                // Track OFF is the switch alone; the groove's colour — with
+                // the seed's alpha — is only written while the groove is
+                // drawn at all.
+                self.bar_track.then(|| of(&self.bar_track_colour, self.bar_track_a)),
+            ));
+        }
+        edits
     }
 
     /// Shows what the editor is set to, without writing anything.
@@ -1987,68 +3320,213 @@ impl Settings {
     /// Nothing here touches the file. `theme::clear_preview` puts the
     /// screen back, which is what CANCEL will be made of.
     fn apply_editor_preview(&self) {
-        use nacelle::theme::edit::{border_colour_edit, border_edits, Border, Scope};
-        // The sliders are HSV — brightness, saturation, hue — and the file
-        // wants OKLCh, so the value crosses HSV -> RGB -> OKLCh here. See
-        // `hsv_to_rgb` for why HSV: brightness 100 % must be the hue's own
-        // full brightness, never white.
-        let (r, g, b) = hsv_to_rgb(
-            self.edge[2] as f32,
-            self.edge[1] as f32 / 100.0,
-            self.edge[0] as f32 / 100.0,
-        );
-        let colour = nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch();
-        let edits = match self.current_border.as_deref() {
-            // No kind chosen: the colour moves ALONE. Mapping "no choice"
-            // to LINE was a verified bug — a colour drag before the list
-            // was touched switched the halo off as a side effect.
-            None => vec![border_colour_edit(Scope::Theme, colour)],
-            other => {
-                let kind = if other == Some("NEON") { Border::Neon } else { Border::Line };
-                // Whether the THEME already dresses a visible halo — if it
-                // does, NEON keeps the theme's radius and alpha instead of
-                // flattening five themes' dress to one theme's numbers.
-                let t = nacelle::theme::resolved();
-                let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
-                let dressed =
-                    px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
-                border_edits(Scope::Theme, kind, colour, dressed)
-            }
-        };
-        let mut edits = edits;
-        // The background joins the same send. `None` means the list was
-        // never touched and the theme's own background stands — the same
-        // neutrality the border's `None` earned after verification.
-        if let Some(kind_name) = self.current_background.as_deref() {
-            use nacelle::theme::edit::{glass_edits, Glass};
-            let kind = match kind_name {
-                "BLUR" => Glass::Blur,
-                "FROSTED GLASS" => Glass::Frosted,
-                _ => Glass::Solid,
-            };
-            let of = |hsv: &[u32; 3]| {
-                let (r, g, b) = hsv_to_rgb(
-                    hsv[2] as f32,
-                    hsv[1] as f32 / 100.0,
-                    hsv[0] as f32 / 100.0,
-                );
-                nacelle::theme::Color { r, g, b, a: 1.0 }.to_oklch()
-            };
-            edits.extend(glass_edits(
-                Scope::Theme,
-                kind,
-                of(&self.tint),
-                of(&self.wash),
-                self.bg_opacity as f32 / 100.0,
-                1.0 + self.bg_depth.min(100) as f32 / 50.0,
-                self.bg_coverage as f32 / 100.0,
-            ));
-        }
+        let edits = self.editor_edits();
         let pairs: Vec<(&str, &str)> =
             edits.iter().map(|e| (e.token, e.value.as_str())).collect();
         let refused = nacelle::theme::set_preview(&pairs);
         for r in refused {
             eprintln!("nacelle-desktop: the theme editor could not show {r}");
+        }
+    }
+
+    /// The editor OPENS ON THE THEME'S OWN STATE — and CANCEL returns to
+    /// it: every colour, kind, word and length off the live bake, never a
+    /// built-in. The maps back onto the tracks are the exact inverses of
+    /// `editor_edits`' maps out, so a theme saved and reopened lands the
+    /// sliders where the hand left them.
+    fn seed_editor_from_theme(&mut self) {
+        let t = nacelle::theme::resolved();
+        // One u for the lengths the model writes in u: the bake keeps them
+        // in device px, and the file wants the unit back.
+        let unit = t.unit_px.max(f32::MIN_POSITIVE);
+        let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
+        let flag = |n: &str| nacelle::theme::id(n).map(|i| t.flag(i)).unwrap_or(false);
+        // An enum token's WORD, spelled the way the lists spell their
+        // members. `None` — a token this build has no vocabulary for —
+        // leaves the list unseeded, and `editor_edits` then leaves the
+        // whole set out rather than guessing a word.
+        let word =
+            |n: &str| nacelle::theme::id(n).and_then(nacelle::theme::enum_word_of);
+        let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
+        let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| {
+            let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+            *slot = [
+                (v * 100.0).round().clamp(0.0, 100.0) as u32,
+                (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+                h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+            ];
+        };
+
+        // The border: colour and kind.
+        if let Some(c) = col_of("elev.panel.edge.color") {
+            seed(&mut self.edge, c);
+        }
+        self.current_border =
+            Some(if flag("glow.panel_edge.enabled") { "NEON" } else { "LINE" }.to_string());
+
+        // The background: kind from the rank and the wash, colours from
+        // whichever quads are live. A solid seeds the WASH group from the
+        // shared fill, because that is the group SOLID writes back through.
+        let rank = px("elev.panel.glass.rank").round() as u32;
+        let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
+        self.current_background = Some(
+            match (rank, wash_a > 0.0) {
+                (0, _) => "SOLID",
+                (_, false) => "BLUR",
+                (_, true) => "FROSTED GLASS",
+            }
+            .to_string(),
+        );
+        if rank == 0 {
+            if let Some(c) = col_of("component.panel.fill") {
+                seed(&mut self.wash, c);
+            }
+        } else {
+            if let Some(c) = col_of("elev.panel.glass.tint") {
+                seed(&mut self.tint, c);
+            }
+            if let Some(c) = col_of("elev.panel.glass.wash") {
+                if c.a > 0.0 {
+                    seed(&mut self.wash, c);
+                }
+            }
+        }
+
+        // ---- the whole-theme sections (2026-08-16) ----
+        // ACCENT: the seed itself.
+        if let Some(c) = col_of("palette.accent") {
+            seed(&mut self.accent, c);
+        }
+        // SURFACES. The bake cannot say whether `surface.hue` is still a
+        // reference, only what it resolves to — so "the accent's own
+        // number" reads as FOLLOW, and an own hue that happens to land
+        // exactly on the accent's is indistinguishable and harmlessly
+        // reads as follow too.
+        let s_hue = px("surface.hue").rem_euclid(360.0);
+        let a_hue = px("hue.accent").rem_euclid(360.0);
+        self.surface_own_hue = (s_hue - a_hue).abs() > 0.5;
+        self.surface_hue = s_hue.round().clamp(0.0, 359.0) as u32;
+        self.surface_lift = span_back(px("surface.lift"), 0.09);
+        self.surface_chroma = scale_back(px("surface.chroma"), 4.0);
+        // TEXT.
+        self.text_lift = span_back(px("text.lift"), 0.10);
+        self.text_chroma = scale_back(px("text.chroma"), 3.0);
+        // SEVERITY: all seven authors seeded, NONE touched — the marks
+        // are what keeps an untouched role out of the file.
+        for (i, (_, token, _)) in SEVERITY_ROLES.iter().enumerate() {
+            if let Some(c) = col_of(token) {
+                seed(&mut self.severity[i], c);
+            }
+            self.severity_touched[i] = false;
+        }
+        self.current_severity = Some(self.severity_kinds[0].clone());
+        // SHAPE.
+        self.current_corner = word("corner.mode").map(|w| w.to_uppercase());
+        self.corner_sm = scale_back(px("corner.sm") / unit, 4.0);
+        self.corner_md = scale_back(px("corner.md") / unit, 4.0);
+        self.corner_lg = scale_back(px("corner.lg") / unit, 4.0);
+        self.corner_segments = (px("corner.segments").round() as u32).clamp(3, 16);
+        self.stroke_hair = scale_back(px("stroke.hair") / unit, 1.0);
+        // FOCUS RING.
+        self.ring_on = flag("focus.ring.enabled");
+        self.current_ring_style = word("focus.ring.style").map(|w| w.to_uppercase());
+        self.ring_width = scale_back(px("focus.ring.width") / unit, 2.0);
+        self.ring_offset = scale_back(px("focus.ring.offset") / unit, 2.0);
+        if let Some(c) = col_of("focus.ring.color") {
+            seed(&mut self.ring_colour, c);
+        }
+        self.ring_dash = scale_back(px("focus.ring.dash") / unit, 4.0);
+        self.ring_gap = scale_back(px("focus.ring.gap") / unit, 4.0);
+        self.ring_halo = flag("glow.focus_ring.enabled");
+        self.ring_halo_alpha = scale_back(px("glow.focus_ring.alpha"), 1.0);
+        self.unfocused_dim =
+            (px("focus.unfocused_dim") * 100.0).round().clamp(30.0, 100.0) as u32;
+        // MENU and TOOLTIP: the colours keep their own alphas beside the
+        // sliders, because the model passes the channel through.
+        if let Some(c) = col_of("component.menu.fill") {
+            seed(&mut self.menu_fill, c);
+            self.menu_fill_a = c.a;
+        }
+        if let Some(c) = col_of("component.menu.border") {
+            seed(&mut self.menu_edge, c);
+            self.menu_edge_a = c.a;
+        }
+        self.menu_edge_w = scale_back(px("menu.border") / unit, 1.0);
+        if let Some(c) = col_of("component.menu.hint") {
+            seed(&mut self.menu_hint, c);
+            self.menu_hint_a = c.a;
+        }
+        if let Some(c) = col_of("component.tooltip.fill") {
+            seed(&mut self.tip_fill, c);
+            self.tip_fill_a = c.a;
+        }
+        if let Some(c) = col_of("component.tooltip.edge") {
+            seed(&mut self.tip_edge, c);
+            self.tip_edge_a = c.a;
+        }
+        self.tip_edge_w = scale_back(px("tooltip.border") / unit, 1.0);
+        if let Some(c) = col_of("component.tooltip.text") {
+            seed(&mut self.tip_text, c);
+            self.tip_text_a = c.a;
+        }
+        // SCROLLBAR, through the same reader the bar itself draws from —
+        // one interpretation of the words, not a second.
+        let look = ScrollbarLook::from_theme();
+        self.current_scroll_mode = Some(
+            match look.mode {
+                scroll::ScrollbarMode::Overlay => "OVERLAY",
+                scroll::ScrollbarMode::Inset => "INSET",
+                scroll::ScrollbarMode::None => "NONE",
+            }
+            .to_string(),
+        );
+        self.current_scroll_edge = Some(
+            match look.edge {
+                scroll::ScrollbarEdge::Left => "LEFT",
+                scroll::ScrollbarEdge::Right => "RIGHT",
+            }
+            .to_string(),
+        );
+        self.bar_w = band_back(look.w / unit, 0.5, 4.0);
+        self.bar_w_hover = band_back(look.w_hover / unit, 0.5, 4.0);
+        self.bar_auto_hide = look.auto_hide;
+        self.bar_fade = scale_back(look.fade_ms, 2000.0);
+        self.bar_track = word("scrollbar.track").as_deref() == Some("on");
+        if let Some(c) = col_of("component.scrollbar.track") {
+            seed(&mut self.bar_track_colour, c);
+            self.bar_track_a = c.a;
+        }
+    }
+
+    /// A theme's name may be its file's name, nothing more.
+    fn theme_name_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+
+    /// Writes the edit set under `name` and, when the write lands, makes
+    /// the saved theme the one in force. Answers whether the
+    /// configuration changed — the caller's cue to re-resolve, which is
+    /// what reloads the theme off the file just written.
+    fn editor_save_named(&mut self, name: &str) -> bool {
+        match nacelle::theme::save_theme(name, &self.editor_edits()) {
+            Ok(path) => {
+                eprintln!("nacelle-desktop: theme saved to {}", path.display());
+                config::set_engine_theme(name);
+                nacelle::theme::clear_preview();
+                self.editor_pulse = None;
+                self.naming = None;
+                // The list learns about the file it just gained NOW — the
+                // walk that fills it otherwise runs when the window opens,
+                // and a theme saved mid-session stayed invisible until a
+                // reopen.
+                self.themes = nacelle::theme::available_themes();
+                self.refresh_current();
+                true
+            }
+            Err(e) => {
+                eprintln!("nacelle-desktop: the theme was NOT saved: {e}");
+                false
+            }
         }
     }
 
@@ -2167,6 +3645,12 @@ impl Settings {
         if !self.open {
             return false;
         }
+        // While the SAVE AS prompt stands, the pointer reaches nothing
+        // under it — the prompt is keyboard-shaped, and a click that fell
+        // through to a slider would drag the theme mid-naming.
+        if self.naming.is_some() {
+            return false;
+        }
         // Topmost element wins (dropdown items are drawn last). Elements
         // are checked BEFORE the window bounds, so dropdown items that
         // extend past the window edge remain clickable.
@@ -2202,6 +3686,8 @@ impl Settings {
         match act {
             Act::Close | Act::Back => {}
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
+            // The editor's switches speak toggle, like every other switch.
+            Act::EditorFlip(_) => {}
             Act::VolumeTrack => {}
             Act::Pick(..) => {}
             _ => emit(Sfx::Click),
@@ -2213,6 +3699,43 @@ impl Settings {
                 self.leave_editor_preview();
                 self.open = false;
                 emit(Sfx::PanelClose);
+            }
+            Act::EditorCancel => {
+                nacelle::theme::clear_preview();
+                self.editor_pulse = None;
+                self.seed_editor_from_theme();
+            }
+            Act::EditorSaveAs => {
+                use nacelle::object::text_input::{InputModel, Validator};
+                self.naming = Some(
+                    InputModel::new()
+                        .with_validator(Validator::Charset(Self::theme_name_char))
+                        .with_max_len(40),
+                );
+            }
+            Act::EditorSave => {
+                let name = config::current_engine_theme()
+                    .unwrap_or_else(|| "default".to_string());
+                // The master is not a file: SAVE on `default` IS SAVE AS,
+                // by the owner's rule. And the rule follows the theme IN
+                // FORCE, not the config line: a `Theme=` naming a file that
+                // no longer exists fell back to the master at load, so a
+                // SAVE here would resurrect the missing file under the
+                // person's feet instead of asking — measured on a config
+                // still saying `cockpit` the day the shipped themes left.
+                let known = nacelle::theme::available_themes();
+                if name.eq_ignore_ascii_case("default")
+                    || !known.iter().any(|n| n.eq_ignore_ascii_case(&name))
+                {
+                    use nacelle::object::text_input::{InputModel, Validator};
+                    self.naming = Some(
+                        InputModel::new()
+                            .with_validator(Validator::Charset(Self::theme_name_char))
+                            .with_max_len(40),
+                    );
+                } else {
+                    return self.editor_save_named(&name);
+                }
             }
             Act::Back => {
                 emit(Sfx::Click);
@@ -2280,6 +3803,44 @@ impl Settings {
                             emit(Sfx::Theme);
                             return false;
                         }
+                        // The whole-theme lists follow the two above: a
+                        // pick lays a value over the theme until SAVE,
+                        // writes no config line, and must answer FALSE —
+                        // true would reload the theme and erase the very
+                        // preview the pick just sent (the border pick's
+                        // verified bug, not to be re-made five more times).
+                        ListId::Severities => {
+                            // Choosing a role EDITS nothing: the sliders
+                            // re-aim at the role's stored colour, and only
+                            // a slider marks it touched.
+                            self.current_severity = Some(name.clone());
+                            emit(Sfx::Theme);
+                            return false;
+                        }
+                        ListId::Corners => {
+                            self.current_corner = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
+                        ListId::RingStyles => {
+                            self.current_ring_style = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
+                        ListId::ScrollModes => {
+                            self.current_scroll_mode = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
+                        ListId::ScrollEdges => {
+                            self.current_scroll_edge = Some(name.clone());
+                            self.apply_editor_preview();
+                            emit(Sfx::Theme);
+                            return false;
+                        }
                     }
                     self.refresh_current();
                     emit(Sfx::Theme);
@@ -2293,68 +3854,7 @@ impl Settings {
                 // content area over instead — which is why it answers
                 // false: nothing about the configuration changed.
                 self.dropdown = None;
-                // The editor OPENS ON THE THEME'S OWN STATE — the model's
-                // first promise, and a verified finding when it was broken:
-                // the sliders used to open on a built-in colour that
-                // replaced the theme's on first touch. The colour comes off
-                // the live bake; the kind is read from the halo switch.
-                {
-                    let t = nacelle::theme::resolved();
-                    if let Some(id) = nacelle::theme::id("elev.panel.edge.color") {
-                        let c = t.color(id);
-                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
-                        self.edge = [
-                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
-                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
-                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
-                        ];
-                    }
-                    let on = nacelle::theme::id("glow.panel_edge.enabled")
-                        .map(|id| t.flag(id))
-                        .unwrap_or(false);
-                    self.current_border =
-                        Some(if on { "NEON" } else { "LINE" }.to_string());
-                    // The background too: kind from the rank and the wash,
-                    // colours from whichever quads are live. A solid seeds
-                    // the WASH group from the shared fill, because that is
-                    // the group SOLID writes back through.
-                    let px = |n: &str| {
-                        nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0)
-                    };
-                    let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
-                    let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| {
-                        let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
-                        *slot = [
-                            (v * 100.0).round().clamp(0.0, 100.0) as u32,
-                            (sat * 100.0).round().clamp(0.0, 100.0) as u32,
-                            h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
-                        ];
-                    };
-                    let rank = px("elev.panel.glass.rank").round() as u32;
-                    let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
-                    self.current_background = Some(
-                        match (rank, wash_a > 0.0) {
-                            (0, _) => "SOLID",
-                            (_, false) => "BLUR",
-                            (_, true) => "FROSTED GLASS",
-                        }
-                        .to_string(),
-                    );
-                    if rank == 0 {
-                        if let Some(c) = col_of("component.panel.fill") {
-                            seed(&mut self.wash, c);
-                        }
-                    } else {
-                        if let Some(c) = col_of("elev.panel.glass.tint") {
-                            seed(&mut self.tint, c);
-                        }
-                        if let Some(c) = col_of("elev.panel.glass.wash") {
-                            if c.a > 0.0 {
-                                seed(&mut self.wash, c);
-                            }
-                        }
-                    }
-                }
+                self.seed_editor_from_theme();
                 self.go(View::ThemeEditor);
             }
             Act::OpenSoundLevels => {
@@ -2391,6 +3891,36 @@ impl Settings {
                 self.dragging = Some(act);
                 self.set_from_x(act, x);
                 self.mark_dirty(act);
+            }
+            // The editor's switches: flip the field, show the answer at
+            // once — the same live contract as the tracks, with a toggle's
+            // own sound. A flip writes no config line and answers false
+            // like every editor control, for the border pick's reason.
+            Act::EditorFlip(f) => {
+                let on = match f {
+                    Flip::SurfaceOwnHue => {
+                        self.surface_own_hue = !self.surface_own_hue;
+                        self.surface_own_hue
+                    }
+                    Flip::Ring => {
+                        self.ring_on = !self.ring_on;
+                        self.ring_on
+                    }
+                    Flip::Halo => {
+                        self.ring_halo = !self.ring_halo;
+                        self.ring_halo
+                    }
+                    Flip::BarAutoHide => {
+                        self.bar_auto_hide = !self.bar_auto_hide;
+                        self.bar_auto_hide
+                    }
+                    Flip::BarTrack => {
+                        self.bar_track = !self.bar_track;
+                        self.bar_track
+                    }
+                };
+                self.apply_editor_preview();
+                emit(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ToggleTyping => {
                 self.sound_typing = !self.sound_typing;
@@ -2575,6 +4105,55 @@ impl Settings {
     pub fn key(&mut self, ev: &KeyEv, fc: &mut FocusCtl) -> KeyOut {
         if !self.open {
             return KeyOut::Ignored;
+        }
+        // The SAVE AS prompt owns the keyboard while it stands: Enter
+        // saves, Esc closes, everything else is the field's. Purely
+        // keyboard-driven — the field needs no focus bookkeeping because
+        // nothing else can hear a key while it is open.
+        if self.naming.is_some() {
+            use nacelle::object::text_input::{self, InputEdited, InputMsg};
+            if ev.mods == Mods::NONE && ev.key == FKey::Escape {
+                self.naming = None;
+                return KeyOut::Consumed;
+            }
+            if ev.mods == Mods::NONE && ev.key == FKey::Enter {
+                let name = self
+                    .naming
+                    .as_ref()
+                    .map(|m| m.value().trim().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    return KeyOut::Consumed;
+                }
+                return if self.editor_save_named(&name) {
+                    KeyOut::Changed
+                } else {
+                    KeyOut::Consumed
+                };
+            }
+            if let Some(msg) = text_input::key_msg(ev) {
+                let out = self.naming.as_mut().map(|m| m.apply(msg));
+                match out {
+                    Some(InputEdited::CopyRequest { text, .. }) => {
+                        nacelle::clipboard::store(nacelle::clipboard::Board::Clipboard, &text);
+                    }
+                    Some(InputEdited::PasteRequest) => {
+                        if let Some(text) =
+                            nacelle::clipboard::load(nacelle::clipboard::Board::Clipboard)
+                        {
+                            let text: String = text
+                                .chars()
+                                .filter(|&c| Self::theme_name_char(c))
+                                .collect();
+                            if let Some(m) = self.naming.as_mut() {
+                                m.apply(InputMsg::Insert(text));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return KeyOut::Consumed;
         }
         // Bare only: the same rule `Nav::of` applies to the arrows —
         // a modified key is a shortcut's business, never navigation.
@@ -2810,6 +4389,94 @@ impl Settings {
         // Last, so it covers what it hangs from and the reverse hit walk
         // reaches its rows first.
         self.draw_open_dropdown(ctx, m);
+        self.draw_naming(ctx);
+    }
+
+    /// The SAVE AS prompt, over everything: a scrim, a box, one field and
+    /// the two-key hint. The same tokens the layout editor's prompt reads,
+    /// so the two ask the theme one set of questions.
+    fn draw_naming(&mut self, ctx: &mut Ctx) {
+        static PAD: OnceLock<TokenId> = OnceLock::new();
+        static FIELD_H: OnceLock<TokenId> = OnceLock::new();
+        static BODY_TOP: OnceLock<TokenId> = OnceLock::new();
+        static HINT_INSET: OnceLock<TokenId> = OnceLock::new();
+        static HINT_C: OnceLock<TokenId> = OnceLock::new();
+        static SCRIM: OnceLock<TokenId> = OnceLock::new();
+        static SCRIM_A: OnceLock<TokenId> = OnceLock::new();
+        if self.naming.is_none() {
+            return;
+        }
+        let t = theme::resolved();
+        let win = modal_rect(ctx.w, ctx.h);
+        // The prompt claims the whole window: hover under it dies with the
+        // clicks `click()` already swallows, through the one pointer model.
+        ctx.mouse.cover(win);
+        let mut scrim = col(t.color(tok(&SCRIM, "component.modal.scrim")));
+        scrim.a *= t.px(tok(&SCRIM_A, "modal.scrim_alpha")).clamp(0.0, 1.0);
+        ctx.dl.rect(win.x, win.y, win.w, win.h, scrim);
+        let pad = t.px(tok(&PAD, "modal.pad")).max(0.0);
+        let fh = t.px(tok(&FIELD_H, "field.h")).max(1.0);
+        let top = t.px(tok(&BODY_TOP, "modal.body_top")).max(0.0);
+        // The same species as the layout editor's SAVE AS prompt: widths
+        // from modal.*, height from dialog.* (editor.rs reads the same
+        // pair), boxed into the window that opened it.
+        static W_FRAC: OnceLock<TokenId> = OnceLock::new();
+        static W_MIN: OnceLock<TokenId> = OnceLock::new();
+        static W_MIN_PX: OnceLock<TokenId> = OnceLock::new();
+        static H_FRAC: OnceLock<TokenId> = OnceLock::new();
+        static H_MIN: OnceLock<TokenId> = OnceLock::new();
+        let bw = (ctx.w * t.px(tok(&W_FRAC, "modal.w_frac")))
+            .max(t.px(tok(&W_MIN, "modal.min_w")))
+            .max(t.px(tok(&W_MIN_PX, "modal.min_w_min_px")))
+            .min(win.w - 2.0 * pad);
+        let bh = (ctx.h * t.px(tok(&H_FRAC, "dialog.h_frac")))
+            .max(t.px(tok(&H_MIN, "dialog.h_min_px")))
+            .min(win.h - 2.0 * pad);
+        let bx = win.x + (win.w - bw) / 2.0;
+        let by = win.y + (win.h - bh) / 2.0;
+        let box_ = Rect::new(bx, by, bw, bh);
+        nacelle::object::window::frame(ctx, box_);
+        static TITLE_FG: OnceLock<TokenId> = OnceLock::new();
+        let title_px = role_title(ctx).px;
+        ctx.dl.module_title(
+            ctx.fonts,
+            bx + pad,
+            by + pad,
+            bw - 2.0 * pad,
+            title_px,
+            "SAVE THEME AS",
+            "",
+            col(t.color(tok(&TITLE_FG, "component.panel.title"))),
+            true,
+        );
+        let field = Rect::new(bx + pad, by + top, (bw - 2.0 * pad).max(2.0), fh);
+        if let Some(model) = self.naming.as_mut() {
+            use nacelle::object::text_input::{self, InputStyle};
+            let (mx, my) = ctx.mouse.at();
+            text_input::draw(
+                ctx,
+                field,
+                model,
+                FocusId::of("settings.editor.naming"),
+                &InputStyle {
+                    placeholder: "theme name",
+                    hover: field.contains(mx, my),
+                    disabled: false,
+                    focused_fallback: true,
+                },
+            );
+        }
+        let hint = role_hint(ctx);
+        ctx.dl.text_center(
+            ctx.fonts,
+            hint.face,
+            hint.px,
+            bx + bw / 2.0,
+            field.bottom() + t.px(tok(&HINT_INSET, "settings.hint_inset")),
+            "ENTER SAVES \u{2014} ESC CANCELS",
+            col(t.color(tok(&HINT_C, "text.muted"))),
+            hint.track * hint.px,
+        );
     }
 
     /// The box the flowed rows live in: the content box, less the
@@ -3333,6 +5000,11 @@ impl Settings {
             ListId::Sounds => &self.sounds,
             ListId::Borders => &self.border_kinds,
             ListId::Backgrounds => &self.background_kinds,
+            ListId::Severities => &self.severity_kinds,
+            ListId::Corners => &self.corner_kinds,
+            ListId::RingStyles => &self.ring_style_kinds,
+            ListId::ScrollModes => &self.scroll_mode_kinds,
+            ListId::ScrollEdges => &self.scroll_edge_kinds,
         }
     }
 
@@ -3344,6 +5016,11 @@ impl Settings {
             ListId::Sounds => self.current_sounds.as_ref(),
             ListId::Borders => self.current_border.as_ref(),
             ListId::Backgrounds => self.current_background.as_ref(),
+            ListId::Severities => self.current_severity.as_ref(),
+            ListId::Corners => self.current_corner.as_ref(),
+            ListId::RingStyles => self.current_ring_style.as_ref(),
+            ListId::ScrollModes => self.current_scroll_mode.as_ref(),
+            ListId::ScrollEdges => self.current_scroll_edge.as_ref(),
         }
     }
 
@@ -4010,6 +5687,44 @@ mod tests {
             Act::FamilyPick(Sect::Ui, 0),
             Act::WeightPick(Sect::Term, 0),
             Act::WeightPick(Sect::Term, 1),
+            // The editor's controls, the pairs most likely to collide by
+            // path: a knob against its section's list or switch, a track
+            // colour against the track switch, the two width knobs of
+            // the two floats.
+            Act::EditorSave,
+            Act::EditorSaveAs,
+            Act::EditorCancel,
+            Act::EditorTrack(Knob::EdgeL),
+            Act::EditorTrack(Knob::AccentB),
+            Act::EditorTrack(Knob::SurfHue),
+            Act::EditorTrack(Knob::SevB),
+            Act::EditorTrack(Knob::CornerSm),
+            Act::EditorTrack(Knob::Hairline),
+            Act::EditorTrack(Knob::RingW),
+            Act::EditorTrack(Knob::RingH),
+            Act::EditorTrack(Knob::HaloAlpha),
+            Act::EditorTrack(Knob::UnfocusedDim),
+            Act::EditorTrack(Knob::MenuEdgeW),
+            Act::EditorTrack(Knob::TipEdgeW),
+            Act::EditorTrack(Knob::BarW),
+            Act::EditorTrack(Knob::BarTrackB),
+            Act::EditorFlip(Flip::SurfaceOwnHue),
+            Act::EditorFlip(Flip::Ring),
+            Act::EditorFlip(Flip::Halo),
+            Act::EditorFlip(Flip::BarAutoHide),
+            Act::EditorFlip(Flip::BarTrack),
+            Act::ListBtn(ListId::Borders),
+            Act::ListBtn(ListId::Backgrounds),
+            Act::ListBtn(ListId::Severities),
+            Act::ListBtn(ListId::Corners),
+            Act::ListBtn(ListId::RingStyles),
+            Act::ListBtn(ListId::ScrollModes),
+            Act::ListBtn(ListId::ScrollEdges),
+            Act::Pick(ListId::Severities, 0),
+            Act::Pick(ListId::Corners, 0),
+            Act::Pick(ListId::RingStyles, 0),
+            Act::Pick(ListId::ScrollModes, 0),
+            Act::Pick(ListId::ScrollEdges, 0),
         ];
         for (i, a) in acts.iter().enumerate() {
             for b in acts.iter().skip(i + 1) {
@@ -4341,6 +6056,11 @@ mod tests {
             ListId::Sounds,
             ListId::Borders,
             ListId::Backgrounds,
+            ListId::Severities,
+            ListId::Corners,
+            ListId::RingStyles,
+            ListId::ScrollModes,
+            ListId::ScrollEdges,
         ] {
             for i in 0..s.names(list).len() {
                 let name = s.names(list)[i].clone();
@@ -4350,6 +6070,11 @@ mod tests {
                     ListId::Sounds => s.current_sounds = Some(name),
                     ListId::Borders => s.current_border = Some(name),
                     ListId::Backgrounds => s.current_background = Some(name),
+                    ListId::Severities => s.current_severity = Some(name),
+                    ListId::Corners => s.current_corner = Some(name),
+                    ListId::RingStyles => s.current_ring_style = Some(name),
+                    ListId::ScrollModes => s.current_scroll_mode = Some(name),
+                    ListId::ScrollEdges => s.current_scroll_edge = Some(name),
                 }
                 assert_eq!(
                     s.current_row(list),
@@ -4367,6 +6092,11 @@ mod tests {
                 ListId::Sounds => s.current_sounds = Some("not installed".into()),
                 ListId::Borders => s.current_border = Some("not installed".into()),
                 ListId::Backgrounds => s.current_background = Some("not installed".into()),
+                ListId::Severities => s.current_severity = Some("not installed".into()),
+                ListId::Corners => s.current_corner = Some("not installed".into()),
+                ListId::RingStyles => s.current_ring_style = Some("not installed".into()),
+                ListId::ScrollModes => s.current_scroll_mode = Some("not installed".into()),
+                ListId::ScrollEdges => s.current_scroll_edge = Some("not installed".into()),
             }
             assert_eq!(
                 s.current_row(list),
@@ -4760,10 +6490,23 @@ mod tests {
         assert!(is_track(Act::RowsTrack));
         assert!(is_track(Act::PadTrack));
         assert!(is_track(Act::SizeTrack(Sect::Term)));
+        // The whole-theme sections' knobs are sliders like any other —
+        // one witness per section shape, arrows not Enter.
+        assert!(is_track(Act::EditorTrack(Knob::AccentB)));
+        assert!(is_track(Act::EditorTrack(Knob::SurfHue)));
+        assert!(is_track(Act::EditorTrack(Knob::SevH)));
+        assert!(is_track(Act::EditorTrack(Knob::CornerSeg)));
+        assert!(is_track(Act::EditorTrack(Knob::UnfocusedDim)));
+        assert!(is_track(Act::EditorTrack(Knob::MenuEdgeW)));
+        assert!(is_track(Act::EditorTrack(Knob::TipTextH)));
+        assert!(is_track(Act::EditorTrack(Knob::BarTrackH)));
         assert!(!is_track(Act::EditGrid));
         assert!(!is_track(Act::ToggleSnap));
         assert!(!is_track(Act::FamilyBtn(Sect::Ui)));
         assert!(!is_track(Act::BoardGo((1, 0))));
+        // The switches answer Enter, never arrows.
+        assert!(!is_track(Act::EditorFlip(Flip::Ring)));
+        assert!(!is_track(Act::ListBtn(ListId::Severities)));
     }
 
     /// [`page`] indexes [`PAGES`] by the view's discriminant, so the
@@ -4833,6 +6576,25 @@ mod tests {
         s.current_look = Some("one".to_string());
         s.boards = vec![BoardThumb { id: (0, 0), current: true, panels: Vec::new() }];
         s
+    }
+
+    /// The editor page with every `Row::when` condition set at once —
+    /// FROSTED for the background's knobs, a role for the severity
+    /// sliders, a cut for the shape's, the ring on, dashed and haloed,
+    /// the bar fading over a drawn groove. What the reachability sweep
+    /// and the group test both mean by "everything on screen".
+    fn editor_ajar(s: &mut Settings) {
+        s.current_background = Some("FROSTED GLASS".to_string());
+        s.current_severity = Some("OK".to_string());
+        s.surface_own_hue = true;
+        s.current_corner = Some("ROUND".to_string());
+        s.ring_on = true;
+        s.current_ring_style = Some("DASHED".to_string());
+        s.ring_halo = true;
+        s.current_scroll_mode = Some("INSET".to_string());
+        s.current_scroll_edge = Some("RIGHT".to_string());
+        s.bar_auto_hide = true;
+        s.bar_track = true;
     }
 
     /// A drawing context at one window height and one interface scale:
@@ -4950,6 +6712,102 @@ mod tests {
             Some("NEON"),
             "the pick did not set the border kind"
         );
+    }
+
+    /// The whole-theme sections feed the ONE builder — with the page in
+    /// its everything-on state, every group of the model answers in the
+    /// edit set with at least one of its tokens, so the preview and SAVE
+    /// get all of them for free. Severity is the deliberate exception
+    /// and the second half pins it: an untouched role is NOT written,
+    /// a touched one is, and only it.
+    #[test]
+    fn the_editor_edits_carry_every_new_group_and_severity_only_touched() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = furnished();
+        editor_ajar(&mut s);
+        let edits = s.editor_edits();
+        let has = |t: &str| edits.iter().any(|e| e.token == t);
+        for token in [
+            // one witness per group, each a token with a named reader on
+            // the model's ALIVE list
+            "palette.accent",
+            "surface.hue",
+            "surface.lift",
+            "text.lift",
+            "corner.mode",
+            "corner.segments",
+            "stroke.hair",
+            "focus.ring.enabled",
+            "focus.ring.dash",
+            "glow.focus_ring.enabled",
+            "focus.unfocused_dim",
+            "component.menu.fill",
+            "menu.border",
+            "component.tooltip.fill",
+            "tooltip.border",
+            "scrollbar.mode",
+            "scrollbar.w",
+            "scrollbar.fade_ms",
+            "scrollbar.track",
+            "component.scrollbar.track",
+        ] {
+            assert!(has(token), "the edit set carries no {token}");
+        }
+        // OWN HUE writes degrees; the switch off restores the reference,
+        // or a later accent drag stops moving the surfaces.
+        let hue_of = |v: &Vec<nacelle::theme::edit::Edit>| {
+            v.iter().find(|e| e.token == "surface.hue").unwrap().value.clone()
+        };
+        assert!(!hue_of(&edits).starts_with('@'), "OWN HUE wrote a reference");
+        s.surface_own_hue = false;
+        assert_eq!(hue_of(&s.editor_edits()), "@hue.accent");
+        // No slider moved, so no severity author is in the set at all.
+        assert!(
+            !edits.iter().any(|e| e.token.starts_with("severity.")),
+            "an untouched severity role was written"
+        );
+        // One slider on one role: exactly that author joins.
+        s.current_severity = Some("CRITICAL".to_string());
+        s.set_severity(0, 80);
+        let edits = s.editor_edits();
+        assert!(
+            edits.iter().any(|e| e.token == "severity.critical.text"),
+            "the touched role's author is missing"
+        );
+        assert_eq!(
+            edits.iter().filter(|e| e.token.starts_with("severity.")).count(),
+            1,
+            "a role nobody touched rode along with the touched one"
+        );
+    }
+
+    /// The slider unit maps, both directions — a value must survive
+    /// seed -> slider -> file, or a theme saved and reopened creeps a
+    /// notch per sitting. The walls are the MODEL's clamps.
+    #[test]
+    fn the_editor_slider_maps_survive_the_round_trip() {
+        // The symmetric spans: 50 is exactly zero, the ends the walls.
+        for (span, wall) in [(0.09f32, 0.09f32), (0.10, 0.10)] {
+            assert_eq!(span_back(0.0, span), 50);
+            assert!((span_of(50, span)).abs() < 1e-6);
+            assert!((span_of(0, span) + wall).abs() < 1e-6);
+            assert!((span_of(100, span) - wall).abs() < 1e-6);
+            for v in [0u32, 13, 50, 77, 100] {
+                assert_eq!(span_back(span_of(v, span), span), v);
+            }
+        }
+        // The 0..hi scales — radii, kerf, widths, alpha, fade.
+        for hi in [4.0f32, 2.0, 1.0, 2000.0] {
+            for v in [0u32, 25, 50, 99, 100] {
+                assert_eq!(scale_back(scale_of(v, hi), hi), v);
+            }
+        }
+        // The lo..hi band — the scrollbar's 0.5u..4u.
+        assert!((band_of(0, 0.5, 4.0) - 0.5).abs() < 1e-6);
+        assert!((band_of(100, 0.5, 4.0) - 4.0).abs() < 1e-6);
+        for v in [0u32, 20, 43, 100] {
+            assert_eq!(band_back(band_of(v, 0.5, 4.0), 0.5, 4.0), v);
+        }
     }
 
     /// Every window height the program is built for. A page's geometry
@@ -5286,17 +7144,38 @@ mod tests {
             let mut chained: Vec<Act> = Vec::new();
             let mut reference = furnished();
             reference.view = p.view;
-            reference.current_background = Some("FROSTED GLASS".to_string());
-            // Five stops instead of two: the editor page grew past what a
-            // top-and-bottom sweep can see at 1080 lines, and a control
-            // that only ever stands mid-page was reported unreachable by
-            // the sweep rather than by the window.
-            for stop in [0.0, 300.0, 600.0, 900.0, f32::MAX / 4.0] {
+            editor_ajar(&mut reference);
+            // The five hand-written stops died with the whole-theme
+            // sections: the editor page is many viewports long now, and a
+            // fixed list would go quietly stale on the NEXT section too —
+            // reporting a mid-page control unreachable when only the sweep
+            // was. So the stops are walked from the page's own length, a
+            // half-viewport apart (rows are far shorter than half a
+            // viewport, so consecutive stops overlap), and the far end is
+            // still the clamp's own MAX/4.
+            let stops: Vec<f32> = {
+                let mut dl = nacelle::draw::DrawList::new();
+                let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+                let content = content_rect(modal_rect(ctx.w, ctx.h));
+                let m = Metrics::of(&ctx, content);
+                let view = reference.body_box(p, m, content);
+                let length = reference.flow_h(p, m, content);
+                let stride = (view.h * 0.5).max(1.0);
+                let mut out = vec![0.0];
+                let mut at = stride;
+                while at < length {
+                    out.push(at);
+                    at += stride;
+                }
+                out.push(f32::MAX / 4.0);
+                out
+            };
+            for stop in stops {
                 let mut s = furnished();
                 s.view = p.view;
-                // FROSTED shows every conditional row of the editor page
-                // at once, so the reachability sweep covers them as well.
-                s.current_background = Some("FROSTED GLASS".to_string());
+                // Every condition set at once, so the reachability sweep
+                // covers the conditional rows as well.
+                editor_ajar(&mut s);
                 if stop > 0.0 {
                     s.scroll.set_offset(stop);
                 }
