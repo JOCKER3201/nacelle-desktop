@@ -168,6 +168,7 @@ mod tests {
     struct Text {
         x: f32,
         y: f32,
+        font: u8,
         px: f32,
         tracking: f32,
         color: Color,
@@ -198,9 +199,10 @@ mod tests {
             .cmds()
             .iter()
             .filter_map(|c| match c {
-                DrawCmd::Text { at, px, tracking, color, text, .. } => Some(Text {
+                DrawCmd::Text { at, font, px, tracking, color, text, .. } => Some(Text {
                     x: at[0],
                     y: at[1],
+                    font: *font,
                     px: *px,
                     tracking: *tracking,
                     color: *color,
@@ -358,6 +360,7 @@ mod tests {
         let body_px = px("type.body.size").max(px("type.body.min_px"));
         let hero_px = px("type.display.hero.size").max(px("type.display.hero.min_px"));
         let caption_px = px("type.caption.size").max(px("type.caption.min_px"));
+        let spare0_px = px("type.spare0.size").max(px("type.spare0.min_px"));
 
         install("[boot]\nline_role = display.hero\nlogo_role = caption\nsub_role = body");
         let rebound_line = frame(&mut fonts, during_log()).1.remove(0);
@@ -366,14 +369,14 @@ mod tests {
 
         assert_eq!(line.px, data_px, "the log line is not its bound role's size");
         assert_eq!(logo.px, hero_px, "the logo is not its bound role's size");
-        assert_eq!(sub.px, caption_px, "the sub-line is not its bound role's size");
+        assert_eq!(sub.px, spare0_px, "the sub-line is not its bound role's size");
         assert!(
             (logo.tracking - logo.px * hero_track).abs() < 0.01,
             "the logo's tracking is not display.hero's 0.040em"
         );
         assert!(
-            (sub.tracking - sub.px * px("type.caption.tracking")).abs() < 0.01,
-            "the sub-line's tracking is not caption's"
+            (sub.tracking - sub.px * px("type.spare0.tracking")).abs() < 0.01,
+            "the sub-line's tracking is not its own role's"
         );
         assert_eq!(rebound_line.px, hero_px, "boot.line_role did not move the log's size");
         assert_eq!(rebound_logo[0].px, caption_px, "boot.logo_role did not move the logo's size");
@@ -392,19 +395,19 @@ mod tests {
         let th = theme::resolved();
         let data = th.color(theme::id("type.data.fg").expect("the master declares it"));
         let hero = th.color(theme::id("type.display.hero.fg").expect("the master declares it"));
-        let caption = th.color(theme::id("type.caption.fg").expect("the master declares it"));
+        let caption = th.color(theme::id("type.spare0.fg").expect("the master declares it"));
 
-        install("[type]\ncaption.fg = @severity.critical.text");
+        install("[type]\nspare0.fg = @severity.critical.text");
         let repainted = frame(&mut fonts, during_logo()).1;
         let wanted =
-            theme::resolved().color(theme::id("type.caption.fg").expect("the master declares it"));
+            theme::resolved().color(theme::id("type.spare0.fg").expect("the master declares it"));
         master();
 
         assert_eq!(line.color, data);
         assert_eq!(logo_frame[0].color, hero);
         assert_eq!(logo_frame[1].color, caption);
         assert_ne!(hero, caption, "two of the three texts share one ink");
-        assert_eq!(repainted[1].color, wanted, "type.caption.fg did not repaint the sub-line");
+        assert_eq!(repainted[1].color, wanted, "type.spare0.fg did not repaint the sub-line");
     }
 
     /// `boot.logo_y_frac` puts the logo down the screen and
@@ -431,6 +434,65 @@ mod tests {
         assert!(
             (moved[1].y - moved[0].y - gap2).abs() < 0.01,
             "the sub-line ignored boot.sub_gap"
+        );
+    }
+
+    /// The two texts do not touch — measured in the face they are
+    /// actually drawn in, not in the size the theme names.
+    ///
+    /// `y` in a draw command is the TOP of the line box, and the
+    /// baseline sits one ascent below it, so a gap written as a
+    /// fraction of the logo's size says nothing about whether the ink
+    /// clears. For a long time `boot.sub_gap` was 0.4x of a 31 px logo:
+    /// the sub-line's baseline landed ABOVE the logo's, and the owner
+    /// saw one word printed through the other. The rule is stated here
+    /// in the only terms that can settle it — the logo's line box must
+    /// end before the sub-line's begins.
+    #[test]
+    fn the_sub_line_clears_the_logo_it_hangs_under() {
+        let _lock = crate::widgets::theme_test_lock();
+        master();
+        let mut fonts = FontSystem::new();
+        let texts = frame(&mut fonts, during_logo()).1;
+        let (logo, sub) = (&texts[0], &texts[1]);
+        let (_, logo_line_h) = fonts.line_metrics(logo.font, logo.px);
+
+        assert!(
+            sub.y >= logo.y + logo_line_h,
+            "the sub-line starts at {} and the logo's line box ends at {} — they overlap",
+            sub.y,
+            logo.y + logo_line_h
+        );
+        assert!(
+            logo.px > sub.px,
+            "the logo ({} px) is not larger than the line under it ({} px)",
+            logo.px,
+            sub.px
+        );
+    }
+
+    /// The PAIR sits in the middle of the screen — the owner's call,
+    /// against centring the logo alone and letting the sub-line hang
+    /// below the middle. Nothing in the theme centres anything: the
+    /// pair lands there because `logo_y_frac`, `sub_gap` and the two
+    /// sizes agree, so this test is what keeps that agreement true
+    /// when any one of the four moves.
+    #[test]
+    fn the_pair_is_centred_on_the_screen() {
+        let _lock = crate::widgets::theme_test_lock();
+        master();
+        let mut fonts = FontSystem::new();
+        let texts = frame(&mut fonts, during_logo()).1;
+        let (logo, sub) = (&texts[0], &texts[1]);
+        let (_, sub_line_h) = fonts.line_metrics(sub.font, sub.px);
+
+        // Top of the logo's line box to the bottom of the sub-line's.
+        let middle = (logo.y + sub.y + sub_line_h) / 2.0;
+
+        assert!(
+            (middle - H / 2.0).abs() < H * 0.02,
+            "the pair's middle is at {middle} and the screen's at {}",
+            H / 2.0
         );
     }
 }
