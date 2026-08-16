@@ -657,7 +657,7 @@ fn is_track(act: Act) -> bool {
 fn slider_of(act: Act) -> Option<&'static Ctrl> {
     PAGES
         .iter()
-        .flat_map(|p| p.rows.iter())
+        .flat_map(page_rows)
         .map(|r| &r.ctrl)
         .find(|c| matches!(c, Ctrl::Slider { act: a, .. } if *a == act))
 }
@@ -939,12 +939,6 @@ enum BtnKind {
     Listed,
     /// The full content width: the FONT view's dropdown anchors.
     Wide,
-    /// Listed, but pinned to the bottom of the content box instead of
-    /// flowing — LOOK AND FEEL RESET. The rows above it used to be able
-    /// to reach it, and the later of two targets on one pixel won the
-    /// click (P12); the flow is now held to [`Settings::body_box`],
-    /// which stops short of whatever a page pins.
-    Footer,
 }
 
 /// How a slider writes its value out. The two percent spellings differ
@@ -1109,6 +1103,17 @@ enum Ctrl {
     /// `selected` rung.
     Drop { list: ListId },
     Button { label: Text, kind: BtnKind, act: Act },
+    /// Several buttons in ONE row, centred together, `settings.bar_gap`
+    /// apart: the editor's SAVE · SAVE AS · CANCEL. Each plate is as
+    /// wide as its own label plus the theme's `button.pad_x`, never
+    /// narrower than `button.min_w` — no width of its own is written
+    /// here.
+    ///
+    /// Drawn by `nacelle::object::button` like every other button in
+    /// the window; this row only says where each plate goes.
+    /// Registration runs left to right, which is the order the acts are
+    /// written in.
+    Bar { items: &'static [(Text, Act)] },
     /// A module header inside a page: the FONT view's TERMINAL and
     /// INTERFACE separators.
     Section { title: &'static str },
@@ -1121,16 +1126,6 @@ enum Ctrl {
     /// else: `h` is the vertical reserve it takes out of the content
     /// box, `draw` fills it.
     Custom { h: fn(Metrics, Rect) -> f32, draw: fn(&mut Settings, &mut Ctx, Rect) },
-}
-
-impl Ctrl {
-    /// Whether the row sits at a fixed place instead of flowing.
-    fn pinned(&self) -> bool {
-        matches!(
-            self,
-            Ctrl::Button { kind: BtnKind::Footer, .. } | Ctrl::Hint { .. }
-        )
-    }
 }
 
 /// A control plus the two things the page says ABOUT it rather than
@@ -1237,6 +1232,106 @@ enum Chrome {
     Back,
 }
 
+/// One band of a page. A page is a sequence of bands; a band flows
+/// downwards the way rows always have, and inside itself may set its
+/// rows in columns beside one another instead of one under the other.
+///
+/// `Row` and `Ctrl` are untouched by this. What changed is only what
+/// the walker walks — which is the whole reason the grammar is worth
+/// having: the pages keep describing themselves in the same words.
+///
+/// The tiled band the first draft carried is deliberately NOT here. The
+/// owner replaced the tiled MENU page with a permanent navigation rail
+/// (the specification's annex, 2026-08-16), so a `Grid` variant would
+/// be a shape nothing can ever build.
+#[derive(Clone, Copy)]
+enum Zone {
+    /// A full-width band: what every page was before there were bands.
+    Flow { cols: Cols, rows: &'static [Row] },
+    /// Columns of EQUAL width beside one another, `settings.col_gap`
+    /// between them. Registration and drawing run COLUMN BY COLUMN —
+    /// the whole of the first, then the whole of the second — so the
+    /// Tab order is the description's and never the geometry's.
+    ///
+    /// Nothing builds one yet: the pages all stayed one `Flow` in this
+    /// step, and the picture is unchanged by construction. The fold to
+    /// a single column under `settings.col_min_w` is the next mechanism
+    /// (M4) and is not here either.
+    #[allow(dead_code)]
+    Cols { columns: &'static [ZCol] },
+    /// A band pinned to the bottom of the content box. This is where
+    /// `Ctrl::pinned()` went: standing still is a property of the BAND
+    /// and not of the control, so the same button can flow on one page
+    /// and stand under another without a kind of its own.
+    Pinned { cols: Cols, rows: &'static [Row] },
+}
+
+/// One column of a columned band, with its OWN label/value measurement:
+/// the sliders on the left do not inherit the width of the labels on
+/// the right ("the widest label IN THE BLOCK", `rhythm.label_col`).
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct ZCol {
+    cols: Cols,
+    rows: &'static [Row],
+}
+
+/// The rows of one band, in the order it registers them: column by
+/// column where there are columns.
+fn zone_rows(zone: &'static Zone) -> Box<dyn Iterator<Item = &'static Row>> {
+    match zone {
+        Zone::Flow { rows, .. } | Zone::Pinned { rows, .. } => Box::new(rows.iter()),
+        Zone::Cols { columns } => Box::new(columns.iter().flat_map(|c| c.rows.iter())),
+    }
+}
+
+/// Every row a page describes, in registration order.
+fn page_rows(page: &'static Page) -> impl Iterator<Item = &'static Row> {
+    page.zones.iter().flat_map(zone_rows)
+}
+
+/// The gutter between two columns of a band.
+fn col_gap() -> f32 {
+    static COL_GAP: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&COL_GAP, "settings.col_gap"))
+}
+
+/// The break between two bands. Said once, because the flow's height
+/// and the flow's drawing have to place the bands on the same pixel.
+fn zone_gap() -> f32 {
+    static ZONE_GAP: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&ZONE_GAP, "settings.zone_gap"))
+}
+
+/// The boxes a band lays its rows in, in registration order: one for a
+/// flow, one per column for a columned band. Only x and width differ
+/// between them — the y and the height stay the page's, so a row that
+/// reserves part of the CONTENT box (`Ctrl::Custom`) measures the same
+/// box whichever band it stands in.
+///
+/// The walker, the height and the tests all ask this one function, so
+/// the split is stated once and cannot drift.
+fn zone_regions(zone: &'static Zone, box_: Rect) -> Vec<(Rect, Cols, &'static [Row])> {
+    match zone {
+        Zone::Flow { cols, rows } | Zone::Pinned { cols, rows } => {
+            vec![(box_, *cols, *rows)]
+        }
+        Zone::Cols { columns } => {
+            let gap = col_gap();
+            let n = columns.len().max(1) as f32;
+            let w = ((box_.w - gap * (n - 1.0)) / n).max(0.0);
+            columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let x = box_.x + i as f32 * (w + gap);
+                    (Rect::new(x, box_.y, w, box_.h), c.cols, c.rows)
+                })
+                .collect()
+        }
+    }
+}
+
 /// One view of the window.
 struct Page {
     view: View,
@@ -1244,8 +1339,7 @@ struct Page {
     chrome: Chrome,
     /// The space between the chrome row and the first flowed row.
     lead: Gap,
-    cols: Cols,
-    rows: &'static [Row],
+    zones: &'static [Zone],
 }
 
 // --------------------------------------------------------------- the pages
@@ -1317,12 +1411,12 @@ static MENU_ROWS: [Row; 6] = [
 /// set and the loudness of the set are one sitting, and a reader who
 /// has just chosen a set is the reader who wants the dial.
 ///
-/// The footer is the page's own undo, and it is pinned rather than
-/// flowed so that the five rows above it are the page the decision
-/// describes. It opens a confirmation and nothing else: what stands
-/// behind it (decision §2a) is every setting this page and its doors
-/// write, and one press may not be able to spend all of them.
-static LOOKFEEL_ROWS: [Row; 6] = [
+/// The footer is the page's own undo, and it stands in a pinned BAND
+/// rather than flowing, so that the five rows above it are the page the
+/// decision describes. It opens a confirmation and nothing else: what
+/// stands behind it (decision §2a) is every setting this page and its
+/// doors write, and one press may not be able to spend all of them.
+static LOOKFEEL_ROWS: [Row; 5] = [
     row(Ctrl::Drop { list: ListId::Looks }),
     row(Ctrl::Drop { list: ListId::Layauts }),
     row(Ctrl::Drop { list: ListId::Sounds }),
@@ -1336,12 +1430,17 @@ static LOOKFEEL_ROWS: [Row; 6] = [
         kind: BtnKind::Wide,
         act: Act::OpenFont,
     }),
-    row(Ctrl::Button {
-        label: Text::Fixed("LOOK AND FEEL RESET"),
-        kind: BtnKind::Footer,
-        act: Act::LookFeelReset,
-    }),
 ];
+
+/// The page's undo, in a band of its own. `BtnKind::Footer` used to say
+/// BOTH "centred at `settings.list_w_frac`" and "against the bottom
+/// edge"; the second half is the band's word now, so the button is an
+/// ordinary `Listed` one standing where the band stands.
+static LOOKFEEL_FOOTER: [Row; 1] = [row(Ctrl::Button {
+    label: Text::Fixed("LOOK AND FEEL RESET"),
+    kind: BtnKind::Listed,
+    act: Act::LookFeelReset,
+})];
 
 /// LOOK AND FEEL RESET's confirmation (decision §2a).
 ///
@@ -1413,7 +1512,7 @@ static LOOKFEEL_RESET_ROWS: [Row; 9] = [
 /// ONLY for a number the model takes, and the model takes only tokens
 /// with a named reader in Rust — the iron rule, held on both sides of
 /// the seam.
-static EDITOR_ROWS: [Row; 89] = [
+static EDITOR_ROWS: [Row; 86] = [
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
     row(Ctrl::Slider {
@@ -2233,18 +2332,23 @@ static EDITOR_ROWS: [Row; 89] = [
         },
         bar_tracked,
     ),
-    row(Ctrl::Button { label: Text::Fixed("SAVE"), kind: BtnKind::Listed, act: Act::EditorSave }),
-    row(Ctrl::Button {
-        label: Text::Fixed("SAVE AS"),
-        kind: BtnKind::Listed,
-        act: Act::EditorSaveAs,
-    }),
-    row(Ctrl::Button {
-        label: Text::Fixed("CANCEL"),
-        kind: BtnKind::Listed,
-        act: Act::EditorCancel,
-    }),
 ];
+
+/// The editor's three verbs. They were three centred rows at the far
+/// end of a page that is many viewports long, so reaching CANCEL meant
+/// scrolling past every slider in the theme; they are one pinned row
+/// now, which is what the pinned band and [`Ctrl::Bar`] exist for.
+///
+/// The order is the order they are written in, and it is also the Tab
+/// order: SAVE first because it is what the page is for, CANCEL last
+/// because it is the way out.
+static EDITOR_BAR_ITEMS: [(Text, Act); 3] = [
+    (Text::Fixed("SAVE"), Act::EditorSave),
+    (Text::Fixed("SAVE AS"), Act::EditorSaveAs),
+    (Text::Fixed("CANCEL"), Act::EditorCancel),
+];
+
+static EDITOR_BAR: [Row; 1] = [row(Ctrl::Bar { items: &EDITOR_BAR_ITEMS })];
 
 /// The FONT view's two sections. The section header takes no gap under
 /// it: the size slider sits directly against the separator.
@@ -2379,12 +2483,16 @@ static SOUND_ROWS: [Row; 4] = [
     row(Ctrl::Note { text: Text::Of(sound_set_note) }),
 ];
 
-static BOARDS_ROWS: [Row; 2] = [
-    row(Ctrl::Custom { h: boards_h, draw: Settings::draw_boards }),
-    row(Ctrl::Hint {
-        text: Text::Fixed("HOLD THE LEFT BUTTON AND DRAG TO SWITCH BOARDS"),
-    }),
-];
+static BOARDS_ROWS: [Row; 1] =
+    [row(Ctrl::Custom { h: boards_h, draw: Settings::draw_boards })];
+
+/// The gesture the cross does not say by itself, under it. BOARDS was
+/// already a mixed layout — a reserve plus a line held to the bottom
+/// edge — and it is the page the rest of the window is now shaped like,
+/// not the other way round.
+static BOARDS_HINT: [Row; 1] = [row(Ctrl::Hint {
+    text: Text::Fixed("HOLD THE LEFT BUTTON AND DRAG TO SWITCH BOARDS"),
+})];
 
 /// Swapchain depth, the colour space asked of the compositor, and the
 /// optional grading LUT and ICC profile.
@@ -2522,6 +2630,59 @@ fn addon_report(installed: bool, problems: &[nacelle::settings::Problem]) -> Vec
     out
 }
 
+// The bands of each page. Every page is ONE flow in this step, which is
+// what keeps the picture exactly what it was: a page of a single `Flow`
+// band lays its rows out with the arithmetic it always had, and no gap
+// between bands can appear where there is only one. The two pages that
+// held something against the bottom edge, and the editor's new action
+// bar, are the three that carry a second, pinned band.
+
+static MENU_ZONES: [Zone; 1] = [Zone::Flow { cols: Cols::None, rows: &MENU_ROWS }];
+
+static LOOKFEEL_ZONES: [Zone; 2] = [
+    Zone::Flow { cols: Cols::None, rows: &LOOKFEEL_ROWS },
+    Zone::Pinned { cols: Cols::None, rows: &LOOKFEEL_FOOTER },
+];
+
+static LOOKFEEL_RESET_ZONES: [Zone; 1] =
+    [Zone::Flow { cols: Cols::None, rows: &LOOKFEEL_RESET_ROWS }];
+
+static EDITOR_ZONES: [Zone; 2] = [
+    Zone::Flow { cols: Cols::None, rows: &EDITOR_ROWS },
+    Zone::Pinned { cols: Cols::None, rows: &EDITOR_BAR },
+];
+
+static FONT_ZONES: [Zone; 1] = [Zone::Flow {
+    cols: Cols::Measured { label: "SIZE", value: "200%" },
+    rows: &FONT_ROWS,
+}];
+
+static GRID_ZONES: [Zone; 1] = [Zone::Flow {
+    // Measured against the widest of the three labels rather than each
+    // one's own, so all three tracks line up.
+    cols: Cols::Measured { label: "COLUMNS", value: "100 PX" },
+    rows: &GRID_ROWS,
+}];
+
+static SOUND_ZONES: [Zone; 1] = [Zone::Flow {
+    cols: Cols::Measured { label: "VOLUME", value: "100 %" },
+    rows: &SOUND_ROWS,
+}];
+
+static BOARDS_ZONES: [Zone; 2] = [
+    Zone::Flow { cols: Cols::None, rows: &BOARDS_ROWS },
+    Zone::Pinned { cols: Cols::None, rows: &BOARDS_HINT },
+];
+
+static COLOR_ZONES: [Zone; 1] = [Zone::Flow { cols: Cols::Frac, rows: &COLOR_ROWS }];
+
+static BLUR_ZONES: [Zone; 1] = [Zone::Flow {
+    cols: Cols::Measured { label: "OPACITY", value: "100 %" },
+    rows: &BLUR_ROWS,
+}];
+
+static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { cols: Cols::None, rows: &ADDONS_ROWS }];
+
 /// The whole window. Indexed by [`View`], which `pages_are_in_view_order`
 /// keeps true.
 static PAGES: [Page; 11] = [
@@ -2530,82 +2691,70 @@ static PAGES: [Page; 11] = [
         title: "SETTINGS",
         chrome: Chrome::Close,
         lead: Gap::Row,
-        cols: Cols::None,
-        rows: &MENU_ROWS,
+        zones: &MENU_ZONES,
     },
     Page {
         view: View::LookFeel,
         title: "SETTINGS \u{2014} LOOK AND FEEL",
         chrome: Chrome::Back,
         lead: Gap::Row,
-        cols: Cols::None,
-        rows: &LOOKFEEL_ROWS,
+        zones: &LOOKFEEL_ZONES,
     },
     Page {
         view: View::LookFeelReset,
         title: "SETTINGS \u{2014} LOOK AND FEEL RESET",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::None,
-        rows: &LOOKFEEL_RESET_ROWS,
+        zones: &LOOKFEEL_RESET_ZONES,
     },
     Page {
         view: View::ThemeEditor,
         title: "SETTINGS \u{2014} THEMES EDITOR",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::None,
-        rows: &EDITOR_ROWS,
+        zones: &EDITOR_ZONES,
     },
     Page {
         view: View::Font,
         title: "SETTINGS \u{2014} FONT",
         chrome: Chrome::Back,
         lead: Gap::Row,
-        cols: Cols::Measured { label: "SIZE", value: "200%" },
-        rows: &FONT_ROWS,
+        zones: &FONT_ZONES,
     },
     Page {
         view: View::Grid,
         title: "SETTINGS \u{2014} GRID",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        // Measured against the widest of the three labels rather than
-        // each one's own, so all three tracks line up.
-        cols: Cols::Measured { label: "COLUMNS", value: "100 PX" },
-        rows: &GRID_ROWS,
+        zones: &GRID_ZONES,
     },
     Page {
         view: View::SoundLevels,
         title: "SETTINGS \u{2014} SOUND LEVELS",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::Measured { label: "VOLUME", value: "100 %" },
-        rows: &SOUND_ROWS,
+        zones: &SOUND_ZONES,
     },
     Page {
         view: View::Boards,
         title: "SETTINGS \u{2014} BOARDS",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::None,
-        rows: &BOARDS_ROWS,
+        zones: &BOARDS_ZONES,
     },
     Page {
         view: View::Color,
         title: "SETTINGS \u{2014} COLOR",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::Frac,
-        rows: &COLOR_ROWS,
+        zones: &COLOR_ZONES,
     },
     Page {
         view: View::Blur,
         title: "SETTINGS \u{2014} BLUR",
         chrome: Chrome::Back,
         lead: Gap::Section,
-        cols: Cols::Measured { label: "OPACITY", value: "100 %" },
-        rows: &BLUR_ROWS,
+        zones: &BLUR_ZONES,
     },
     // `Gap::Row` and not `Gap::Section`: `addon_report_h` counts this
     // lead, and the two have to be the same decision or the report
@@ -2615,8 +2764,7 @@ static PAGES: [Page; 11] = [
         title: "SETTINGS \u{2014} ADDONS",
         chrome: Chrome::Back,
         lead: Gap::Row,
-        cols: Cols::None,
-        rows: &ADDONS_ROWS,
+        zones: &ADDONS_ZONES,
     },
 ];
 
@@ -4683,41 +4831,80 @@ impl Settings {
     /// nothing outside it is a target, so a scrolled row cannot be
     /// pressed through the chrome painted over it; and the flow stops
     /// short of a pinned footer instead of sharing pixels with it (P12).
-    fn body_box(&self, page: &Page, m: Metrics, content: Rect) -> Rect {
+    fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
         let top = body_top(page, m, content);
         let mut bottom = content.bottom();
-        for row in page.rows {
-            if row.ctrl.pinned() {
-                bottom -= m.gap + self.row_h(&row.ctrl, m, content);
+        for zone in page.zones {
+            if matches!(zone, Zone::Pinned { .. }) {
+                bottom -= m.gap + self.zone_h(zone, m, content);
             }
         }
         Rect::new(content.x, top, content.w, (bottom - top).max(0.0))
     }
 
-    /// How tall the flowed rows stand together — the scroll's content
-    /// length. The last row's trailing gap is not content: a page ends
-    /// at its last row, not at the space it asked for after it.
-    fn flow_h(&self, page: &Page, m: Metrics, content: Rect) -> f32 {
+    /// How tall one run of rows stands: every page's own arithmetic
+    /// since there were pages, asked of a band's rows instead of a
+    /// page's. The last row's trailing gap is not content.
+    fn rows_h(&self, rows: &'static [Row], m: Metrics, region: Rect) -> f32 {
         let mut h = 0.0;
         let mut trailing = 0.0;
-        for row in page.rows {
-            if row.ctrl.pinned() || !(row.when)(self) {
+        for row in rows {
+            if !(row.when)(self) {
                 continue;
             }
-            h += self.row_h(&row.ctrl, m, content) + m.space(row.after);
+            h += self.row_h(&row.ctrl, m, region) + m.space(row.after);
             trailing = m.space(row.after);
         }
         (h - trailing).max(0.0)
     }
 
-    /// The one walker: every row of the page, placed and drawn in the
-    /// order the page lists them. Nothing here knows which page it is
-    /// walking — that is the whole point of the description.
+    /// How tall a band stands: its rows, or — where it has columns — the
+    /// TALLEST of its columns. A columned band is as deep as the deepest
+    /// thing in it, which is why a band whose right column grows with
+    /// `Row::when` grows with it.
+    fn zone_h(&self, zone: &'static Zone, m: Metrics, box_: Rect) -> f32 {
+        zone_regions(zone, box_)
+            .into_iter()
+            .map(|(region, _, rows)| self.rows_h(rows, m, region))
+            .fold(0.0, f32::max)
+    }
+
+    /// How tall the flowed bands stand together — the scroll's content
+    /// length. `settings.zone_gap` between two bands, and nothing after
+    /// the last one: a page ends at its last row, not at the space it
+    /// asked for after it.
     ///
-    /// The flow runs inside [`Settings::body_box`] and under its clip;
-    /// the pinned rows are placed against the content box afterwards,
-    /// outside it, which is why the flow can no longer meet them.
-    fn draw_body(&mut self, ctx: &mut Ctx, page: &Page, m: Metrics, content: Rect) {
+    /// A band with nothing in it takes no break either. Every page is
+    /// one band today, so this arithmetic is exactly the one row walk it
+    /// replaces.
+    fn flow_h(&self, page: &'static Page, m: Metrics, content: Rect) -> f32 {
+        let mut h = 0.0;
+        for zone in page.zones {
+            if matches!(zone, Zone::Pinned { .. }) {
+                continue;
+            }
+            let zh = self.zone_h(zone, m, content);
+            if zh <= 0.0 {
+                continue;
+            }
+            if h > 0.0 {
+                h += zone_gap();
+            }
+            h += zh;
+        }
+        h
+    }
+
+    /// The one walker: every band of the page, and inside a band every
+    /// row, placed and drawn in the order the page lists them. Nothing
+    /// here knows which page it is walking — that is the whole point of
+    /// the description.
+    ///
+    /// The flowed bands run inside [`Settings::body_box`] and under its
+    /// clip; the pinned bands are placed against the content box
+    /// afterwards, outside it, which is why the flow can no longer meet
+    /// them.
+    fn draw_body(&mut self, ctx: &mut Ctx, page: &'static Page, m: Metrics, content: Rect) {
         // An inset bar takes its lane OUT of the rows' box, so it stands
         // BESIDE the controls instead of over them — the owner's ask, and
         // the master's `scrollbar.mode` decision. The lane is reserved at
@@ -4748,7 +4935,6 @@ impl Settings {
                 content.h,
             ),
         };
-        let (label_w, value_w) = self.columns(ctx, page, content);
         let view = self.body_box(page, m, content_full);
         let length = self.flow_h(page, m, content);
         // The offset, its clamp, its physics and its bar are the
@@ -4764,17 +4950,94 @@ impl Settings {
         ctx.dl.push_clip(view.x, view.y, view.w, view.h);
         self.clip = Some(view);
         let mut y = view.y - off;
-        for row in page.rows {
-            if row.ctrl.pinned() || !(row.when)(self) {
+        let mut started = false;
+        for zone in page.zones {
+            if matches!(zone, Zone::Pinned { .. }) {
                 continue;
             }
-            let h = self.row_h(&row.ctrl, m, content);
-            let band = Rect::new(content.x, y, content.w, h);
+            let zh = self.zone_h(zone, m, content);
+            if zh <= 0.0 {
+                continue;
+            }
+            if started {
+                y += zone_gap();
+            }
+            started = true;
+            self.draw_zone(ctx, zone, m, content, y, Some(view));
+            y += zh;
+        }
+        self.clip = None;
+        ctx.dl.pop_clip();
+
+        // The pinned bands stack up from the bottom edge, the last
+        // declared one lowest, with the same break between them that
+        // [`Settings::body_box`] reserved.
+        let mut anchor = content.bottom();
+        for zone in page.zones.iter().rev() {
+            if !matches!(zone, Zone::Pinned { .. }) {
+                continue;
+            }
+            let zh = self.zone_h(zone, m, content);
+            self.draw_zone(ctx, zone, m, content, anchor - zh, None);
+            anchor -= zh + m.gap;
+        }
+        self.draw_scrollbar(ctx, view, length);
+    }
+
+    /// One band, at the top edge it was given. A flow lays its rows in
+    /// the whole box; a columned band lays each column's rows in that
+    /// column's box, and every column starts at the same top edge.
+    ///
+    /// `cull` is the viewport a flowed band is held to; a pinned band
+    /// passes `None`, because it stands outside the clip and is always
+    /// on screen.
+    fn draw_zone(
+        &mut self,
+        ctx: &mut Ctx,
+        zone: &'static Zone,
+        m: Metrics,
+        box_: Rect,
+        top: f32,
+        cull: Option<Rect>,
+    ) {
+        for (region, cols, rows) in zone_regions(zone, box_) {
+            self.draw_rows(ctx, cols, rows, m, region, top, cull);
+        }
+    }
+
+    /// One run of rows, from `top` downwards inside `region`.
+    ///
+    /// `region` is what the rows measure and align against — its x and
+    /// width are the column's, its height the page's — and it is what
+    /// each row is handed as its content box, so a slider in the left
+    /// column ends at the left column's right edge and not at the page's.
+    fn draw_rows(
+        &mut self,
+        ctx: &mut Ctx,
+        cols: Cols,
+        rows: &'static [Row],
+        m: Metrics,
+        region: Rect,
+        top: f32,
+        cull: Option<Rect>,
+    ) {
+        // Measured for THIS region: the sliders of one column do not
+        // inherit the label width of the next (M3).
+        let (label_w, value_w) = self.columns(ctx, cols, region.w);
+        let mut y = top;
+        for row in rows {
+            if !(row.when)(self) {
+                continue;
+            }
+            let h = self.row_h(&row.ctrl, m, region);
+            let band = Rect::new(region.x, y, region.w, h);
             // A row wholly off the viewport is not drawn, and therefore
             // registers nothing: what the eye cannot see is not a
             // target and does not belong in the Tab order either.
-            if band.bottom() > view.y && band.y < view.bottom() {
-                let rc = RowCtx { content, band, label_w, value_w, m };
+            let on_screen =
+                cull.map_or(true, |v| band.bottom() > v.y && band.y < v.bottom());
+            if on_screen {
+                let rc = RowCtx { content: region, band, label_w, value_w, m };
                 if (row.enabled)(self) {
                     self.draw_row(ctx, &row.ctrl, rc);
                 } else {
@@ -4783,23 +5046,6 @@ impl Settings {
             }
             y += h + m.space(row.after);
         }
-        self.clip = None;
-        ctx.dl.pop_clip();
-
-        for row in page.rows {
-            if !row.ctrl.pinned() {
-                continue;
-            }
-            let h = self.row_h(&row.ctrl, m, content);
-            let band = Rect::new(content.x, content.bottom() - h, content.w, h);
-            let rc = RowCtx { content, band, label_w, value_w, m };
-            if (row.enabled)(self) {
-                self.draw_row(ctx, &row.ctrl, rc);
-            } else {
-                self.draw_disabled(ctx, &row.ctrl, rc);
-            }
-        }
-        self.draw_scrollbar(ctx, view, length);
     }
 
     /// Where the page is, when there is more of it than fits. Drawn
@@ -4836,16 +5082,20 @@ impl Settings {
         nacelle::view::paint::scrollbar(&mut CtxSurface::new(ctx), &geom, alpha, hovered, false);
     }
 
-    /// The page's label and value columns, in px.
-    fn columns(&self, ctx: &mut Ctx, page: &Page, content: Rect) -> (f32, f32) {
+    /// A REGION's label and value columns, in px.
+    ///
+    /// Asked once per band, and once per column of a columned band: the
+    /// widest label in the BLOCK, not on the page (`rhythm.label_col`).
+    /// `w` is the region's width, so a fraction is a fraction of the
+    /// column and not of the whole content box.
+    fn columns(&self, ctx: &mut Ctx, cols: Cols, w: f32) -> (f32, f32) {
         let th = theme::resolved();
-        match page.cols {
+        match cols {
             Cols::None => (0.0, 0.0),
             // rhythm.label_col = auto needs a measuring column primitive
             // before this fraction can go.
             Cols::Frac => (
-                content.w
-                    * th.px(tok(&LABEL_COL, "rhythm.label_col_frac")).clamp(0.0, 1.0),
+                w * th.px(tok(&LABEL_COL, "rhythm.label_col_frac")).clamp(0.0, 1.0),
                 0.0,
             ),
             Cols::Measured { label, value } => {
@@ -4873,7 +5123,8 @@ impl Settings {
             Ctrl::Slider { .. } => m.slider_h,
             Ctrl::Chips { .. } => m.seg_h,
             Ctrl::Cycle { .. } => m.cyc_h,
-            Ctrl::Button { .. } | Ctrl::Drop { .. } => m.btn_h,
+            // A bar is ONE row however many verbs it carries.
+            Ctrl::Button { .. } | Ctrl::Drop { .. } | Ctrl::Bar { .. } => m.btn_h,
             Ctrl::Section { .. } => m.block_h,
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
@@ -4946,6 +5197,7 @@ impl Settings {
                 let text = self.text_of(*label);
                 self.button(ctx, r, &text, *act);
             }
+            Ctrl::Bar { items } => self.draw_bar(ctx, items, rc),
             // A separator like every other module header.
             Ctrl::Section { title } => {
                 static SECTION_FG: OnceLock<TokenId> = OnceLock::new();
@@ -5002,28 +5254,38 @@ impl Settings {
         }
     }
 
-    /// A row the page turned off. Only a button has a disabled form —
-    /// the ladder's Disabled rung, an inscription, and nothing in the
-    /// hit map or the focus chain (R6).
+    /// A row the page turned off. Only the two kinds of row made of
+    /// buttons have a disabled form — the ladder's Disabled rung, an
+    /// inscription, and nothing in the hit map or the focus chain (R6).
     fn draw_disabled(&mut self, ctx: &mut Ctx, ctrl: &Ctrl, rc: RowCtx) {
-        let Ctrl::Button { label, kind, .. } = ctrl else { return };
+        let plates: Vec<(Rect, Cow<'static, str>)> = match ctrl {
+            Ctrl::Button { label, kind, .. } => {
+                vec![(Self::button_rect(*kind, rc), self.text_of(*label))]
+            }
+            Ctrl::Bar { items } => self
+                .bar_plates(ctx, items, rc)
+                .into_iter()
+                .map(|(r, label, _)| (r, label))
+                .collect(),
+            _ => return,
+        };
         let th = theme::resolved();
-        let r = Self::button_rect(*kind, rc);
         let st = ladder(th, &BTN_CLASS, "button", State::Disabled);
-        ctx.dl.rect_outline(r.x, r.y, r.w, r.h, st.edge_width, col(st.edge));
         let f = role_button(ctx);
-        let ty = center_y(ctx, r, f);
-        let s = self.text_of(*label);
-        ctx.dl.text_center(
-            ctx.fonts,
-            f.face,
-            f.px,
-            r.cx(),
-            ty,
-            &s,
-            col(st.text),
-            f.track,
-        );
+        for (r, s) in plates {
+            ctx.dl.rect_outline(r.x, r.y, r.w, r.h, st.edge_width, col(st.edge));
+            let ty = center_y(ctx, r, f);
+            ctx.dl.text_center(
+                ctx.fonts,
+                f.face,
+                f.px,
+                r.cx(),
+                ty,
+                &s,
+                col(st.text),
+                f.track,
+            );
+        }
     }
 
     /// A row's label in the label column, written once for the four
@@ -5044,6 +5306,58 @@ impl Settings {
         );
     }
 
+    /// Where a bar's plates go, and what each says. Asked by the drawing
+    /// and by the disabled form, so a bar cannot be laid out twice.
+    ///
+    /// Each plate is its own label wide — `button.pad_x` on both sides,
+    /// never under `button.min_w` — because three verbs of three
+    /// lengths in three equal boxes would put most of the ink in the
+    /// widest one. The row is centred as a whole, `settings.bar_gap`
+    /// between plates; no length here is this file's.
+    fn bar_plates(
+        &self,
+        ctx: &mut Ctx,
+        items: &'static [(Text, Act)],
+        rc: RowCtx,
+    ) -> Vec<(Rect, Cow<'static, str>, Act)> {
+        static BAR_GAP: OnceLock<TokenId> = OnceLock::new();
+        static PAD_X: OnceLock<TokenId> = OnceLock::new();
+        static MIN_W: OnceLock<TokenId> = OnceLock::new();
+        let th = theme::resolved();
+        let gap = th.px(tok(&BAR_GAP, "settings.bar_gap"));
+        let pad = th.px(tok(&PAD_X, "button.pad_x"));
+        let min_w = th.px(tok(&MIN_W, "button.min_w"));
+        let f = role_button(ctx);
+        // Resolved before anything is drawn: a label may be read from
+        // the window, and the window cannot be borrowed while it draws.
+        let labels: Vec<Cow<'static, str>> =
+            items.iter().map(|(t, _)| self.text_of(*t)).collect();
+        let widths: Vec<f32> = labels
+            .iter()
+            .map(|s| (ctx.fonts.measure(f.face, f.px, s, f.track) + 2.0 * pad).max(min_w))
+            .collect();
+        let total: f32 =
+            widths.iter().sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
+        let mut x = rc.content.x + (rc.content.w - total) / 2.0;
+        let mut out = Vec::with_capacity(items.len());
+        for (i, (_, act)) in items.iter().enumerate() {
+            out.push((
+                Rect::new(x, rc.band.y, widths[i], rc.m.btn_h),
+                labels[i].clone(),
+                *act,
+            ));
+            x += widths[i] + gap;
+        }
+        out
+    }
+
+    /// A row of buttons, registered left to right.
+    fn draw_bar(&mut self, ctx: &mut Ctx, items: &'static [(Text, Act)], rc: RowCtx) {
+        for (r, label, act) in self.bar_plates(ctx, items, rc) {
+            self.button(ctx, r, &label, act);
+        }
+    }
+
     fn button_rect(kind: BtnKind, rc: RowCtx) -> Rect {
         let x = rc.content.x + (rc.content.w - rc.m.list_w) / 2.0;
         match kind {
@@ -5051,12 +5365,6 @@ impl Settings {
             BtnKind::Wide => {
                 Rect::new(rc.content.x, rc.band.y, rc.content.w, rc.m.btn_h)
             }
-            BtnKind::Footer => Rect::new(
-                x,
-                rc.content.bottom() - rc.m.btn_h,
-                rc.m.list_w,
-                rc.m.btn_h,
-            ),
         }
     }
 
@@ -7394,20 +7702,42 @@ mod tests {
                 let length = s.flow_h(p, m, content);
                 let furthest = (length - view.h).max(0.0);
                 let where_ = format!("{} at {h}px", p.title);
-                // Walk the description to the last flowed row, at the
-                // furthest the offset goes.
+                // Walk the description band by band, at the furthest the
+                // offset goes, and inside a banded region column by
+                // column: the last row of EVERY column has to be
+                // reachable, not just the last row of the deepest one.
                 let mut y = view.y - furthest;
-                let mut last = None;
-                for row in p.rows {
-                    // Hidden rows are NOT THERE (Row::when) — the walk has
-                    // to skip exactly what the flow skips or it measures a
-                    // page that is not on screen.
-                    if row.ctrl.pinned() || !(row.when)(&s) {
+                let mut last: Option<f32> = None;
+                let mut started = false;
+                for zone in p.zones {
+                    if matches!(zone, Zone::Pinned { .. }) {
                         continue;
                     }
-                    let rh = s.row_h(&row.ctrl, m, content);
-                    last = Some(y + rh);
-                    y += rh + m.space(row.after);
+                    let zh = s.zone_h(zone, m, content);
+                    if zh <= 0.0 {
+                        continue;
+                    }
+                    if started {
+                        y += zone_gap();
+                    }
+                    started = true;
+                    for (region, _, rows) in
+                        zone_regions(zone, Rect::new(content.x, y, content.w, content.h))
+                    {
+                        let mut ry = y;
+                        for row in rows {
+                            // Hidden rows are NOT THERE (Row::when) — the
+                            // walk has to skip exactly what the flow skips
+                            // or it measures a page that is not on screen.
+                            if !(row.when)(&s) {
+                                continue;
+                            }
+                            let rh = s.row_h(&row.ctrl, m, region);
+                            last = Some(last.map_or(ry + rh, |v: f32| v.max(ry + rh)));
+                            ry += rh + m.space(row.after);
+                        }
+                    }
+                    y += zh;
                 }
                 let Some(end) = last else { continue };
                 assert!(
@@ -7423,15 +7753,15 @@ mod tests {
                     );
                 }
                 // P12: whatever the page pins, the flow cannot touch it.
-                for row in p.rows {
-                    if !row.ctrl.pinned() {
+                for zone in p.zones {
+                    if !matches!(zone, Zone::Pinned { .. }) {
                         continue;
                     }
-                    let rh = s.row_h(&row.ctrl, m, content);
-                    let pinned_top = content.bottom() - rh;
+                    let zh = s.zone_h(zone, m, content);
+                    let pinned_top = content.bottom() - zh;
                     assert!(
                         view.bottom() <= pinned_top + 0.01,
-                        "{where_}: the body overlaps a pinned row by {} px",
+                        "{where_}: the body overlaps a pinned band by {} px",
                         view.bottom() - pinned_top
                     );
                 }
@@ -7585,6 +7915,273 @@ mod tests {
         viewport_home();
     }
 
+    // ------------------------------------------------------- the bands
+
+    /// A two-column band, made only here: the pages are all one flow in
+    /// this step, and a mechanism nothing builds is a mechanism nobody
+    /// has measured.
+    static PROBE_LEFT: [Row; 1] = [row(Ctrl::Slider {
+        label: "RADIUS",
+        act: Act::BlurRadiusTrack,
+        unit: Unit::Percent,
+        range: (0, 100),
+        step: 5,
+        get: |s| s.blur_radius,
+        set: |s, v| s.blur_radius = v,
+        save: |_| {},
+    })];
+
+    static PROBE_RIGHT: [Row; 1] = [row(Ctrl::Slider {
+        label: "OPACITY",
+        act: Act::BlurOpacityTrack,
+        unit: Unit::Percent,
+        range: (0, 100),
+        step: 5,
+        get: |s| s.blur_opacity,
+        set: |s, v| s.blur_opacity = v,
+        save: |_| {},
+    })];
+
+    static PROBE_COLUMNS: [ZCol; 2] = [
+        // Two DIFFERENT measuring words on purpose: if the label column
+        // were still the page's, both tracks would start on one pixel.
+        ZCol {
+            cols: Cols::Measured { label: "A", value: "100 %" },
+            rows: &PROBE_LEFT,
+        },
+        ZCol {
+            cols: Cols::Measured { label: "A MUCH LONGER LABEL", value: "100 %" },
+            rows: &PROBE_RIGHT,
+        },
+    ];
+
+    static PROBE_ZONES: [Zone; 1] = [Zone::Cols { columns: &PROBE_COLUMNS }];
+
+    static PROBE_PAGE: Page = Page {
+        view: View::Blur,
+        title: "PROBE",
+        chrome: Chrome::Back,
+        lead: Gap::Section,
+        zones: &PROBE_ZONES,
+    };
+
+    /// M1/M3, the geometry — a columned band is equal columns with the
+    /// theme's gutter, and nothing of the box is left over.
+    #[test]
+    fn a_columned_band_splits_into_equal_columns() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let box_ = Rect::new(100.0, 50.0, 1000.0, 700.0);
+        let regions = zone_regions(&PROBE_ZONES[0], box_);
+        assert_eq!(regions.len(), 2, "a two-column band gave a different count");
+        let (l, r) = (regions[0].0, regions[1].0);
+        assert!((l.w - r.w).abs() < 0.01, "the two columns are not equal");
+        assert!((l.x - box_.x).abs() < 0.01, "the band does not start at its box");
+        assert!(
+            (r.right() - box_.right()).abs() < 0.01,
+            "the band does not end at its box"
+        );
+        assert!(
+            (r.x - l.right() - col_gap()).abs() < 0.01,
+            "the gutter is not settings.col_gap"
+        );
+        // The y and the height stay the page's, so a row that reserves
+        // part of the CONTENT box measures the same box in a column.
+        for (region, _, _) in &regions {
+            assert!((region.y - box_.y).abs() < 0.01 && (region.h - box_.h).abs() < 0.01);
+        }
+        viewport_home();
+    }
+
+    /// M3, the measurement — a label column is measured against the
+    /// REGION's own words and sized from the REGION's width.
+    ///
+    /// This is the whole reason `columns` stopped being the page's: two
+    /// columns of one band ask it separately, so the sliders on the left
+    /// do not inherit the width of the labels on the right.
+    #[test]
+    fn a_column_measures_its_own_labels() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let s = furnished();
+        let (short, _) = s.columns(&mut ctx, PROBE_COLUMNS[0].cols, 600.0);
+        let (long, _) = s.columns(&mut ctx, PROBE_COLUMNS[1].cols, 600.0);
+        assert!(
+            long > short + 0.01,
+            "two different measuring words gave one label column ({short} px and {long} px)"
+        );
+        // A fraction is a fraction of the REGION, not of the page.
+        let (half, _) = s.columns(&mut ctx, Cols::Frac, 600.0);
+        let (whole, _) = s.columns(&mut ctx, Cols::Frac, 1200.0);
+        assert!(
+            half > 0.0 && (whole - half * 2.0).abs() < 0.01,
+            "Cols::Frac did not follow the region's width"
+        );
+        viewport_home();
+    }
+
+    /// M2/M3, the walk — a columned band registers COLUMN BY COLUMN,
+    /// and each column's rows are laid inside that column.
+    ///
+    /// The Tab order is the description's, never the geometry's: the
+    /// whole of the first column, then the whole of the second.
+    #[test]
+    fn a_columned_band_registers_column_by_column() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        let mut s = furnished();
+        s.draw_body(&mut ctx, &PROBE_PAGE, m, content);
+        assert!(
+            s.hits.iter().map(|&(_, a)| a).collect::<Vec<_>>()
+                == vec![Act::BlurRadiusTrack, Act::BlurOpacityTrack],
+            "a columned band did not register column by column"
+        );
+        let track = |act: Act| {
+            s.hits
+                .iter()
+                .find(|&&(_, a)| a == act)
+                .map(|&(r, _)| r)
+                .expect("a column's row was not drawn")
+        };
+        let (left, right) = (track(Act::BlurRadiusTrack), track(Act::BlurOpacityTrack));
+        assert!(
+            (left.y - right.y).abs() < 0.01,
+            "the two columns do not start on one line"
+        );
+        assert!(
+            right.x >= left.right() + col_gap() - 0.01,
+            "the two columns overlap: the left ends at {} and the right starts at {}",
+            left.right(),
+            right.x
+        );
+        // The right column's track is the SHORTER of the two, because
+        // its own label column is the wider — which is only true if the
+        // measurement was taken per column.
+        assert!(
+            right.w < left.w - 0.01,
+            "both columns measured one label width ({} px and {} px)",
+            left.w,
+            right.w
+        );
+        viewport_home();
+    }
+
+    /// M6 — an action bar centres its plates, each as wide as its own
+    /// word, `settings.bar_gap` apart. No length in it is the file's.
+    #[test]
+    fn an_action_bar_takes_its_widths_and_its_gap_from_the_theme() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        let s = furnished();
+        let band = Rect::new(content.x, content.y, content.w, m.btn_h);
+        let rc = RowCtx { content, band, label_w: 0.0, value_w: 0.0, m };
+        let plates = s.bar_plates(&mut ctx, &EDITOR_BAR_ITEMS, rc);
+        assert_eq!(plates.len(), EDITOR_BAR_ITEMS.len());
+
+        let th = theme::resolved();
+        let gap = th.px(theme::id("settings.bar_gap").expect("the master declares it"));
+        let min_w = th.px(theme::id("button.min_w").expect("the master declares it"));
+        let pad = th.px(theme::id("button.pad_x").expect("the master declares it"));
+        let f = role_button(&ctx);
+        for (i, (r, label, act)) in plates.iter().enumerate() {
+            assert!(*act == EDITOR_BAR_ITEMS[i].1, "the bar reordered its verbs");
+            assert!((r.y - band.y).abs() < 0.01, "a plate left the row");
+            let wanted =
+                (ctx.fonts.measure(f.face, f.px, label, f.track) + 2.0 * pad).max(min_w);
+            assert!(
+                (r.w - wanted).abs() < 0.01,
+                "plate {i} is {} px wide, its own word wants {wanted} px",
+                r.w
+            );
+        }
+        for pair in plates.windows(2) {
+            assert!(
+                (pair[1].0.x - pair[0].0.right() - gap).abs() < 0.01,
+                "the plates are not settings.bar_gap apart"
+            );
+        }
+        let (first, last) = (plates[0].0, plates[plates.len() - 1].0);
+        assert!(
+            ((first.x - content.x) - (content.right() - last.right())).abs() < 0.01,
+            "the bar is not centred: {} px on the left, {} px on the right",
+            first.x - content.x,
+            content.right() - last.right()
+        );
+        viewport_home();
+    }
+
+    /// M6 in place — the editor's three verbs are one row held against
+    /// the bottom edge, and every one of them is a target AT REST.
+    ///
+    /// They were three centred rows at the far end of a page many
+    /// viewports long: reaching CANCEL meant scrolling past every slider
+    /// in the theme, and with the page unscrolled none of the three was
+    /// on screen at all.
+    #[test]
+    fn the_editors_verbs_stand_together_under_the_page() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let mut s = furnished();
+        s.view = View::ThemeEditor;
+        // At rest, with the page not scrolled a pixel.
+        s.draw(&mut ctx);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        let plate = |act: Act| {
+            s.hits
+                .iter()
+                .find(|&&(_, a)| a == act)
+                .map(|&(r, _)| r)
+                .expect("the editor's bar lost one of its verbs")
+        };
+        let rects: Vec<Rect> = [Act::EditorSave, Act::EditorSaveAs, Act::EditorCancel]
+            .iter()
+            .map(|a| plate(*a))
+            .collect();
+        for (i, r) in rects.iter().enumerate() {
+            assert!(
+                (r.y - (content.bottom() - m.btn_h)).abs() < 0.01,
+                "verb {i} does not stand on the bottom edge of the content box"
+            );
+            assert!((r.h - m.btn_h).abs() < 0.01, "verb {i} is not one row tall");
+        }
+        for pair in rects.windows(2) {
+            assert!(
+                pair[1].x >= pair[0].right() - 0.01,
+                "two verbs of the bar share pixels"
+            );
+        }
+        // And the flow above them stops short of the bar (P12).
+        let view = s.body_box(page(View::ThemeEditor), m, content);
+        assert!(
+            view.bottom() <= rects[0].y + 0.01,
+            "the flow overlaps the action bar by {} px",
+            view.bottom() - rects[0].y
+        );
+        viewport_home();
+    }
+
     /// §5.3 — the window's text answers UIFontSize=, all of it, once.
     ///
     /// Every page is drawn twice, at 100 % and at 125 %, and every string
@@ -7716,13 +8313,15 @@ mod tests {
         }
     }
 
-    /// Every act a page promises, chrome included.
-    fn described_acts(s: &Settings, page: &Page) -> Vec<Act> {
+    /// Every act a page promises, chrome included — walked band by band
+    /// and, inside a banded region, column by column, which is the order
+    /// the window registers them in.
+    fn described_acts(s: &Settings, page: &'static Page) -> Vec<Act> {
         let mut out = vec![match page.chrome {
             Chrome::Close => Act::Close,
             Chrome::Back => Act::Back,
         }];
-        for row in page.rows {
+        for row in page_rows(page) {
             // A hidden row IS NOT THERE (Row::when), so it is not owed a
             // hit either; the loop below draws with every condition set so
             // the conditional rows are exercised too.
@@ -7737,6 +8336,8 @@ mod tests {
                 Ctrl::Chips { values, act, .. } => {
                     out.extend(values.iter().map(|v| act(*v)))
                 }
+                // Every verb of an action bar, left to right.
+                Ctrl::Bar { items } => out.extend(items.iter().map(|&(_, a)| a)),
                 // The anchor alone: what the list holds is only on
                 // screen while it is open, which is another test's
                 // question (`an_open_list_offers_every_name_it_has`).
