@@ -314,6 +314,47 @@ struct Prefs {
     t: f64,
 }
 
+/// Start the nacelle-ai daemon alongside the desktop, unless one is
+/// already answering on its socket.
+///
+/// The check IS a connect: the daemon's socket lives where its own
+/// client crate computes it — `$XDG_RUNTIME_DIR/nacelle/ai.sock`, or
+/// `/tmp/nacelle-$UID/ai.sock` on a system that sets no runtime dir —
+/// and a socket file nobody accepts on refuses the connect, so a stale
+/// file left by a dead daemon does not count as a daemon. The binary is
+/// `nacelle-ai` looked up on PATH, overridable with `NACELLE_AI_BIN`;
+/// a spawn that fails is one line on stderr and nothing else — the AI
+/// widgets say OFFLINE by themselves, and the desktop runs on.
+///
+/// The child is deliberately NOT killed when the desktop exits, and
+/// nothing here keeps its handle: the daemon lives a life of its own,
+/// serving whichever clients connect next (a restarted desktop finds
+/// it already answering). The one cost of not waiting on it is the
+/// usual one — a daemon that dies while the desktop runs stays a
+/// zombie in the process table until the desktop itself exits.
+fn spawn_ai_daemon() {
+    let sock = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) if !dir.is_empty() => Path::new(&dir).join("nacelle").join("ai.sock"),
+        _ => {
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/nacelle-{uid}/ai.sock"))
+        }
+    };
+    if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+        return;
+    }
+    let bin = std::env::var("NACELLE_AI_BIN").unwrap_or_else(|_| "nacelle-ai".to_string());
+    match std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            eprintln!("nacelle-desktop: nacelle-ai daemon started (pid {})", child.id());
+        }
+        Err(e) => eprintln!("nacelle-desktop: cannot start the nacelle-ai daemon ({bin}): {e}"),
+    }
+}
+
 fn main() {
     // The pixel guard, before anything is built: `cmds` needs the
     // toolkit's command register switched on, and a draw list made
@@ -653,6 +694,12 @@ fn main() {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/"));
+
+    // The nacelle-ai daemon, started here until nacelle-session takes
+    // the autostart over (its own task). Deliberately fire-and-forget:
+    // see `spawn_ai_daemon` for the socket check, the override and why
+    // the child outlives this process.
+    spawn_ai_daemon();
 
     // Terminal sessions (tabs). Slot 0 starts immediately.
     let mut grid = (80usize, 24usize);

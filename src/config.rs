@@ -125,8 +125,11 @@ use nacelle::layout::LayautStore;
 /// Everything else comes from the addons directory, exactly as
 /// third-party addons do. A machine with nothing installed and nothing
 /// linked has no widgets, and says so.
-const LINKED: [nacelle::widget::factory::BuiltinWidget; 8] = [
-    nacelle_widget_ai::WIDGET,
+const LINKED: [nacelle::widget::factory::BuiltinWidget; 11] = [
+    nacelle_widget_aichat::WIDGET,
+    nacelle_widget_ailoop::WIDGET,
+    nacelle_widget_aiphoto::WIDGET,
+    nacelle_widget_aisort::WIDGET,
     nacelle_widget_appcats::WIDGET,
     nacelle_widget_appgrid::WIDGET,
     nacelle_widget_control::WIDGET,
