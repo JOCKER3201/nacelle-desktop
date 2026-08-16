@@ -963,7 +963,6 @@ version = "0.1.0"
 source = "git+https://github.com/JOCKER3201/nacelle-addons#c109821ff282c9f2e19c15e05d36c8fb526374b3"
 dependencies = [
  "libnacelle",
- "serde",
 ]
 
 [[package]]
@@ -981,7 +980,6 @@ source = "git+https://github.com/JOCKER3201/nacelle-addons#c109821ff282c9f2e19c1
 dependencies = [
  "libnacelle",
  "nacelle-launcher-core",
- "serde",
 ]
 
 [[package]]

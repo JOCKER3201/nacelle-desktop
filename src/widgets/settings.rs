@@ -2929,6 +2929,16 @@ pub struct Settings {
     dropdown: Option<Dropdown>,
     /// When the dropdown was opened — drives the accordion animation.
     dropdown_since: Option<Instant>,
+    /// The open list's own scroll — the offset
+    /// `object::dropdown::accordion` frames its body at. ONE view for
+    /// whichever list is open, reset when a list opens: an offset is a
+    /// property of the unfolding, not of the button it hangs from.
+    list_scroll: ScrollView,
+    /// The open list's bar, as the accordion framed it this frame: the
+    /// box the bar stands in, the frame's height and the body's length.
+    /// `None` while no list scrolls. The object draws the bar; the
+    /// pointer is this window's, so the press aims with this.
+    list_bar: Option<(Rect, f32, f32)>,
     /// Grid editor preferences (GRID view).
     grid_snap: bool,
     grid_cols: u32,
@@ -3119,6 +3129,8 @@ impl Settings {
             dragging: None,
             dropdown: None,
             dropdown_since: None,
+            list_scroll: ScrollView::new(),
+            list_bar: None,
             grid_snap: false,
             grid_cols: GRID_MIN,
             grid_rows: GRID_MIN,
@@ -3230,6 +3242,16 @@ impl Settings {
         // The SAVE AS prompt already swallows clicks and keys; the wheel
         // joins them, or the page scrolls under the scrim.
         if self.naming.is_some() {
+            return;
+        }
+        // An open list is the topmost scrolled thing on the page, so the
+        // wheel is its before it is the page's — a notch over an unfolded
+        // list that moved the rows UNDER the list was the settled page
+        // grabbing a gesture aimed at the float above it. The accordion
+        // owns the clamp (its tick runs every frame it is drawn); this
+        // only feeds the offset.
+        if self.dropdown.is_some() {
+            self.list_scroll.wheel(-notches, &ScrollPhysics::from_theme(), self.now);
             return;
         }
         // Negated, as at every other caller (search's list, the file
@@ -3656,8 +3678,29 @@ impl Settings {
         }
     }
 
-    /// Mouse move while a track is held.
-    pub fn drag(&mut self, x: f32) {
+    /// Mouse move while a track is held — a slider's, or the open
+    /// list's thumb.
+    pub fn drag(&mut self, x: f32, y: f32) {
+        // The held thumb first: it owns the pointer absolutely (the
+        // thumb goes where the hand is), and while it is held no slider
+        // is — `press_thumb` and the hit walk are the same press, so the
+        // two grabs cannot coexist.
+        if self.list_scroll.dragging() {
+            if let Some((area, viewport, content)) = self.list_bar {
+                let look = ScrollbarLook::from_theme();
+                if let Some(geom) = scroll::scrollbar(
+                    area,
+                    &look,
+                    self.list_scroll.offset(),
+                    viewport,
+                    content,
+                    true,
+                ) {
+                    self.list_scroll.drag(y, viewport, content, geom.track);
+                }
+            }
+            return;
+        }
         let Some(act) = self.dragging else { return };
         self.set_from_x(act, x);
         self.mark_dirty(act);
@@ -3720,6 +3763,9 @@ impl Settings {
     /// re-apply. The rest write themselves and are pushed on by their
     /// dirty flags.
     pub fn release(&mut self) -> bool {
+        // The list's thumb, symmetric with its grab: nothing about the
+        // configuration changes when a scrollbar is let go.
+        self.list_scroll.release();
         let Some(act) = self.dragging.take() else { return false };
         if let Some(&Ctrl::Slider { save, .. }) = slider_of(act) {
             save(self);
@@ -3776,6 +3822,40 @@ impl Settings {
         // through to a slider would drag the theme mid-naming.
         if self.naming.is_some() {
             return false;
+        }
+        // The open list's bar, before the rows: it stands in the lane
+        // BESIDE them, so nothing else answers there, and a bar that was
+        // only drawn was the UX finding this closes — a thumb the eye
+        // reads as draggable must actually take the hand. The band is
+        // the bar's widest (hover included), the same rule the page's
+        // bar draws by; a press on the track pages one frame-height
+        // toward it, the toolkit's own word on track clicks.
+        if self.dropdown.is_some() {
+            if let Some((area, viewport, content)) = self.list_bar {
+                let look = ScrollbarLook::from_theme();
+                let reach = look.w_hover.max(look.w) + look.margin;
+                let band = match look.edge {
+                    scroll::ScrollbarEdge::Left => Rect::new(area.x, area.y, reach, area.h),
+                    scroll::ScrollbarEdge::Right => {
+                        Rect::new(area.right() - reach, area.y, reach, area.h)
+                    }
+                };
+                if band.contains(x, y) {
+                    if let Some(geom) = scroll::scrollbar(
+                        area,
+                        &look,
+                        self.list_scroll.offset(),
+                        viewport,
+                        content,
+                        true,
+                    ) {
+                        if !self.list_scroll.press_thumb(y, geom.thumb) {
+                            self.list_scroll.page(y > geom.thumb.y, viewport, self.now);
+                        }
+                    }
+                    return false;
+                }
+            }
         }
         // Topmost element wins (dropdown items are drawn last). Elements
         // are checked BEFORE the window bounds, so dropdown items that
@@ -3890,6 +3970,9 @@ impl Settings {
                     None
                 } else {
                     self.dropdown_since = Some(Instant::now());
+                    // A list opens at its head — the offset belongs to
+                    // the unfolding, not to whatever list scrolled last.
+                    self.list_scroll.reset();
                     Some(d)
                 };
             }
@@ -4180,6 +4263,7 @@ impl Settings {
                     None
                 } else {
                     self.dropdown_since = Some(Instant::now());
+                    self.list_scroll.reset();
                     Some(Dropdown::Family(sect))
                 };
             }
@@ -4188,6 +4272,7 @@ impl Settings {
                     None
                 } else {
                     self.dropdown_since = Some(Instant::now());
+                    self.list_scroll.reset();
                     Some(Dropdown::Weight(sect))
                 };
             }
@@ -5258,6 +5343,10 @@ impl Settings {
     /// scrolled off the page has nothing to hang from at all.
     fn draw_open_dropdown(&mut self, ctx: &mut Ctx, m: Metrics) {
         static MENU_ROW_H: OnceLock<TokenId> = OnceLock::new();
+        // No list drawn, no bar to press: the record below is one
+        // frame's, refreshed by `draw_dropdown` when a scrolling list
+        // stands.
+        self.list_bar = None;
         let Some(d) = self.dropdown else { return };
         let Some(anchor) = self.rect_of_act(anchor_act(d)) else { return };
         let item_h = theme::resolved().px(tok(&MENU_ROW_H, "menu.row_h"));
@@ -5662,12 +5751,46 @@ impl Settings {
                 current,
                 ..Default::default()
             },
+            &mut self.list_scroll,
         );
         for (i, (r, _full)) in rows.iter().copied().enumerate() {
-            // Deliberately unclipped: the list hangs past the window's
-            // edge and stays pressable there, which is the one place in
-            // this file where a target may leave the body's box.
+            // AS DRAWN: the frame clips the body now and the accordion
+            // reports what survived it, so an element scrolled out of
+            // the frame comes back with no area and nothing to press —
+            // the invisible-but-clickable tail this loop used to build
+            // is gone with the toolkit's own contract.
             self.hits.push((r, make_act(i)));
+        }
+        // The frame the accordion just framed, restated for the BAR's
+        // press: the object draws the bar and ticks the offset, but the
+        // pointer is this window's, so the thumb needs the same area,
+        // viewport and content the object used. The reads mirror
+        // `object::dropdown::accordion` token for token — the seam gap,
+        // the height cap, the skew and the anchor-width floor — because
+        // the object does not hand its geometry back (the same
+        // restatement `draw_scrollbar` makes for the page's own bar).
+        {
+            static GAP: OnceLock<TokenId> = OnceLock::new();
+            static MAX_H_FRAC: OnceLock<TokenId> = OnceLock::new();
+            static MAX_H_MIN_PX: OnceLock<TokenId> = OnceLock::new();
+            static SKEW: OnceLock<TokenId> = OnceLock::new();
+            static ANCHOR_W: OnceLock<TokenId> = OnceLock::new();
+            static MIN_W: OnceLock<TokenId> = OnceLock::new();
+            let t = theme::resolved();
+            let gap = t.px(tok(&GAP, "menu.anchor_gap")).max(0.0);
+            let content = (item_h + gap) * names.len() as f32;
+            let cap = (ctx.h * t.px(tok(&MAX_H_FRAC, "menu.max_h_frac")))
+                .max(t.px(tok(&MAX_H_MIN_PX, "menu.max_h_min_px")))
+                .max(0.0);
+            let body_h = content.min(cap);
+            let mut bar_w = anchor.w - t.px(tok(&SKEW, "button.skew"));
+            let aw = tok(&ANCHOR_W, "menu.anchor_width");
+            if nacelle::theme::enum_word_of(aw).as_deref() == Some("min_w") {
+                bar_w = bar_w.max(t.px(tok(&MIN_W, "menu.min_w")));
+            }
+            self.list_bar = (content > body_h + 0.5).then(|| {
+                (Rect::new(anchor.x, anchor.bottom(), bar_w, body_h), body_h, content)
+            });
         }
         rows
     }
@@ -6746,28 +6869,24 @@ mod tests {
         }
     }
 
-    /// The reach P11 used to guard, pinned the WRONG way round on
-    /// purpose, because the toolkit cannot give it back yet.
+    /// P11's guard, given back: the accordion learnt to scroll, and the
+    /// test its predecessor asked for is this one.
     ///
-    /// P11 (`a_long_list_loses_no_name`) stocked forty names on the LOOK
-    /// page and walked the page's scroll from top to bottom, asserting
-    /// every name was drawn INSIDE the body's box. That page is gone,
-    /// and with it its scroll: `object::dropdown::accordion` lays its
-    /// rows out as one column of `item_h * names.len()` with no scroll,
-    /// no `max_rows` and no flip, and this file may not grow a second
-    /// list of its own to fix that (the toolkit rule). The half of P11
-    /// that still holds — no name is dropped — is
-    /// [`an_open_list_offers_every_name_it_has`]; this is the half that
-    /// does not.
+    /// The predecessor (`a_long_list_hangs_past_the_window_until_the_
+    /// accordion_can_scroll`) pinned the FAULT on purpose: forty themes'
+    /// tail was pressable below the window's bottom edge, because the
+    /// object laid its rows out as one unclipped column. Its doc ordered
+    /// whoever made it fail to turn it back into P11 — the frame now
+    /// cuts, the body scrolls under it (`ScrollView`, the 7th argument),
+    /// and a clipped-out element is reported with no area. So, walking
+    /// the LIST's own scroll from head to tail:
     ///
-    /// So it asserts the FAULT: with forty themes the tail of the list
-    /// is pressable below the window's bottom edge. The day the
-    /// accordion learns to scroll (the fleet's report asks for scroll +
-    /// max_rows + flip) this test fails, and whoever made it pass has to
-    /// come here and turn it back into P11. A regression nobody can
-    /// delete quietly is worth more than a guard nobody replaced.
+    /// - nothing pressable ever stands below the window's bottom edge —
+    ///   the invisible-but-clickable tail stays dead;
+    /// - every one of the forty names is pressable at SOME offset — the
+    ///   scroll reaches the whole body, and no name is lost to the cut.
     #[test]
-    fn a_long_list_hangs_past_the_window_until_the_accordion_can_scroll() {
+    fn a_long_list_scrolls_and_no_name_is_lost_to_the_frame() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
         theme::resolved();
@@ -6778,31 +6897,90 @@ mod tests {
         s.themes = (0..N).map(|i| format!("theme {i}")).collect();
         s.dropdown = Some(Dropdown::List(ListId::Looks));
         s.dropdown_since = None;
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        let h = ctx.h;
-        s.draw(&mut ctx);
-        // Offered, all forty of them — that much the list does keep.
-        let acts: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
-        for i in 0..N {
+        let mut reached = [false; N];
+        // The stops derive from the frame the accordion itself framed —
+        // `list_bar` after the first draw — half a frame apart, so
+        // consecutive stops overlap (a row is far shorter than half a
+        // frame), the same lesson the editor page's reachability sweep
+        // learnt: a stride guessed from the window went stale the moment
+        // the frame was capped shorter than it.
+        let mut stops = vec![0.0f32];
+        let mut at = 0;
+        while at < stops.len() {
+            s.list_scroll.set_offset(stops[at]);
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            let h = ctx.h;
+            s.draw(&mut ctx);
+            if at == 0 {
+                let (_, viewport, content) =
+                    s.list_bar.expect("forty names do not fit one frame");
+                let stride = (viewport * 0.5).max(1.0);
+                let mut next = stride;
+                while next < content {
+                    stops.push(next);
+                    next += stride;
+                }
+            }
+            for (r, a) in &s.hits {
+                let Act::Pick(ListId::Looks, i) = *a else { continue };
+                let pressable = r.w > 0.0 && r.h > 0.0;
+                assert!(
+                    !(pressable && r.y > h),
+                    "name {i} is pressable below the window's bottom edge \
+                     at offset {}",
+                    s.list_scroll.offset()
+                );
+                if pressable {
+                    reached[i] = true;
+                }
+            }
+            at += 1;
+        }
+        for (i, seen) in reached.iter().enumerate() {
             assert!(
-                acts.contains(&Act::Pick(ListId::Looks, i)),
-                "name {i} is in the list and not in the hit map"
+                seen,
+                "name {i} was never pressable at any offset: the list's \
+                 scroll does not reach it"
             );
         }
-        // And offered where the pointer cannot follow.
-        let lost = s
-            .hits
-            .iter()
-            .filter(|(r, a)| matches!(a, Act::Pick(ListId::Looks, _)) && r.y > h)
-            .count();
-        assert!(
-            lost > 0,
-            "forty names now fit the window: the accordion has learnt to \
-             scroll, so turn this test back into P11 — every name inside \
-             the body's box, walking the list's own scroll"
-        );
         viewport_home();
+    }
+
+    /// The wheel over an OPEN list turns the list, not the page under
+    /// it: the branch in [`Settings::wheel`] — the settled page taking
+    /// a notch aimed at the float above it was the wheel falling to the
+    /// wrong scrolled thing, the same species of fault as the window
+    /// passing the notch to the board behind it.
+    #[test]
+    fn the_wheel_over_an_open_list_turns_the_list_not_the_page() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.now = 1.0;
+        // Ticked once so the views have a frame clock behind them.
+        s.scroll.tick(1.0, 100.0, 10_000.0, Snap::None, &ScrollPhysics::from_theme());
+        s.list_scroll.tick(1.0, 100.0, 10_000.0, Snap::None, &ScrollPhysics::from_theme());
+        let page_before = s.scroll.offset();
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        s.wheel(-1.0);
+        assert_eq!(
+            s.scroll.offset(),
+            page_before,
+            "the page moved under an open list"
+        );
+        assert!(
+            s.list_scroll.offset() > 0.0,
+            "the notch reached no scrolled thing at all"
+        );
+        // List closed, the same notch is the page's again.
+        s.dropdown = None;
+        s.wheel(-1.0);
+        assert!(
+            s.scroll.offset() > page_before,
+            "with the list closed the page must take the wheel back"
+        );
     }
 
     /// The keyboard split: sliders answer arrows, everything else
@@ -7359,11 +7537,11 @@ mod tests {
     /// P11 was a list that `break`-ed out of its own loop at the bottom
     /// edge: past about twenty entries a name simply was not there,
     /// with no bar, no count and no notice. The lists have since moved
-    /// into drop-downs, which is a DIFFERENT surface with the same
-    /// question still open (see the fleet's report: the accordion does
-    /// not scroll). What is tested here is the half that stayed — the
-    /// page's own flow, walked from top to bottom with a page of extra
-    /// rows in it.
+    /// into drop-downs, which answered the same question their own way
+    /// ([`a_long_list_scrolls_and_no_name_is_lost_to_the_frame`]: the
+    /// accordion scrolls now). What is tested here is the half that
+    /// stayed — the page's own flow, walked from top to bottom with a
+    /// page of extra rows in it.
     #[test]
     fn a_page_longer_than_its_box_reaches_its_last_row() {
         let _g = crate::widgets::theme_test_lock();

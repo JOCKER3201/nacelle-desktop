@@ -1774,7 +1774,7 @@ fn main() {
                             return;
                         }
                         if settings.open {
-                            settings.drag(mouse.0);
+                            settings.drag(mouse.0, mouse.1);
                         }
                         // Pointer cursor over a widget's own controls.
                         let (w, h) = screens[si].size();
