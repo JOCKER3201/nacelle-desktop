@@ -754,7 +754,17 @@ impl Screen {
     /// may not wait for it.
     pub fn poll_plates(&mut self) {
         let size = self.window.inner_size();
-        let want = (nacelle::theme::epoch(), size.width, size.height);
+        // `content_epoch`, not `epoch`, and this is the SECOND place that
+        // distinction has cost us. `epoch` names WHICH BAKE IS PUBLISHED,
+        // and a desktop whose screens differ in height alternates it every
+        // frame — so this key would differ every frame, and a screen-sized
+        // plate would be re-baked on a worker sixty times a second for a
+        // theme that never changed. That is exactly the shape of the
+        // 100 % CPU fault the font system had (`theme::content_epoch`'s
+        // own doc records it). The plate depends on the theme's CONTENT
+        // and on this surface's size — neither of which the publication
+        // counter describes.
+        let want = (nacelle::theme::content_epoch(), size.width, size.height);
         if self.plate_key != Some(want) {
             self.plate_key = Some(want);
             let (pw, ph) = (size.width, size.height);
