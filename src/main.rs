@@ -3777,6 +3777,7 @@ fn run_resolution_dialog(
                             fsize.height,
                             &dl.verts,
                             &dl.runs,
+                            dl.shapes(),
                             atlas_rows.map(|(y0, rows)| (fonts.atlas.as_slice(), y0, rows)),
                             [clear.r, clear.g, clear.b, 1.0],
                         );

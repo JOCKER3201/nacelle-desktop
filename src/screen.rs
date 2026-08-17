@@ -847,6 +847,7 @@ impl Screen {
             size.height,
             &self.dl.verts,
             &self.dl.runs,
+            self.dl.shapes(),
             atlas,
             [clear.r, clear.g, clear.b, 1.0],
         );

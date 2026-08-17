@@ -92,20 +92,3 @@ lto = "thin"
 opt-level = 3
 
 # ------------------------------------------------------------------------
-
-# TYMCZASOWE — faza SAVE edytora: lokalny libnacelle. USUNĄĆ przy scaleniu.
-[patch."https://github.com/JOCKER3201/libnacelle"]
-libnacelle = { path = "../libnacelle" }
-
-# TYMCZASOWE — naprawa hitboxów panelu: lokalny control (wkompilowany
-# w binarkę, .so nie wygrywa z nazwą wkompilowaną). USUNĄĆ przy scaleniu,
-# przypiąć commit addons w Cargo.lock.
-# TYMCZASOWE — cztery widgety AI: lokalne ścieżki na czas przed
-# wypchnięciem addons. USUNĄĆ przy scaleniu, przypiąć commit addons
-# w Cargo.lock.
-[patch."https://github.com/JOCKER3201/nacelle-addons"]
-nacelle-widget-control = { path = "../nacelle-addons/plugins/control" }
-nacelle-widget-aichat = { path = "../nacelle-addons/plugins/aichat" }
-nacelle-widget-ailoop = { path = "../nacelle-addons/plugins/ailoop" }
-nacelle-widget-aiphoto = { path = "../nacelle-addons/plugins/aiphoto" }
-nacelle-widget-aisort = { path = "../nacelle-addons/plugins/aisort" }
