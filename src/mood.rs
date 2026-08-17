@@ -47,9 +47,9 @@
 //! a mood the host has to draw itself.
 
 use nacelle::telemetry::Snapshot;
-use nacelle::theme::{self, Color, MoodInput, MoodRule, TokenId};
+use nacelle::theme::{self, Color, MoodInput, MoodRule};
 use nacelle::view::scroll::Easing;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How often a rule is evaluated (§5.24). The cadence of the telemetry, not
@@ -286,58 +286,19 @@ struct Fade {
 
 impl Fade {
     fn read() -> Fade {
-        static ENABLED: OnceLock<TokenId> = OnceLock::new();
-        static DUR: OnceLock<TokenId> = OnceLock::new();
-        static SCALE: OnceLock<TokenId> = OnceLock::new();
-        let t = theme::resolved();
+        // ONE resolver. The five-word easing table that stood here, and
+        // the hand-multiplied `duration_ms * motion.scale` beside it,
+        // are `motion::Effect`'s job now — and the table was not merely
+        // duplicated, it was WRONG about one word: `custom` fell through
+        // to linear, so a theme's `easing_p` bezier moved every other
+        // animation in the program and not this one.
+        let e = nacelle::motion::Effect::of("mood_change");
         // Reduced motion (`motion.scale = 0`) does not run the wash in zero
         // milliseconds, it SKIPS it — §5.24's own word. A zero length here
         // is how that reaches the caller, and the disabled flag lands in the
         // same place because "no fade" and "no time to fade in" are the same
-        // picture.
-        let ms = if t.flag(crate::tok(&ENABLED, "motion.mood_change.enabled")) {
-            t.px(crate::tok(&DUR, "motion.mood_change.duration_ms"))
-                * t.px(crate::tok(&SCALE, "motion.scale"))
-        } else {
-            0.0
-        };
-        Fade { ms, ease: ease() }
-    }
-}
-
-/// `motion.mood_change.easing`, resolved by WORD — the idiom every other
-/// consumer of a `motion.*` curve in this project uses (`deco::ride_ease`,
-/// `menu`, `view::scroll`): the words are compared to enum indices once at
-/// init, and the per-frame read is an integer compare. The curves
-/// themselves are [`Easing`]'s, so a fifth copy of the arithmetic cannot
-/// drift away from the other four.
-fn ease() -> Easing {
-    static EASING: OnceLock<TokenId> = OnceLock::new();
-    static DUTY: OnceLock<TokenId> = OnceLock::new();
-    static FLOOR: OnceLock<TokenId> = OnceLock::new();
-    static WORDS: OnceLock<[Option<u16>; 5]> = OnceLock::new();
-    let t = theme::resolved();
-    let id = crate::tok(&EASING, "motion.mood_change.easing");
-    let w = WORDS.get_or_init(|| {
-        ["ease_out", "ease_in", "ease_in_out", "sine", "step"]
-            .map(|word| theme::enum_index(id, word))
-    });
-    let e = Some(t.enum_of(id));
-    if e == w[0] {
-        Easing::EaseOut
-    } else if e == w[1] {
-        Easing::EaseIn
-    } else if e == w[2] {
-        Easing::EaseInOut
-    } else if e == w[3] {
-        Easing::Sine
-    } else if e == w[4] {
-        Easing::Step {
-            duty: t.px(crate::tok(&DUTY, "motion.mood_change.duty")),
-            floor: t.px(crate::tok(&FLOOR, "motion.mood_change.floor")),
-        }
-    } else {
-        Easing::Linear
+        // picture. `one_shot_secs` answers 0 for both.
+        Fade { ms: e.one_shot_secs() * 1000.0, ease: e.one_shot_easing() }
     }
 }
 
@@ -664,6 +625,37 @@ mod tests {
         assert!(w.at(0.0).is_some());
         w.entered(None, || None, 1.0);
         assert_eq!(w.at(1.0), None, "the calm flashed");
+    }
+
+    /// The wash's own five-word easing table knew `linear`, `ease_out`,
+    /// `ease_in`, `ease_in_out`, `sine` and `step` — and not `custom`,
+    /// the one word that carries `easing_p`'s bezier with it. A theme
+    /// that wrote a curve for the mood change got a straight line, in
+    /// the one module whose whole job is to be believed.
+    ///
+    /// The curve below stands at ~0.98 halfway through the fade, so the
+    /// quad is all but gone; linear would leave it at half strength.
+    #[test]
+    fn a_custom_curve_fades_the_mood_wash() {
+        let _lock = crate::widgets::theme_test_lock();
+        // The fixture goes on BEFORE the `Wash` records the epoch: a
+        // theme arriving mid-life is a re-bake, and `Wash::at` would
+        // read it as one.
+        let _t = crate::widgets::Themed::new(
+            "wash-custom",
+            "[motion.mood_change]\neasing = custom\neasing_p = [0.00, 0.90, 0.10, 1.00]\n",
+        );
+        let _ = theme::resolved();
+        let mut w = Wash::new();
+        w.entered(Some("alert".into()), || Some(tint()), 0.0);
+        let mid = w.at(0.125).expect("the wash left halfway through");
+        assert!(
+            mid.a < 0.2 * tint().a,
+            "the custom curve ran as linear — halfway the quad still \
+             stands at {} of a declared {}",
+            mid.a,
+            tint().a
+        );
     }
 
     /// The severities a widget reports are read from the frame just drawn,

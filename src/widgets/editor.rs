@@ -182,39 +182,21 @@ fn modal_title_y(top: f32, px: f32) -> f32 {
 /// the state it was travelling to, so the widget is simply placed at
 /// full size. Only the ARRIVAL was ever the point of this animation.
 fn grow_progress(elapsed: f32) -> (f32, f32) {
-    static MS: OnceLock<TokenId> = OnceLock::new();
-    static ON: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    static EASE: OnceLock<TokenId> = OnceLock::new();
-    static WORDS: OnceLock<[Option<u16>; 3]> = OnceLock::new();
-    let t = theme::resolved();
-    let dur = t.px(tok(&MS, "motion.widget_grow.duration_ms"))
-        * t.px(tok(&SCALE, "motion.scale"))
-        / 1000.0;
-    let x = match t.flag(tok(&ON, "motion.widget_grow.enabled")) && dur > 0.0 {
-        true => (elapsed / dur).clamp(0.0, 1.0),
-        false => 1.0,
-    };
-    // The declared curve; an unknown word runs linear (the raw look).
-    let ease = tok(&EASE, "motion.widget_grow.easing");
-    let words = WORDS.get_or_init(|| {
-        [
-            theme::enum_index(ease, "ease_out"),
-            theme::enum_index(ease, "ease_in"),
-            theme::enum_index(ease, "ease_in_out"),
-        ]
-    });
-    let word = Some(t.enum_of(ease));
-    let e = if word == words[0] {
-        1.0 - (1.0 - x) * (1.0 - x)
-    } else if word == words[1] {
-        x * x
-    } else if word == words[2] {
-        x * x * (3.0 - 2.0 * x)
-    } else {
-        x
-    };
-    (x, e)
+    // The effect, not a hand-copied table. What stood here compared the
+    // theme's easing word against THREE cached enum indices — so
+    // `sine`, `step` and `custom` all fell through to linear without a
+    // word of complaint, and the cache itself was the theme-swap defect
+    // `motion.rs` was written to end (an enum index only names a word
+    // against the schema it was interned in).
+    let e = nacelle::motion::Effect::of("widget_grow");
+    // `one_shot_secs` already carries `motion.scale` and the effect's
+    // own `enabled` flag, and answers 0 when either says "no animation".
+    let dur = e.one_shot_secs();
+    if dur <= 0.0 {
+        return (1.0, 1.0);
+    }
+    let x = (elapsed / dur).clamp(0.0, 1.0);
+    (x, e.ease(x))
 }
 
 /// How long a button stays lit after a click, in milliseconds.
@@ -223,14 +205,7 @@ fn grow_progress(elapsed: f32) -> (f32, f32) {
 /// motion — the decay is a one-shot, and its end state is a button that
 /// is not lit, so it never lights at all.
 fn press_ms() -> f32 {
-    static MS: OnceLock<TokenId> = OnceLock::new();
-    static ON: OnceLock<TokenId> = OnceLock::new();
-    static SCALE: OnceLock<TokenId> = OnceLock::new();
-    let t = theme::resolved();
-    match t.flag(tok(&ON, "motion.press.enabled")) {
-        true => t.px(tok(&MS, "motion.press.duration_ms")) * t.px(tok(&SCALE, "motion.scale")),
-        false => 0.0,
-    }
+    nacelle::motion::Effect::of("press").one_shot_secs() * 1000.0
 }
 
 /// Hold time on an ADD WIDGET entry before placement starts.
@@ -1953,6 +1928,35 @@ mod tests {
         let _t = Themed::new("slow", "[motion]\nscale = 2.0\n");
         let (slow, _) = grow_progress(dur / 2.0);
         assert!((slow - 0.25).abs() < 1e-3, "half the time into a doubled duration is {slow}");
+    }
+
+    /// `custom` is a word in `motion.*.easing`'s closed set like any
+    /// other, and it is the one word that carries numbers with it —
+    /// `easing_p`'s four bezier points. The growth's private resolver
+    /// knew THREE words and let every other one fall through to linear,
+    /// so a theme that spent its bezier on the tear-off got a straight
+    /// line and no complaint.
+    ///
+    /// The curve below stands at ~0.98 halfway through its time. Linear
+    /// says 0.5 there and the master's `ease_out` says 0.75, so the
+    /// assertion separates the fix from both things the old code could
+    /// have answered.
+    #[test]
+    fn a_custom_curve_moves_the_growing_widget() {
+        // Selects themes in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        let dur = number("motion.widget_grow.duration_ms") / 1000.0;
+        let _t = Themed::new(
+            "grow-custom",
+            "[motion.widget_grow]\neasing = custom\neasing_p = [0.00, 0.90, 0.10, 1.00]\n",
+        );
+        let (x, eased) = grow_progress(dur / 2.0);
+        assert!((x - 0.5).abs() < 1e-3, "the raw progress is not halfway: {x}");
+        assert!(
+            eased > 0.9,
+            "the custom curve ran as something else — halfway it stands at \
+             {eased} (linear says 0.5, the master's ease_out 0.75)"
+        );
     }
 
     /// The same global, on the button flash — whose end state is a

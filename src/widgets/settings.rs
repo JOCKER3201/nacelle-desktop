@@ -3768,8 +3768,14 @@ pub struct Settings {
     /// two copies of a geometry are two chances to disagree.
     dragging: Option<Act>,
     dropdown: Option<Dropdown>,
-    /// When the dropdown was opened — drives the accordion animation.
-    dropdown_since: Option<Instant>,
+    /// When the dropdown was opened, on the FRAME clock (`Ctx.t`, kept
+    /// in [`Settings::now`]) — the moment
+    /// [`nacelle::object::dropdown::accordion_at`] unfolds the blind
+    /// from. Not an `Instant`: the whole unfold belongs to
+    /// `motion.menu_unfold` now, and the toolkit's resolver takes time
+    /// as a parameter precisely so a test can wind the clock by hand.
+    /// `None` is a list standing at rest, fully open.
+    dropdown_since: Option<f64>,
     /// The open list's own scroll — the offset
     /// `object::dropdown::accordion` frames its body at. ONE view for
     /// whichever list is open, reset when a list opens: an offset is a
@@ -3861,7 +3867,16 @@ pub struct Settings {
     /// not moved.
     flowed: Vec<FocusId>,
     hits: Vec<(Rect, Act)>,
-    flash: Option<(Act, Instant)>,
+    /// The act whose click flash is decaying, and the frame clock it was
+    /// pressed on. On `Ctx.t` for the same reason as
+    /// [`Settings::dropdown_since`]: `motion.press` answers the length,
+    /// and its resolver is wound by the caller's clock.
+    ///
+    /// A press arrives BETWEEN frames, so the moment it is dated from is
+    /// the last frame's — at most one frame early against a decay
+    /// measured in tenths of a second, and the alternative is the
+    /// private wall clock this replaced.
+    flash: Option<(Act, f64)>,
 }
 
 /// Modal window rectangle.
@@ -5014,7 +5029,7 @@ impl Settings {
     /// pressing a control cannot drift apart (F1 §1.5). `x` is where
     /// along a slider track the press landed; buttons ignore it.
     fn perform(&mut self, act: Act, x: f32) -> bool {
-        self.flash = Some((act, Instant::now()));
+        self.flash = Some((act, self.now));
         // Every button clicks; the actions below that mean more than a
         // plain press replace it with their own sound.
         use nacelle::sound::{emit, Event as Sfx};
@@ -5114,7 +5129,7 @@ impl Settings {
                 self.dropdown = if self.dropdown == Some(d) {
                     None
                 } else {
-                    self.dropdown_since = Some(Instant::now());
+                    self.dropdown_since = Some(self.now);
                     // A list opens at its head — the offset belongs to
                     // the unfolding, not to whatever list scrolled last.
                     self.list_scroll.reset();
@@ -5401,7 +5416,7 @@ impl Settings {
                 self.dropdown = if self.dropdown == Some(Dropdown::Family(sect)) {
                     None
                 } else {
-                    self.dropdown_since = Some(Instant::now());
+                    self.dropdown_since = Some(self.now);
                     self.list_scroll.reset();
                     Some(Dropdown::Family(sect))
                 };
@@ -5410,7 +5425,7 @@ impl Settings {
                 self.dropdown = if self.dropdown == Some(Dropdown::Weight(sect)) {
                     None
                 } else {
-                    self.dropdown_since = Some(Instant::now());
+                    self.dropdown_since = Some(self.now);
                     self.list_scroll.reset();
                     Some(Dropdown::Weight(sect))
                 };
@@ -5716,6 +5731,13 @@ impl Settings {
         if !self.open {
             return;
         }
+        // The frame clock, taken before anything is drawn ON it. Every
+        // animation this window runs now dates from `Ctx.t` — the
+        // press flash, the list's unfold, the scroll's settle — so the
+        // chrome and the body cannot be a frame apart about what time
+        // it is. ([`Settings::draw_body`] sets it again, for the reader
+        // who arrives there first.)
+        self.now = ctx.t;
         self.hits.clear();
         let th = theme::resolved();
         static SCRIM_A: OnceLock<TokenId> = OnceLock::new();
@@ -7304,37 +7326,45 @@ impl Settings {
         current: Option<usize>,
         make_act: F,
     ) -> Vec<(Rect, bool)> {
-        // Accordion animation: the list unfolds from the anchor's edge.
-        static UNFOLD_MS: OnceLock<TokenId> = OnceLock::new();
-        let dur = theme::resolved().px(tok(&UNFOLD_MS, "motion.menu_unfold.duration_ms")) / 1000.0;
-        let t = self
-            .dropdown_since
-            .map(|s| {
-                if dur <= 0.0 {
-                    1.0
-                } else {
-                    (s.elapsed().as_secs_f32() / dur).clamp(0.0, 1.0)
-                }
-            })
-            .unwrap_or(1.0);
-        // motion.menu_unfold.easing = ease_out, awaiting a motion resolver.
-        let p = 1.0 - (1.0 - t) * (1.0 - t);
         // Nothing about the standing row's dress is stated here: the
         // wash, the ring's colour, its width and the label's brightness
         // all come off the `menu.item` class's ladder inside the object.
-        let rows = nacelle::object::dropdown::accordion(
-            ctx,
-            anchor,
-            item_h,
-            names,
-            p,
-            &nacelle::object::dropdown::AccordionStyle {
-                focus: Some(base),
-                current,
-                ..Default::default()
-            },
-            &mut self.list_scroll,
-        );
+        let style = nacelle::object::dropdown::AccordionStyle {
+            focus: Some(base),
+            current,
+            ..Default::default()
+        };
+        // THE UNFOLD IS THE TOOLKIT'S. `accordion_at` asks
+        // `motion.menu_unfold` itself, so the duration, the easing WORD,
+        // the global `motion.scale` and the effect's own `enabled` flag
+        // are all the theme's. What stood here was a private clock with
+        // `ease_out` written into Rust beside it, honouring exactly one
+        // of the four: a theme that wrote `ease_in_out`, switched the
+        // unfold off, or asked for reduced motion moved this list not at
+        // all. The object's own documentation named this call site as
+        // the one to migrate.
+        let rows = match self.dropdown_since {
+            Some(opened) => nacelle::object::dropdown::accordion_at(
+                ctx,
+                anchor,
+                item_h,
+                names,
+                opened,
+                &style,
+                &mut self.list_scroll,
+            ),
+            // A list standing at rest — the object's documented entry
+            // for a caller that already has its progress.
+            None => nacelle::object::dropdown::accordion(
+                ctx,
+                anchor,
+                item_h,
+                names,
+                1.0,
+                &style,
+                &mut self.list_scroll,
+            ),
+        };
         for (i, (r, _full)) in rows.iter().copied().enumerate() {
             // AS DRAWN: the frame clips the body now and the accordion
             // reports what survived it, so an element scrolled out of
@@ -7421,11 +7451,19 @@ impl Settings {
     /// [`Settings::button_state`] because the door inside an open list
     /// wants the flash and NOT that method's hover rule.
     fn flashing(&self, act: Act) -> bool {
-        static PRESS_MS: OnceLock<TokenId> = OnceLock::new();
-        let press_s =
-            theme::resolved().px(tok(&PRESS_MS, "motion.press.duration_ms")) / 1000.0;
+        // `one_shot_secs` is zero when the theme switches the press off
+        // OR asks for reduced motion, and a decay with no length never
+        // lights the button at all — the one-shot's end state IS an
+        // unlit button, so freezing at it means never lighting. The
+        // hand-rolled read this replaces asked for `duration_ms` alone,
+        // so neither switch ever reached this window (the editor's own
+        // buttons already honoured both, from the same tokens: the two
+        // halves of one desktop disagreed about the same theme).
+        let lit = nacelle::motion::Effect::of("press").one_shot_secs() as f64;
+        // Clamped, not trusted: the frame clock is the caller's and a
+        // pixel-guard run restarts it at zero mid-session.
         self.flash
-            .map(|(a, t)| a == act && t.elapsed().as_secs_f32() < press_s)
+            .map(|(a, t0)| a == act && (self.now - t0).max(0.0) < lit)
             .unwrap_or(false)
     }
 
@@ -8644,6 +8682,202 @@ mod tests {
             s.scroll.offset() > page_before,
             "with the list closed the page must take the wheel back"
         );
+    }
+
+    // -------------------------------------- the unfold is motion.menu_unfold
+
+    /// One frame of an open list, at `t` seconds after it opened, with
+    /// `body` cascaded over the master. Answers the rectangle every name
+    /// was registered at.
+    ///
+    /// The measuring instrument for the three tests below: all of them
+    /// ask what the THEME's `motion.menu_unfold` did to a list caught at
+    /// a known instant, which is a question that could not be put at all
+    /// while this window ran a private `Instant` and an `ease_out`
+    /// written into Rust.
+    fn unfolding(tag: &str, body: &str, t: f64) -> Vec<Rect> {
+        let _t = crate::widgets::Themed::new(tag, body);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        s.dropdown = Some(Dropdown::List(ListId::Looks));
+        // Opened at zero on the frame clock, drawn at `t` on the same
+        // clock — time as a parameter, which is the whole reason the
+        // toolkit's resolver takes it.
+        s.dropdown_since = Some(0.0);
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        ctx.t = t;
+        s.draw(&mut ctx);
+        (0..s.names(ListId::Looks).len())
+            .map(|i| {
+                s.hits
+                    .iter()
+                    .find(|&&(_, a)| a == Act::Pick(ListId::Looks, i))
+                    .map(|&(r, _)| r)
+                    .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+            })
+            .collect()
+    }
+
+    /// `[motion.menu_unfold] enabled = false` is a theme saying "do not
+    /// animate this" — and §5.22's answer for a one-shot that is not to
+    /// run is the END state, not a run in zero time. So the very first
+    /// frame after the press shows the whole list, pressable.
+    ///
+    /// It did not. The window read `duration_ms` and nothing else, so
+    /// the flag it was switched off by never reached it: on frame one
+    /// the progress was zero and the list was a closed blind with
+    /// nothing on it to press. A theme could switch the unfold off and
+    /// find its lists took 150 ms to arrive anyway.
+    #[test]
+    fn a_disabled_unfold_puts_the_list_on_screen_at_once() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::set_viewport(1080.0, 1.0);
+        let rows = unfolding("no-unfold", "[motion.menu_unfold]\nenabled = false\n", 0.0);
+        for (i, r) in rows.iter().enumerate() {
+            assert!(
+                r.w > 0.0 && r.h > 0.0,
+                "name {i} has no area to press on the first frame: {r:?}"
+            );
+        }
+    }
+
+    /// `motion.scale = 0` — §5.23's reduced motion, reaching §5.22's
+    /// catalogue — says the same thing about every effect at once, and
+    /// this window heard none of it. The same first frame, the same
+    /// whole list.
+    #[test]
+    fn reduced_motion_opens_the_list_at_once() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::set_viewport(1080.0, 1.0);
+        let rows = unfolding("still-unfold", "[motion]\nscale = 0.0\n", 0.0);
+        for (i, r) in rows.iter().enumerate() {
+            assert!(
+                r.w > 0.0 && r.h > 0.0,
+                "name {i} still slid in under reduced motion: {r:?}"
+            );
+        }
+    }
+
+    /// And the CURVE is the theme's word. Halfway through the unfold,
+    /// `ease_out` stands at 0.75 of the way and `linear` at 0.5 — so the
+    /// last element of the same list, at the same instant, under two
+    /// themes that differ in one word, is at two different heights.
+    ///
+    /// The `ease_out` this window used to run was written into Rust
+    /// beside the clock, so both themes drew the identical frame.
+    #[test]
+    fn the_unfold_follows_the_easing_word() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::set_viewport(1080.0, 1.0);
+        // Half of `motion.menu_unfold.duration_ms`, in seconds.
+        let half = f64::from(crate::widgets::token_px("motion.menu_unfold.duration_ms"))
+            / 2000.0;
+        let last = |tag: &str, word: &str| -> Rect {
+            let body = format!("[motion.menu_unfold]\neasing = {word}\n");
+            *unfolding(tag, &body, half).last().expect("the list drew no rows")
+        };
+        let linear = last("unfold-linear", "linear");
+        let eased = last("unfold-easeout", "ease_out");
+        assert!(
+            eased.bottom() > linear.bottom() + 0.5,
+            "the easing word did not move the blind: ease_out ends at {}, \
+             linear at {}",
+            eased.bottom(),
+            linear.bottom()
+        );
+    }
+
+    // ------------------------------------------- the flash is motion.press
+
+    /// Whether the settings window lights a button one frame after it
+    /// was pressed, under `body` cascaded over the master.
+    fn lights_on_press(tag: &str, body: &str) -> bool {
+        let _t = crate::widgets::Themed::new(tag, body);
+        let mut s = furnished();
+        s.now = 1.0;
+        s.perform(Act::OpenFont, 0.0);
+        // The next frame, a millisecond later: well inside the master's
+        // 150 ms and outside a decay of no length at all.
+        s.now = 1.001;
+        s.flashing(Act::OpenFont)
+    }
+
+    /// The editor's buttons already honoured `[motion.press] enabled`
+    /// and `motion.scale`; the settings window's did not, out of the
+    /// same two tokens — it asked for `duration_ms` alone. Two halves of
+    /// one desktop disagreeing about one theme is the defect a shared
+    /// resolver exists to end.
+    ///
+    /// A press whose decay has no length never lights the button at all:
+    /// the one-shot's end state IS an unlit button, and freezing at the
+    /// end state means never leaving it.
+    #[test]
+    fn the_settings_flash_obeys_the_switches_the_editors_already_did() {
+        let _g = crate::widgets::theme_test_lock();
+        assert!(
+            lights_on_press("press-master", "[meta]\nschema = 1\n"),
+            "the master's settings buttons do flash"
+        );
+        assert!(
+            !lights_on_press("nopress-settings", "[motion.press]\nenabled = false\n"),
+            "a switched-off press still lit a settings button"
+        );
+        assert!(
+            !lights_on_press("still-settings", "[motion]\nscale = 0.0\n"),
+            "reduced motion still lit a settings button"
+        );
+    }
+
+    /// Every effect this binary names by string, against the master's
+    /// closed catalogue.
+    ///
+    /// `motion::Effect::of` takes a `&str`, and an id outside §5.22's
+    /// catalogue does not fail — it warns once to stderr and then
+    /// freezes at fully visible forever. So a typo in one of these
+    /// names is a silently dead animation, which is precisely the
+    /// failure a compiler cannot catch and a screenshot barely can.
+    /// This is the fail-closed guard for it: the names the desktop
+    /// passes, and the names the toolkit passes on the desktop's behalf.
+    ///
+    /// ONE id is left off deliberately, and it is left off in the open:
+    /// `widgets/boot.rs` asks for `boot_sub_blink`, which the master
+    /// does not declare and never has. That file's own comment says so —
+    /// the boot line stands still and the effect is reported once,
+    /// rather than a fourth blink being invented in Rust. It belongs in
+    /// this list the day the master grows the section, and not before.
+    #[test]
+    fn every_motion_effect_the_desktop_names_is_declared() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        for id in [
+            // named in this file (`Settings::flashing`) and in
+            // `widgets/editor.rs` (`press_ms`)
+            "press",
+            // `widgets/editor.rs` (`grow_progress`)
+            "widget_grow",
+            // `mood.rs` (`Fade::read`)
+            "mood_change",
+            // named by `object::dropdown::accordion_at` for this
+            // window's lists — the desktop's animation, resolved on the
+            // other side of the seam
+            "menu_unfold",
+        ] {
+            assert!(
+                nacelle::theme::id(&format!("motion.{id}.duration_ms")).is_some(),
+                "motion.{id} is not in the master's catalogue — every ask \
+                 for it freezes at fully visible and says so only once"
+            );
+            assert!(
+                nacelle::theme::id(&format!("motion.{id}.enabled")).is_some(),
+                "motion.{id} has no enabled flag"
+            );
+            assert!(
+                nacelle::theme::id(&format!("motion.{id}.easing")).is_some(),
+                "motion.{id} has no easing word"
+            );
+        }
     }
 
     /// The keyboard split: sliders answer arrows, everything else
