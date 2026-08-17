@@ -140,8 +140,8 @@ use std::path::{Path, PathBuf};
 // bound is not among them: it is applied where the field is read and
 // nothing outside asks for it.
 pub use model::{
-    color_spaces, space_range, SpaceRange, COLOR_SPACES, COLOR_SPACE_TABLE, GRID_MAX,
-    GRID_MIN,
+    color_depths, color_spaces, space_range, SpaceRange, COLOR_SPACES,
+    COLOR_SPACE_TABLE, GRID_MAX, GRID_MIN,
 };
 
 
@@ -3215,6 +3215,67 @@ mod tests {
         assert_eq!(c.theme.name(), Some("azure"));
         assert_eq!(c.sounds, Choice::Inherit, "the old file no longer answers here");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The depth and the space are TWO LINES OF ONE STATEMENT, and the
+    /// reading rules on the pair.
+    ///
+    /// Either field alone passes: eight is a depth this program can ask
+    /// for, `bt2020 pq` is a space it knows. Together they ask for a
+    /// picture that bands, and nothing used to look at them together —
+    /// so a file could say what the settings window forbids, and the
+    /// swapchain, which reads this and never asks the window anything,
+    /// was handed it. This is the one place both fields are in reach.
+    ///
+    /// The floor is read off the space here exactly as the COLOR page
+    /// reads it off its switch (`color_depths`), which is what keeps
+    /// the page and the swapchain from being told different numbers.
+    #[test]
+    fn a_depth_the_named_space_cannot_show_is_raised_by_the_reading() {
+        let high = |bits: Option<u32>| model::ColorConf {
+            depth: bits,
+            space: Choice::named("bt2020 pq"),
+            ..Default::default()
+        };
+        let offered = color_depths(true);
+        assert!(
+            !offered.contains(&8),
+            "the high-range offer holds eight bits: this test is measuring \
+             nothing"
+        );
+        assert!(
+            offered.contains(&high(Some(8)).depth()),
+            "a file saying depth 8 and space 'bt2020 pq' resolved to {} bits, \
+             which the high range is not shown in",
+            high(Some(8)).depth()
+        );
+        // A file that names the space and no depth is the same pair with
+        // the model's own default written in it, and the default is the
+        // eight this cannot use.
+        assert_eq!(model::ColorConf::DEPTH, 8, "the default depth moved");
+        assert!(
+            offered.contains(&high(None).depth()),
+            "a high-range space with no depth beside it resolved to {} bits",
+            high(None).depth()
+        );
+        // It raises and never lowers: what the user wrote above the
+        // floor is theirs.
+        assert_eq!(high(Some(16)).depth(), 16, "the reading took a depth away");
+
+        // And it touches nothing else. A standard-range space keeps the
+        // eight — the pair is only contradictory in one direction.
+        for name in ["auto", "srgb", "display p3", "adobe rgb"] {
+            let c = model::ColorConf {
+                depth: Some(8),
+                space: Choice::named(name),
+                ..Default::default()
+            };
+            assert_eq!(
+                c.depth(),
+                8,
+                "'{name}' is a standard-range space and eight bits shows it"
+            );
+        }
     }
 
     /// A file with a syntax error costs the WHOLE file — that is what

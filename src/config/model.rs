@@ -602,6 +602,52 @@ pub fn color_spaces(hdr: bool) -> Vec<&'static str> {
         .collect()
 }
 
+/// Every bit depth the swapchain may be asked for, ASCENDING — which is
+/// what makes an offer a slice of this and not a second list.
+///
+/// Twelve rides in sixteen-bit float buffers (Vulkan has no twelve-bit
+/// swapchain format) and what the wire carries is between the compositor
+/// and the display; the numbers here are what the program asks for.
+pub const COLOR_DEPTHS: [u32; 4] = [8, 10, 12, 16];
+
+impl SpaceRange {
+    /// The fewest bits a picture of this range can be given in.
+    ///
+    /// ST 2084 spends its code points over a range eight bits has no
+    /// steps for, so eight-bit PQ bands visibly — and neither the
+    /// settings window nor the swapchain has anywhere to say so. THE
+    /// ONE STATEMENT of that floor: the COLOR page takes its depth offer
+    /// from it ([`color_depths`]) and so does the reading of the
+    /// configuration ([`ColorConf::depth`]), which is why a file cannot
+    /// hand the two of them different answers.
+    ///
+    /// "auto" ([`SpaceRange::Either`]) names no space at all and asks
+    /// the compositor for nothing in particular, so it carries the
+    /// standard floor: which range a window showing "auto" stands on is
+    /// the switch's business, not the name's.
+    pub const fn depth_floor(self) -> u32 {
+        match self {
+            SpaceRange::Hdr => HDR_DEPTH_FLOOR,
+            _ => COLOR_DEPTHS[0],
+        }
+    }
+}
+
+/// Ten bits, and the reason is in [`SpaceRange::depth_floor`].
+const HDR_DEPTH_FLOOR: u32 = 10;
+
+/// The depths ONE offer holds. A floor cuts a prefix off an ascending
+/// table, so an offer is a slice of [`COLOR_DEPTHS`] rather than a
+/// second list that could fall behind it.
+pub fn color_depths(hdr: bool) -> &'static [u32] {
+    let floor = if hdr { SpaceRange::Hdr } else { SpaceRange::Sdr }.depth_floor();
+    let cut = COLOR_DEPTHS
+        .iter()
+        .position(|&d| d >= floor)
+        .unwrap_or(COLOR_DEPTHS.len());
+    &COLOR_DEPTHS[cut..]
+}
+
 /// The colour pipeline: a Wayland-session matter throughout — read,
 /// shown and applied only there.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -645,12 +691,27 @@ impl ColorConf {
     /// Leave the compositor's own choice in place.
     pub const SPACE: &'static str = "auto";
 
-    /// Twelve rides in sixteen-bit float buffers — Vulkan has no
-    /// twelve-bit swapchain format — and what the wire carries is
-    /// between the compositor and the display. A depth this program
-    /// cannot ask for is not a reason to fail to start.
+    /// The depth to ask the swapchain for — READ AGAINST THE SPACE
+    /// BESIDE IT, because the two are one statement and the file writes
+    /// them as two lines.
+    ///
+    /// A depth this program cannot ask for is not a reason to fail to
+    /// start, so an unknown number falls back to [`ColorConf::DEPTH`].
+    /// And a legal number can still be the wrong one FOR THE SPACE THIS
+    /// FILE NAMES: `depth: 8` with `space: "bt2020 pq"` passes any test
+    /// either field can make alone, and asks for a picture that bands
+    /// (`SpaceRange::depth_floor`). This is the place that can rule on
+    /// the pair — both fields are here — and it is the reason there is
+    /// no `hdr` field for the file to contradict the space with: the
+    /// range is READ OFF the space, and the depth is raised to what that
+    /// range needs. The settings window and the swapchain read through
+    /// this one method, so neither can be handed the banded picture.
+    ///
+    /// It raises and never lowers: a depth is a floor to meet, and what
+    /// the user wrote above it is theirs.
     pub fn depth(&self) -> u32 {
-        self.depth.filter(|d| matches!(d, 8 | 10 | 12 | 16)).unwrap_or(Self::DEPTH)
+        let bits = self.depth.filter(|d| COLOR_DEPTHS.contains(d)).unwrap_or(Self::DEPTH);
+        bits.max(space_range(&self.space()).depth_floor())
     }
 
     /// A name the application can actually turn into primaries and a

@@ -3089,12 +3089,13 @@ static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
 /// only a fixed note about where the LUT and ICC files live. The owner's
 /// rule settles it (`decyzja-ustawienia-ekranu.md`): what cannot give a
 /// picture is not on the screen.
+///
+/// The floor itself is the MODEL's (`SpaceRange::depth_floor`), not this
+/// page's. The configuration is read through the same statement, so a
+/// depth the page will not offer is also a depth the swapchain will not
+/// be asked for, however the file arrived at it.
 fn depth_values(s: &Settings) -> &'static [u32] {
-    if s.color_hdr {
-        &[10, 12, 16]
-    } else {
-        &[8, 10, 12, 16]
-    }
+    config::color_depths(s.color_hdr)
 }
 
 /// Whether this machine can be asked for high dynamic range at all: at
@@ -6911,9 +6912,20 @@ impl Settings {
 
     /// What this compositor said it can be asked for, from the
     /// application — `None` when there is nobody to ask.
+    ///
+    /// The report decides whether the switch is on the page at all
+    /// ([`hdr_possible`]), so learning it is a way of stranding a window
+    /// that is standing on the high range: SPACE HDR over a list holding
+    /// nothing but "auto", and no switch anywhere to turn it back. The
+    /// standing name therefore goes back through [`Settings::set_space`]
+    /// — the ONE writer, which settles the side, applies that rule and
+    /// rebuilds the offer — instead of the offer being rebuilt behind
+    /// the window's back. Told twice, or told what it already knew, it
+    /// lands on exactly the same state.
     pub fn set_supported_spaces(&mut self, names: Option<Vec<String>>) {
         self.color_supported = names;
-        self.rebuild_spaces();
+        let standing = self.color_space.clone();
+        self.set_space(&standing);
     }
 
     /// Whether the compositor said it can be asked for this name.
@@ -7077,7 +7089,6 @@ impl Settings {
     /// the page on a side with no switch to leave by: [`Settings::
     /// set_space`] holds that rule, for every writer at once.
     fn seed_color(&mut self, prefs: config::ColorPrefs) {
-        self.color_depth = prefs.depth;
         self.color_lut = prefs.lut;
         self.color_icc = prefs.icc;
         self.last_sdr = None;
@@ -7086,6 +7097,20 @@ impl Settings {
         self.color_hdr =
             config::space_range(&prefs.space) == config::SpaceRange::Hdr;
         self.set_space(&prefs.space);
+        // THE PAGE OPENS ON A MEMBER OF THE OFFER IT OPENS WITH. The
+        // depth and the space are two lines of a file and one statement
+        // (`ColorConf::depth`), and this is the second reader of that
+        // pair: a page seeded with a depth below the floor of the side
+        // it lands on would draw a DEPTH row with nothing marked in it
+        // and no way to mark anything — the missing number cannot be
+        // pressed, because it is not on the screen to press.
+        //
+        // No memo is left behind. `depth_before_hdr` is what the SWITCH
+        // took and owes back, and no switch was turned here; the raised
+        // depth is what the file's own pair means, so turning HDR off
+        // afterwards has nothing to give back.
+        let floor = depth_values(self).first().copied().unwrap_or(prefs.depth);
+        self.color_depth = prefs.depth.max(floor);
     }
 
     /// The names of one list, in the order they are offered.
@@ -9493,6 +9518,125 @@ mod tests {
         assert!(
             depth_values(&s).contains(&8),
             "the standard-range depth offer did not come back with the page"
+        );
+    }
+
+    /// The page opens on a depth it can show, whatever pair the file
+    /// holds.
+    ///
+    /// `depth` and `space` are two lines and one statement, and the
+    /// switch is READ OFF the space — so a file saying eight bits and
+    /// `bt2020 pq` opens the page on the high range with a DEPTH row
+    /// that has nothing marked in it and no way to mark anything: the
+    /// eight is not on the screen to be pressed. The rule that takes it
+    /// off the offer used to live on the switch's path alone, where a
+    /// file never goes.
+    #[test]
+    fn a_page_opened_from_the_file_stands_on_a_depth_it_offers() {
+        // Every pair the file can hold, and the two answers each of them
+        // has to satisfy: the depth is a member of the offer the page
+        // opened with, and the page promises a press for it.
+        for &(space, _) in config::COLOR_SPACE_TABLE.iter() {
+            for bits in crate::config::model::COLOR_DEPTHS {
+                let mut s = color_open();
+                s.seed_color(config::ColorPrefs {
+                    depth: bits,
+                    space: space.to_string(),
+                    lut: None,
+                    icc: None,
+                });
+                assert!(
+                    depth_values(&s).contains(&s.color_depth),
+                    "'{space}' at {bits} bits opened the page on {} bits, which \
+                     is not in the offer {:?} it opened with",
+                    s.color_depth,
+                    depth_values(&s)
+                );
+                assert!(
+                    described_acts(&s, page(View::Color))
+                        .contains(&Act::ColorDepth(s.color_depth)),
+                    "'{space}' at {bits} bits: the standing depth {} has no \
+                     press on the page",
+                    s.color_depth
+                );
+                // Raised and never lowered, and never raised where the
+                // pair was not contradictory in the first place.
+                assert!(
+                    s.color_depth >= bits,
+                    "'{space}' at {bits} bits: the page took the depth DOWN to {}",
+                    s.color_depth
+                );
+                if depth_values(&s).contains(&bits) {
+                    assert_eq!(
+                        s.color_depth, bits,
+                        "'{space}': a depth the page can show was changed anyway"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Learning what the machine offers never strands the page on the
+    /// high range.
+    ///
+    /// The report decides whether the switch is on the page at all, so
+    /// it is a writer of the same state `set_space` guards — and a
+    /// second writer that skipped the guard would produce exactly the
+    /// dead end the guard exists for: SPACE HDR over a list holding
+    /// nothing but "auto", with no switch anywhere to turn it back. Told
+    /// from the high range, which is the only position it can strand.
+    #[test]
+    fn learning_the_offer_never_leaves_the_page_on_a_side_it_cannot_leave() {
+        let mut s = color_on("bt2020 pq");
+        assert!(s.color_hdr, "the fixture did not reach the high range");
+
+        s.set_supported_spaces(Some(
+            config::COLOR_SPACE_TABLE
+                .iter()
+                .filter(|(_, r)| *r != config::SpaceRange::Hdr)
+                .map(|&(n, _)| n.to_string())
+                .collect(),
+        ));
+
+        assert!(
+            !s.color_hdr,
+            "a report with no high range in it left the page standing on the \
+             high range"
+        );
+        assert_eq!(ListId::Spaces.label(&s), "SPACE");
+        assert!(
+            !described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
+            "this test is measuring nothing: the switch is still on the page"
+        );
+        assert!(
+            depth_values(&s).contains(&s.color_depth),
+            "the page kept a depth of {} that the side it came back to does \
+             not offer",
+            s.color_depth
+        );
+        // The list under the word is the standard range whole, and the
+        // space the file named stands in none of it — which is the
+        // truth: this machine is not showing it.
+        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+            assert_eq!(
+                s.names(ListId::Spaces).iter().any(|n| n == name),
+                range != config::SpaceRange::Hdr,
+                "'{name}' is on the wrong side of the offer"
+            );
+        }
+
+        // And the report that says nothing new says nothing at all: a
+        // window told twice is in the state it was told once.
+        let mut a = color_on("srgb");
+        let mut b = color_on("srgb");
+        let all: Vec<String> = config::COLOR_SPACES.iter().map(|n| n.to_string()).collect();
+        a.set_supported_spaces(Some(all.clone()));
+        b.set_supported_spaces(Some(all.clone()));
+        b.set_supported_spaces(Some(all));
+        assert_eq!(
+            (a.color_hdr, a.color_space.clone(), a.names(ListId::Spaces).to_vec()),
+            (b.color_hdr, b.color_space.clone(), b.names(ListId::Spaces).to_vec()),
+            "being told the same offer twice moved the page"
         );
     }
 
