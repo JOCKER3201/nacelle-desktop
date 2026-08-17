@@ -28,6 +28,18 @@
 //! forever. Hence [`Lane`], which is asked at every frame boundary and
 //! re-arms the list when the answer has moved.
 //!
+//! # Why the list and the arming are one object
+//!
+//! [`FrameList`] exists because the first shape of this wiring was
+//! three loose lines — arm where the list is built, arm where the frame
+//! takes it over, arm in the dialog's own loop — and a loose line is
+//! exactly what a merge drops without anything saying so: the program
+//! keeps building, keeps drawing, and silently draws every silhouette
+//! on the lane the theme did not ask for. So the list is not reachable
+//! except through [`FrameList::begin`], which empties it and arms it in
+//! one move. Losing the arming now means losing the list with it, which
+//! is a question the compiler asks instead of a reviewer.
+//!
 //! # Why the question is asked per frame, and what it costs
 //!
 //! Reading the flag is `ACTIVE.load(Acquire)` followed by one bounds
@@ -38,12 +50,16 @@
 //!
 //! The obvious alternative — gate the read on `theme::content_epoch()`
 //! and skip even that — was weighed and rejected, because that counter
-//! deliberately does not move for a PREVIEW. It cannot: it is what
-//! guards the font-face reload, and a preview pulses ten times a second
-//! behind the theme editor's sliders (moving it is how `--desktop` once
-//! reached 100 % CPU). Gating on it would leave a live-previewed
-//! `render.vector` silently ignored, which is a hole with no upside
-//! when the un-gated read is two instructions.
+//! deliberately does not move for a PREVIEW: `theme::set_preview`
+//! publishes a fresh bake and leaves the content counter where it is,
+//! so that the font system it guards does not walk the font directories
+//! behind a slider that pulses ten times a second. (The counter exists
+//! at all because that guard used to be `theme::epoch()`, which on a
+//! desktop of unequal screen heights alternates every frame by design
+//! and so put `--desktop` at 100 % CPU — the epoch's doing, not the
+//! editor's.) Gating on it would leave a live-previewed `render.vector`
+//! silently ignored, which is a hole with no upside when the un-gated
+//! read is two instructions.
 
 use nacelle::draw::DrawList;
 use nacelle::theme::{self, TokenId};
@@ -58,9 +74,10 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
 
 /// Whether the running theme asks for the vector lane.
 ///
-/// Public because it is the answer to "which lane is this build
-/// drawing", and a report is entitled to ask it without owning a list.
-pub fn wanted() -> bool {
+/// Private, and staying private until something outside this module has
+/// a reason to ask: the lane is a property of a list, and everything
+/// that owns a list here owns a [`FrameList`] that answers for it.
+fn wanted() -> bool {
     static VECTOR: OnceLock<TokenId> = OnceLock::new();
     theme::resolved().flag(tok(&VECTOR, "render.vector"))
 }
@@ -71,7 +88,7 @@ pub fn wanted() -> bool {
 /// screen: two monitors are two lists and the mode is a property of a
 /// list, not of the process.
 #[derive(Default, Debug)]
-pub struct Lane {
+struct Lane {
     /// What the list was last told, or `None` while it has never been
     /// told anything. `None` rather than `false` on purpose: a fresh
     /// list is already tessellating, but "nobody has answered yet" and
@@ -81,17 +98,17 @@ pub struct Lane {
 }
 
 impl Lane {
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Lane { armed: None }
     }
 
     /// Brings `dl` into line with the running theme, and says whether
     /// it had to.
     ///
-    /// Call at the frame boundary, after `clear()`. `clear()` does not
+    /// Called at the frame boundary, after `clear()`. `clear()` does not
     /// disturb the mode — the toolkit tests that — so a steady frame
     /// answers `false` here and touches nothing.
-    pub fn arm(&mut self, dl: &mut DrawList) -> bool {
+    fn arm(&mut self, dl: &mut DrawList) -> bool {
         let want = wanted();
         if self.armed == Some(want) {
             return false;
@@ -99,6 +116,65 @@ impl Lane {
         self.armed = Some(want);
         dl.set_vector(want);
         true
+    }
+}
+
+/// A draw list and the lane it is armed on, kept between frames.
+///
+/// One per surface that draws with the toolkit: one per screen, and one
+/// for the resolution dialog, which hands `shapes()` to the same
+/// renderer and would otherwise be a second answer to the same token.
+pub struct FrameList {
+    /// The list between frames, kept so a steady frame allocates
+    /// nothing. While a frame holds it this is an empty stand-in — see
+    /// `out`.
+    dl: DrawList,
+    /// True from [`FrameList::begin`] until [`FrameList::end`] takes the
+    /// list back. It is how a second `begin` learns that the lane
+    /// remembers a list that never came home: a frame that returns early
+    /// takes the memory of its arming with it, and without this the next
+    /// frame would be handed a fresh list the lane believes it has
+    /// already armed.
+    out: bool,
+    lane: Lane,
+}
+
+impl FrameList {
+    pub fn new() -> Self {
+        FrameList { dl: DrawList::new(), out: false, lane: Lane::new() }
+    }
+
+    /// The list for the frame about to be drawn: empty, armed against
+    /// the theme running right now, and carrying the capacity the last
+    /// frame earned.
+    ///
+    /// It goes out by value because a frame holds the list and the
+    /// screen the list belongs to at the same time; [`FrameList::end`]
+    /// puts it back.
+    pub fn begin(&mut self) -> DrawList {
+        let mut dl = std::mem::replace(&mut self.dl, DrawList::new());
+        if self.out {
+            // What is in hand is the stand-in, not the list the lane
+            // remembers arming. Forgetting is what makes the arming
+            // below unconditional again.
+            self.lane = Lane::new();
+        }
+        self.out = true;
+        dl.clear();
+        self.lane.arm(&mut dl);
+        dl
+    }
+
+    /// Takes the drawn list back, capacity and all.
+    pub fn end(&mut self, dl: DrawList) {
+        self.dl = dl;
+        self.out = false;
+    }
+
+    /// What the last finished frame drew — the list the renderer is
+    /// handed. Empty while a frame holds it.
+    pub fn list(&self) -> &DrawList {
+        &self.dl
     }
 }
 
@@ -138,22 +214,21 @@ mod tests {
         {
             let _theme = Themed::new("vector-on", "[render]\nvector = true\n");
             assert!(wanted(), "the fixture theme asks for the vector lane");
-            let mut dl = DrawList::new();
-            let mut lane = Lane::new();
-            assert!(lane.arm(&mut dl), "a fresh lane must arm unconditionally");
+            let mut frame = FrameList::new();
+            let mut dl = frame.begin();
             panel(&mut dl);
             assert_eq!(
                 drew_shapes(&dl),
                 1,
                 "render.vector = true must put the panel on the shape lane"
             );
+            frame.end(dl);
         }
 
         let _theme = Themed::new("vector-off", "[render]\nvector = false\n");
         assert!(!wanted());
-        let mut dl = DrawList::new();
-        let mut lane = Lane::new();
-        lane.arm(&mut dl);
+        let mut frame = FrameList::new();
+        let mut dl = frame.begin();
         panel(&mut dl);
         assert_eq!(
             drew_shapes(&dl),
@@ -166,49 +241,84 @@ mod tests {
         );
     }
 
+    /// What [`FrameList::begin`] promises the frame that calls it, and
+    /// the reason the promise is one call instead of two lines: the list
+    /// arrives EMPTY and on the lane the theme asks for RIGHT NOW.
+    ///
+    /// The order is the one every screen sees — the list is built while
+    /// the master is running, and the theme that raises the switch is
+    /// loaded afterwards — so a `begin` that handed out the list without
+    /// asking the theme again would be caught here and nowhere else.
+    #[test]
+    fn a_frame_opens_on_an_empty_list_armed_by_the_running_theme() {
+        let _lock = theme_test_lock();
+        // Built under the master, which ships the switch down.
+        let mut frame = FrameList::new();
+
+        let _theme = Themed::new("late-load", "[render]\nvector = true\n");
+        let mut dl = frame.begin();
+        assert!(dl.verts.is_empty(), "a frame opens on an empty list");
+        panel(&mut dl);
+        assert_eq!(
+            drew_shapes(&dl),
+            1,
+            "the list must be armed by the theme running when the frame opened"
+        );
+        frame.end(dl);
+
+        // And the frame after it: the geometry of the frame before is
+        // gone, the lane it was on is not.
+        let mut dl = frame.begin();
+        assert!(dl.verts.is_empty(), "the next frame opens on an empty list too");
+        assert_eq!(drew_shapes(&dl), 0, "and on an empty record table");
+        panel(&mut dl);
+        assert_eq!(drew_shapes(&dl), 1, "a steady frame does not leave the lane");
+        frame.end(dl);
+    }
+
     /// The condition f3 §6 K3 calls the easy one to miss: the mode is set
     /// at EVERY theme load, not once where the list is built. A host that
     /// armed its list in the constructor would draw the theme it started
     /// with for the rest of the session, and no amount of loading would
     /// move it.
     ///
-    /// The list here is the one from the first theme, kept across the
-    /// swap exactly as a screen keeps its own between frames.
+    /// The `FrameList` here is the one from the first theme, kept across
+    /// the swap exactly as a screen keeps its own between frames.
     #[test]
     fn the_list_survives_a_theme_swap() {
         let _lock = theme_test_lock();
-        let mut dl = DrawList::new();
-        let mut lane = Lane::new();
+        let mut frame = FrameList::new();
 
         {
             let _theme = Themed::new("swap-off", "[render]\nvector = false\n");
-            lane.arm(&mut dl);
+            let mut dl = frame.begin();
             panel(&mut dl);
             assert_eq!(drew_shapes(&dl), 0, "the first theme says no");
+            frame.end(dl);
         }
 
         // A second theme is loaded under the SAME list — the swap the
         // settings window makes, and the one a mood makes.
         {
             let _theme = Themed::new("swap-on", "[render]\nvector = true\n");
-            dl.clear();
-            assert!(lane.arm(&mut dl), "the swap must re-arm the list");
+            let mut dl = frame.begin();
             panel(&mut dl);
             assert_eq!(
                 drew_shapes(&dl),
                 1,
                 "the list must follow the theme that was loaded after it was built"
             );
+            frame.end(dl);
         }
 
         // And back, because a switch that only latches one way is not a
         // switch. Dropping the fixture above already restored the master
         // — whose `render.vector` is false — so this is the master's own
         // answer arriving at a list that had been told otherwise.
-        dl.clear();
-        assert!(lane.arm(&mut dl), "unloading the fixture must re-arm too");
+        let mut dl = frame.begin();
         panel(&mut dl);
         assert_eq!(drew_shapes(&dl), 0, "the master ships the tessellated lane");
+        frame.end(dl);
     }
 
     /// A mode is not frame state: clearing the list for the next frame
@@ -217,14 +327,16 @@ mod tests {
     /// The second half is the one that would go unnoticed: an `arm` that
     /// answered `true` every frame would still draw correctly and would
     /// silently drop the weld the toolkit uses to fuse a bed, its wash
-    /// and its border into one record — `set_vector` resets it.
+    /// and its border into one record — `set_vector` resets it. So this
+    /// one asks the lane directly, which is the only place the answer
+    /// "did it have to" exists.
     #[test]
     fn a_frame_boundary_is_not_a_theme_load() {
         let _lock = theme_test_lock();
         let _theme = Themed::new("steady", "[render]\nvector = true\n");
         let mut dl = DrawList::new();
         let mut lane = Lane::new();
-        assert!(lane.arm(&mut dl));
+        assert!(lane.arm(&mut dl), "a fresh lane must arm unconditionally");
         for frame in 0..4 {
             dl.clear();
             assert!(
@@ -234,6 +346,32 @@ mod tests {
             panel(&mut dl);
             assert_eq!(drew_shapes(&dl), 1, "frame {frame} left the lane");
         }
+    }
+
+    /// The other end of the same memo: a list that was handed out and
+    /// never came back takes the lane's memory of arming it with it.
+    ///
+    /// This is what a frame that returns early looks like from here, and
+    /// without the `out` flag it would be the quiet failure — the next
+    /// frame gets a FRESH list, the lane still believes it armed one,
+    /// and the desktop draws the rest of the session on the wrong lane
+    /// while every test that owns its own list keeps passing.
+    #[test]
+    fn a_list_that_never_came_back_is_armed_from_scratch() {
+        let _lock = theme_test_lock();
+        let _theme = Themed::new("early-out", "[render]\nvector = true\n");
+        let mut frame = FrameList::new();
+
+        let dl = frame.begin();
+        drop(dl); // the frame returned before `end`
+
+        let mut dl = frame.begin();
+        panel(&mut dl);
+        assert_eq!(
+            drew_shapes(&dl),
+            1,
+            "the list that replaced the lost one was never told which lane it is on"
+        );
     }
 
     /// The shipping answer, stated as a test rather than as a promise:

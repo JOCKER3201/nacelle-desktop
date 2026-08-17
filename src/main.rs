@@ -3081,17 +3081,12 @@ fn draw_screen(
     // The list is taken OUT of the screen for the frame, so the drawing
     // below may hold it and the screen's own state at the same time; it
     // goes back with its capacity at the end, and a steady frame
-    // allocates nothing.
-    let mut dl = std::mem::replace(&mut sc.dl, draw::DrawList::new());
-    dl.clear();
-    // Which lane this frame's silhouettes take (f3 §6 K3a). Asked here,
-    // at the frame boundary, because a theme can be loaded between two
-    // frames — the settings window loads one, a mood swaps a sibling —
-    // and a list armed only where it was built would draw the theme the
-    // program started with for the rest of the session. `clear()` above
-    // does not touch the mode, so a steady frame passes straight
-    // through this and `set_vector` is not called at all.
-    sc.vector.arm(&mut dl);
+    // allocates nothing. It comes out empty and on the lane the theme
+    // asks for right now (f3 §6 K3a) — `begin` does both, because a
+    // theme can be loaded between two frames and a list emptied without
+    // being asked again would draw the theme the program started with
+    // for the rest of the session.
+    let mut dl = sc.frame.begin();
     let white = theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
     // The backdrop plate is the first thing in the list — z 0, under
     // every panel, inside the glass snapshot. White tint is the
@@ -3631,7 +3626,7 @@ fn draw_screen(
     // Only the touched rows travel — a glyph-churn frame re-uploads a
     // shelf, not the whole four megabytes.
     let drained = fonts.take_dirty_rows();
-    sc.dl = dl;
+    sc.frame.end(dl);
     sc.present_frame(fonts, drained);
     (grid_now, drained)
 }
@@ -3709,13 +3704,12 @@ fn run_resolution_dialog(
         .build(&event_loop)
         .expect("cannot create window");
     let mut gfx = nacelle_renderer::Gfx::new(&window, window.inner_size().width, window.inner_size().height);
-    let mut dl = draw::DrawList::new();
     // The dialog is drawn with the toolkit and hands `shapes()` to the
     // same renderer, so it reads `render.vector` like every other list.
     // A window that told the user the resolution was refused, and drew
     // its own frame through a different lane than the desktop's, would
     // be a second answer to the same token.
-    let mut lane = vector::Lane::new();
+    let mut frame = vector::FrameList::new();
     let mut mouse = (0.0f32, 0.0f32);
 
     event_loop
@@ -3759,8 +3753,7 @@ fn run_resolution_dialog(
                         let size = window.inner_size();
                         let (w, h) = (size.width as f32, size.height as f32);
                         fonts.begin_frame();
-                        dl.clear();
-                        lane.arm(&mut dl);
+                        let mut dl = frame.begin();
                         let mut ctx = widgets::Ctx {
                             dl: &mut dl,
                             fonts: &mut fonts,
@@ -3797,6 +3790,9 @@ fn run_resolution_dialog(
                             atlas_rows.map(|(y0, rows)| (fonts.atlas.as_slice(), y0, rows)),
                             [clear.r, clear.g, clear.b, 1.0],
                         );
+                        // Back where it came from, so the next redraw
+                        // re-uses the capacity instead of the allocator.
+                        frame.end(dl);
                     }
                     _ => {}
                 },

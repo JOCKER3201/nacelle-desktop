@@ -113,9 +113,9 @@ impl Drop for Themed {
 /// window `h` tall — [`drawn_text`]'s sibling, kept for the questions
 /// that are about geometry rather than about strings.
 ///
-/// `vector` arms the list the way `crate::vector::Lane` arms a screen's,
-/// so one drawer can be measured on both lanes without a theme swap
-/// between the two runs; nothing else here differs between them.
+/// `vector` arms the list the way `crate::vector::FrameList` arms a
+/// screen's, so one drawer can be measured on both lanes without a theme
+/// swap between the two runs; nothing else here differs between them.
 ///
 /// A real `FontSystem` is built, so glyphs land in a real atlas and the
 /// runs are the runs the renderer would be handed. No GPU is touched.

@@ -23,7 +23,7 @@
 use crate::config;
 use crate::widgets;
 use nacelle::base::{Panel, Rect, SizeTable};
-use nacelle::draw::{DrawList, ImageId};
+use nacelle::draw::ImageId;
 use nacelle::layout::{BoardId, InstanceId, LayoutDef};
 use nacelle::stage::BoardWorld;
 use std::sync::mpsc::Receiver;
@@ -288,16 +288,20 @@ pub struct Screen {
     /// Which placement reported a character grid on the last frame.
     pub term_inst: Option<InstanceId>,
     /// This screen's own draw list, kept between frames so a steady
-    /// frame allocates nothing.
-    pub dl: DrawList,
-    /// Which lane [`Screen::dl`] is drawing silhouettes on, and the
-    /// memory that keeps `render.vector` from being asked a second time
-    /// for an answer that has not moved (f3 §6 K3a).
+    /// frame allocates nothing, together with the lane it is armed on
+    /// (f3 §6 K3a).
+    ///
+    /// The two arrive as one object because they cannot be got right
+    /// separately: a frame that empties the list without asking
+    /// `render.vector` again draws this theme on the last theme's lane.
+    /// `crate::vector::FrameList::begin` is the only way to the list and
+    /// does both, so the arming cannot be dropped without dropping the
+    /// frame with it.
     ///
     /// Beside the list rather than beside the theme, because the mode
     /// belongs to a LIST: two monitors are two lists, and each is armed
     /// where it is cleared.
-    pub vector: crate::vector::Lane,
+    pub frame: crate::vector::FrameList,
     /// Widget padding: the content inset from the outer panel edge. The
     /// user's one setting, mirrored here because every solve this
     /// screen makes needs it — including the ones outside a frame, when
@@ -429,8 +433,7 @@ impl Screen {
             mouse: (0.0, 0.0),
             pointer: nacelle::pointer::Pointer::default(),
             term_inst: None,
-            dl: DrawList::new(),
-            vector: crate::vector::Lane::new(),
+            frame: crate::vector::FrameList::new(),
             pad,
             backdrop: None,
             overlay: None,
@@ -439,12 +442,6 @@ impl Screen {
             atlas_behind: None,
             atlas_synced: false,
         };
-        // The list is armed the moment it exists, so it is never in a
-        // state that contradicts the theme — not even for the frames
-        // between here and the first one drawn. The frame boundary arms
-        // it again whenever the answer moves; this is the first of
-        // those times, not the only one.
-        sc.vector.arm(&mut sc.dl);
         sc.reload_layaut();
         Some(sc)
     }
@@ -857,12 +854,16 @@ impl Screen {
         // The swapchain clear is the absolute bed — one rung below the
         // board's own fill; the master forces its alpha to 1.0.
         let clear = nacelle::deco::clear_color();
+        // The list the frame just gave back. Empty if a frame is still
+        // holding it, which the one caller cannot be doing: it hands the
+        // list back on the line above this call.
+        let dl = self.frame.list();
         self.gfx.render(
             size.width,
             size.height,
-            &self.dl.verts,
-            &self.dl.runs,
-            self.dl.shapes(),
+            &dl.verts,
+            &dl.runs,
+            dl.shapes(),
             atlas,
             [clear.r, clear.g, clear.b, 1.0],
         );
