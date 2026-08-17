@@ -109,6 +109,47 @@ impl Drop for Themed {
     }
 }
 
+/// The whole draw list a piece of chrome produced, drawn headlessly on a
+/// window `h` tall — [`drawn_text`]'s sibling, kept for the questions
+/// that are about geometry rather than about strings.
+///
+/// `vector` arms the list the way `crate::vector::Lane` arms a screen's,
+/// so one drawer can be measured on both lanes without a theme swap
+/// between the two runs; nothing else here differs between them.
+///
+/// A real `FontSystem` is built, so glyphs land in a real atlas and the
+/// runs are the runs the renderer would be handed. No GPU is touched.
+#[cfg(test)]
+pub(crate) fn drawn_list(
+    h: f32,
+    t: f64,
+    vector: bool,
+    draw: impl FnOnce(&mut Ctx),
+) -> nacelle::draw::DrawList {
+    nacelle::theme::resolved();
+    nacelle::theme::set_viewport(h, 1.0);
+    let mut fonts = crate::font::FontSystem::new();
+    let mut dl = nacelle::draw::DrawList::new();
+    dl.set_vector(vector);
+    {
+        let mut ctx = Ctx {
+            dl: &mut dl,
+            fonts: &mut fonts,
+            w: h * 16.0 / 9.0,
+            h,
+            t,
+            mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
+            term_font_scale: 1.0,
+            ui_font_scale: 1.0,
+            panel_scale: 1.0,
+            focus: None,
+            tips: None,
+        };
+        draw(&mut ctx);
+    }
+    dl
+}
+
 /// One number out of the running theme, by name.
 #[cfg(test)]
 pub(crate) fn token_px(name: &str) -> f32 {

@@ -290,6 +290,14 @@ pub struct Screen {
     /// This screen's own draw list, kept between frames so a steady
     /// frame allocates nothing.
     pub dl: DrawList,
+    /// Which lane [`Screen::dl`] is drawing silhouettes on, and the
+    /// memory that keeps `render.vector` from being asked a second time
+    /// for an answer that has not moved (f3 §6 K3a).
+    ///
+    /// Beside the list rather than beside the theme, because the mode
+    /// belongs to a LIST: two monitors are two lists, and each is armed
+    /// where it is cleared.
+    pub vector: crate::vector::Lane,
     /// Widget padding: the content inset from the outer panel edge. The
     /// user's one setting, mirrored here because every solve this
     /// screen makes needs it — including the ones outside a frame, when
@@ -422,6 +430,7 @@ impl Screen {
             pointer: nacelle::pointer::Pointer::default(),
             term_inst: None,
             dl: DrawList::new(),
+            vector: crate::vector::Lane::new(),
             pad,
             backdrop: None,
             overlay: None,
@@ -430,6 +439,12 @@ impl Screen {
             atlas_behind: None,
             atlas_synced: false,
         };
+        // The list is armed the moment it exists, so it is never in a
+        // state that contradicts the theme — not even for the frames
+        // between here and the first one drawn. The frame boundary arms
+        // it again whenever the answer moves; this is the first of
+        // those times, not the only one.
+        sc.vector.arm(&mut sc.dl);
         sc.reload_layaut();
         Some(sc)
     }

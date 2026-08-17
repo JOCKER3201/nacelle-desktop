@@ -13,6 +13,7 @@ mod screens;
 mod system;
 mod fullscreen;
 mod hashframe;
+mod vector;
 mod widgets;
 mod wl_color;
 
@@ -3083,6 +3084,14 @@ fn draw_screen(
     // allocates nothing.
     let mut dl = std::mem::replace(&mut sc.dl, draw::DrawList::new());
     dl.clear();
+    // Which lane this frame's silhouettes take (f3 §6 K3a). Asked here,
+    // at the frame boundary, because a theme can be loaded between two
+    // frames — the settings window loads one, a mood swaps a sibling —
+    // and a list armed only where it was built would draw the theme the
+    // program started with for the rest of the session. `clear()` above
+    // does not touch the mode, so a steady frame passes straight
+    // through this and `set_vector` is not called at all.
+    sc.vector.arm(&mut dl);
     let white = theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
     // The backdrop plate is the first thing in the list — z 0, under
     // every panel, inside the glass snapshot. White tint is the
@@ -3701,6 +3710,12 @@ fn run_resolution_dialog(
         .expect("cannot create window");
     let mut gfx = nacelle_renderer::Gfx::new(&window, window.inner_size().width, window.inner_size().height);
     let mut dl = draw::DrawList::new();
+    // The dialog is drawn with the toolkit and hands `shapes()` to the
+    // same renderer, so it reads `render.vector` like every other list.
+    // A window that told the user the resolution was refused, and drew
+    // its own frame through a different lane than the desktop's, would
+    // be a second answer to the same token.
+    let mut lane = vector::Lane::new();
     let mut mouse = (0.0f32, 0.0f32);
 
     event_loop
@@ -3745,6 +3760,7 @@ fn run_resolution_dialog(
                         let (w, h) = (size.width as f32, size.height as f32);
                         fonts.begin_frame();
                         dl.clear();
+                        lane.arm(&mut dl);
                         let mut ctx = widgets::Ctx {
                             dl: &mut dl,
                             fonts: &mut fonts,
