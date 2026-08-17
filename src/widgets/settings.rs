@@ -33,6 +33,11 @@
 //! entries first, then the section's pages, then the page itself, all
 //! inside the one scroll. The Tab order is the same in both shapes,
 //! because registration follows the DESCRIPTION and never the geometry.
+//! It follows it off the frame as well: a row the scroll has carried
+//! out of sight is not drawn and is not a target, but it keeps its
+//! place in the route out of the rect the layout gave it, and the
+//! scroll goes and fetches back whatever the keyboard lands on
+//! ([`Settings::register_offscreen`], [`Settings::chase_focus`]).
 //!
 //! What the pages hold: LOOK AND FEEL is one page carrying the three
 //! choices that say which installed set is in use — THEMES (the theme
@@ -593,6 +598,46 @@ fn visible(r: Rect, clip: Option<Rect>) -> Option<Rect> {
     let (x0, y0) = (r.x.max(c.x), r.y.max(c.y));
     let (x1, y1) = (r.right().min(c.right()), r.bottom().min(c.bottom()));
     (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+/// Where a slider's track stands in its row: after the label column,
+/// stopping short of the value the row writes at its right edge.
+fn track_rect(rc: RowCtx) -> Rect {
+    Rect::new(
+        rc.content.x + rc.label_w,
+        rc.band.y,
+        rc.content.w - rc.label_w - rc.value_w,
+        rc.band.h,
+    )
+}
+
+/// Where a cycler's plate stands: everything after the label column —
+/// it writes its value INSIDE the plate, so it keeps the value gutter.
+fn cycle_rect(rc: RowCtx) -> Rect {
+    Rect::new(rc.content.x + rc.label_w, rc.band.y, rc.content.w - rc.label_w, rc.band.h)
+}
+
+/// Where each of `n` segments stands: the row after its label, split
+/// equally, `segmented.gap` between.
+///
+/// These three and [`Settings::button_rect`]/[`Settings::bar_plates`] are
+/// the only statements of where a control's targets are. The drawing
+/// places its ink through them and [`Settings::targets`] reads them back,
+/// so a rect the eye sees and a rect the chain registers cannot be two
+/// different rects.
+fn chip_rects(n: usize, rc: RowCtx) -> Vec<Rect> {
+    let count = n.max(1) as f32;
+    let cw = (rc.content.w - rc.label_w - rc.m.seg_gap * (count - 1.0)) / count;
+    (0..n)
+        .map(|i| {
+            Rect::new(
+                rc.content.x + rc.label_w + (cw + rc.m.seg_gap) * i as f32,
+                rc.band.y,
+                cw,
+                rc.band.h,
+            )
+        })
+        .collect()
 }
 
 /// [`Settings::hit`]'s working part, over the hit map alone so a loop
@@ -3264,6 +3309,22 @@ fn rows_box(page_box: Rect) -> Rect {
     }
 }
 
+/// What the last frame made of the flow: the box the flowed bands stood
+/// in, how long they were together, and the offset they were drawn at.
+///
+/// The keyboard happens BETWEEN frames. A page key has to know how far
+/// the page goes before it can move it, and the chase
+/// ([`Settings::chase_focus`]) has to know both where the frame stood
+/// and which offset the rects it is reading were laid out at — the chain
+/// answers about the last COMPLETED frame, so a chase measured against
+/// an offset that has moved since would chase twice.
+#[derive(Clone, Copy)]
+struct Flow {
+    view: Rect,
+    length: f32,
+    offset: f32,
+}
+
 pub struct Settings {
     pub open: bool,
     view: View,
@@ -3469,15 +3530,27 @@ pub struct Settings {
     /// [`Settings::go`], and a page reopened halfway down is a page that
     /// opens showing its middle.
     scroll: ScrollView,
-    /// The viewport and content length the last frame laid out, and the
-    /// clock it ran at. A key arrives outside the drawing and has to ask
-    /// somebody how far a page is before it can move it.
-    span: (f32, f32),
+    /// How the last frame laid the flow out, and the clock it ran at. A
+    /// key arrives outside the drawing and has to ask somebody where the
+    /// page stood before it can move it.
+    flow: Flow,
     now: f64,
     /// The box the body is being clipped to while it draws, so a rect
     /// can be trimmed to what the eye can actually see. None outside the
     /// body: the chrome and the dropdown are not clipped.
     clip: Option<Rect>,
+    /// What the FLOWED bands registered this frame — everything the one
+    /// scroll is answerable for, and nothing else.
+    ///
+    /// The chrome stands still, a pinned band stands outside the box the
+    /// flow is read in, an open list has a scroll of its own, and the
+    /// navigation stands in its own columns until the window folds — at
+    /// which point its entries ARE bands of the flow and are in here
+    /// with the rest. Only what is in here is chased
+    /// ([`Settings::chase_focus`]): spending the page's scroll on
+    /// anything else would carry the page off under something that had
+    /// not moved.
+    flowed: Vec<FocusId>,
     hits: Vec<(Rect, Act)>,
     flash: Option<(Act, Instant)>,
 }
@@ -3627,9 +3700,14 @@ impl Settings {
             addon_report: Vec::new(),
             board_action: None,
             scroll: ScrollView::new(),
-            span: (0.0, 0.0),
+            flow: Flow {
+                view: Rect::new(0.0, 0.0, 0.0, 0.0),
+                length: 0.0,
+                offset: 0.0,
+            },
             now: 0.0,
             clip: None,
+            flowed: Vec::new(),
             hits: Vec::new(),
             flash: None,
         }
@@ -4854,7 +4932,7 @@ impl Settings {
         if ev.mods == Mods::NONE
             && matches!(ev.key, FKey::PageUp | FKey::PageDown | FKey::Home | FKey::End)
         {
-            let (viewport, length) = self.span;
+            let (viewport, length) = (self.flow.view.h, self.flow.length);
             // One primitive for all four: a page is one viewport, and
             // an end is one whole content length, which the tick's
             // clamp turns into "as far as it goes".
@@ -4916,9 +4994,51 @@ impl Settings {
                     }
                 }
                 fc.nav(n);
+                self.chase_focus(fc, self.flow);
                 KeyOut::Consumed
             }
         }
+    }
+
+    /// After a keyboard move: bring what it landed on back into the
+    /// frame (M5).
+    ///
+    /// The other half of registering off screen. The chain is whole in
+    /// every frame now, so Tab can land on a row the page is not
+    /// showing; without this the ring would simply be gone, and the row
+    /// would be neither seen nor pressable — [`Settings::focused_act`]
+    /// reads the hit map, and an unseen row is not in it.
+    ///
+    /// The rect is the LAST COMPLETED frame's, so the travel is measured
+    /// from the offset that frame was drawn at and not from wherever the
+    /// offset has since got to; the clamp is the next tick's, as it is
+    /// for every other way this window moves.
+    ///
+    /// What the scroll does not carry is not chased, and the frame said
+    /// which that is rather than the geometry being asked to guess
+    /// ([`Settings::flowed`]): the corner button, a pinned bar and the
+    /// rows of an open list all stand over the flow's own lane and none
+    /// of them moves with it — chasing them would carry the page off
+    /// under something that had not moved. The navigation is in the
+    /// ledger exactly when the window has folded, which is exactly when
+    /// its entries scroll with everything else.
+    fn chase_focus(&mut self, fc: &FocusCtl, flow: Flow) {
+        let Some(id) = fc.focused() else { return };
+        if !self.flowed.contains(&id) {
+            return;
+        }
+        let Some(r) = fc.rect_of(id) else { return };
+        let view = flow.view;
+        // A rect taller than the frame lands on its TOP edge: the first
+        // branch wins, and reading starts at the top of a thing.
+        let travel = if r.y < view.y {
+            r.y - view.y
+        } else if r.bottom() > view.bottom() {
+            r.bottom() - view.bottom()
+        } else {
+            return;
+        };
+        self.scroll.set_offset(flow.offset + travel);
     }
 
     /// The Act of the chain's focused control, when it is one of this
@@ -5322,12 +5442,15 @@ impl Settings {
         // is real — only a surface that cannot clip has to land on whole
         // rows to avoid painting half of one.
         self.now = ctx.t;
-        self.span = (view.h, length);
         self.scroll.tick(ctx.t, view.h, length, Snap::None, &ScrollPhysics::from_theme());
         let off = self.scroll.offset();
+        // What the keyboard reads back between frames ([`Flow`]).
+        self.flow = Flow { view, length, offset: off };
 
         ctx.dl.push_clip(view.x, view.y, view.w, view.h);
         self.clip = Some(view);
+        // This frame's ledger of what the scroll answers for.
+        self.flowed.clear();
         let mut y = view.y - off;
         let mut started = false;
         for zone in &zones {
@@ -5342,7 +5465,7 @@ impl Settings {
                 y += zone_gap();
             }
             started = true;
-            self.draw_zone(ctx, zone, m, rows_box, y, Some(view));
+            self.draw_zone(ctx, zone, m, rows_box, y, Some(view), true);
             y += zh;
         }
         self.clip = None;
@@ -5357,7 +5480,7 @@ impl Settings {
                 continue;
             }
             let zh = self.zone_h(zone, m, rows_box);
-            self.draw_zone(ctx, zone, m, rows_box, anchor - zh, None);
+            self.draw_zone(ctx, zone, m, rows_box, anchor - zh, None, false);
             anchor -= zh + m.gap;
         }
         self.draw_scrollbar(ctx, view, length);
@@ -5383,7 +5506,9 @@ impl Settings {
             let (Some(box_), Some(rows)) = (box_, rows) else { continue };
             ctx.dl.push_clip(box_.x, box_.y, box_.w, box_.h);
             self.clip = Some(box_);
-            self.draw_rows(ctx, Cols::None, rows, m, box_, box_.y, Some(box_));
+            // Not the flow's: a column stands where it stands, and the
+            // page's scroll is no use to it ([`Settings::chase_focus`]).
+            self.draw_rows(ctx, Cols::None, rows, m, box_, box_.y, Some(box_), false);
             self.clip = None;
             ctx.dl.pop_clip();
         }
@@ -5397,7 +5522,8 @@ impl Settings {
     ///
     /// `cull` is the viewport a flowed band is held to; a pinned band
     /// passes `None`, because it stands outside the clip and is always
-    /// on screen.
+    /// on screen. `flowed` says whether the band is one the SCROLL
+    /// carries — the ledger the chase reads ([`Settings::flowed`]).
     fn draw_zone(
         &mut self,
         ctx: &mut Ctx,
@@ -5406,11 +5532,12 @@ impl Settings {
         box_: Rect,
         top: f32,
         cull: Option<Rect>,
+        flowed: bool,
     ) {
         let offsets = self.zone_offsets(zone, m, box_);
         for ((region, cols, rows), dy) in zone_regions(zone, box_).into_iter().zip(offsets)
         {
-            self.draw_rows(ctx, cols, rows, m, region, top + dy, cull);
+            self.draw_rows(ctx, cols, rows, m, region, top + dy, cull, flowed);
         }
     }
 
@@ -5429,6 +5556,7 @@ impl Settings {
         region: Rect,
         top: f32,
         cull: Option<Rect>,
+        flowed: bool,
     ) {
         // Measured for THIS region: the sliders of one column do not
         // inherit the label width of the next (M3).
@@ -5440,20 +5568,115 @@ impl Settings {
             }
             let h = self.row_h(&row.ctrl, m, region);
             let band = Rect::new(region.x, y, region.w, h);
-            // A row wholly off the viewport is not drawn, and therefore
-            // registers nothing: what the eye cannot see is not a
-            // target and does not belong in the Tab order either.
+            // A row wholly off the viewport is not DRAWN and is not a
+            // TARGET — what the eye cannot see the hand cannot press —
+            // but it keeps its place in the Tab order all the same (M5).
             let on_screen =
                 cull.map_or(true, |v| band.bottom() > v.y && band.y < v.bottom());
-            if on_screen {
-                let rc = RowCtx { content: region, band, label_w, value_w, m };
-                if (row.enabled)(self) {
+            let rc = RowCtx { content: region, band, label_w, value_w, m };
+            // R6: a row the page turned off registers nothing at all,
+            // on screen or off it.
+            if !(row.enabled)(self) {
+                if on_screen {
+                    self.draw_disabled(ctx, &row.ctrl, rc);
+                }
+            } else {
+                // What the row offers, asked ONCE: the off-frame
+                // registration places it, and a band the scroll carries
+                // writes it into the ledger the chase reads.
+                let targets = (flowed || !on_screen)
+                    .then(|| self.targets(ctx, &row.ctrl, rc))
+                    .unwrap_or_default();
+                if on_screen {
                     self.draw_row(ctx, &row.ctrl, rc);
                 } else {
-                    self.draw_disabled(ctx, &row.ctrl, rc);
+                    self.register_offscreen(ctx, &row.ctrl, &targets);
+                }
+                if flowed {
+                    self.flowed.extend(targets.iter().map(|&(_, a)| focus_id(a)));
                 }
             }
             y += h + m.space(row.after);
+        }
+    }
+
+    /// Everything one control offers, and where it stands: the ONE
+    /// enumeration of a control's targets, in the order it registers
+    /// them.
+    ///
+    /// The rects are the drawing's own — [`track_rect`], [`chip_rects`],
+    /// [`cycle_rect`], [`Settings::button_rect`], [`Settings::bar_plates`]
+    /// — so what this answers and what the frame paints cannot come
+    /// apart. The three rows that carry no act (a heading, an aside, a
+    /// hint) offer nothing, and neither does the BOARDS cross: what is
+    /// inside it no row describes, and it registers its own tiles where
+    /// it draws them.
+    fn targets(
+        &self,
+        ctx: &mut Ctx,
+        ctrl: &'static Ctrl,
+        rc: RowCtx,
+    ) -> Vec<(Rect, Act)> {
+        match ctrl {
+            Ctrl::Toggle { act, .. } => vec![(rc.band, *act)],
+            Ctrl::Slider { act, .. } => vec![(track_rect(rc), *act)],
+            Ctrl::Chips { values, act, .. } => chip_rects(values.len(), rc)
+                .into_iter()
+                .zip(values.iter())
+                .map(|(r, bits)| (r, act(*bits)))
+                .collect(),
+            Ctrl::Cycle { act, .. } => vec![(cycle_rect(rc), *act)],
+            Ctrl::Drop { list } => {
+                vec![(Self::button_rect(BtnKind::Wide, rc), Act::ListBtn(*list))]
+            }
+            Ctrl::Button { kind, act, .. } => {
+                vec![(Self::button_rect(*kind, rc), *act)]
+            }
+            Ctrl::Bar { items } => self
+                .bar_plates(ctx, items, rc)
+                .into_iter()
+                .map(|(r, _, act)| (r, act))
+                .collect(),
+            Ctrl::Section { .. }
+            | Ctrl::Note { .. }
+            | Ctrl::Hint { .. }
+            | Ctrl::Custom { .. } => Vec::new(),
+        }
+    }
+
+    /// A row the frame did not draw, taking its place in the chain from
+    /// the rect the LAYOUT gave it (M5).
+    ///
+    /// Off screen used to mean off the Tab order as well, and in one
+    /// vertical list that was defensible: the route lost its tail and
+    /// found it again as the page scrolled. With bands of columns it
+    /// cuts the route in the middle — a short column's rows come back
+    /// while a tall one's are still gone — so Tab would skip about
+    /// according to how far the page happened to be scrolled. The route
+    /// is the DESCRIPTION's, not the geometry's, so it is whole in every
+    /// frame now, and the scroll goes and gets whatever the keyboard
+    /// lands on ([`Settings::chase_focus`]).
+    ///
+    /// No ink and no target: nothing is drawn here, and the hit map is
+    /// not touched — [`hit_into`] goes on trimming every rect to the
+    /// clip, so what the eye cannot see the hand still cannot press.
+    fn register_offscreen(
+        &mut self,
+        ctx: &mut Ctx,
+        ctrl: &'static Ctrl,
+        targets: &[(Rect, Act)],
+    ) {
+        // A slider owns its arrows wherever it stands
+        // (`object::slider::track_focusable`); every other control of
+        // this window leaves them to the chain.
+        let caps = match ctrl {
+            Ctrl::Slider { .. } => Caps::GREEDY_ARROWS,
+            _ => Caps::NONE,
+        };
+        for &(r, act) in targets {
+            if let Some(fc) = ctx.focus.as_deref_mut() {
+                fc.register(focus_id(act), r, caps);
+            }
         }
     }
 
@@ -5570,12 +5793,7 @@ impl Settings {
             }
             Ctrl::Slider { label, act, unit, range: (lo, hi), get, .. } => {
                 self.row_label(ctx, label, rc);
-                let track = Rect::new(
-                    rc.content.x + rc.label_w,
-                    rc.band.y,
-                    rc.content.w - rc.label_w - rc.value_w,
-                    rc.band.h,
-                );
+                let track = track_rect(rc);
                 let value = get(self);
                 let t = ((value as f32 - *lo as f32) / (*hi - *lo) as f32).clamp(0.0, 1.0);
                 nacelle::object::slider::track_focusable(ctx, track, t, focus_id(*act));
@@ -5805,16 +6023,8 @@ impl Settings {
         // this control has always set it; `segmented.role` is a size
         // change and so belongs to the stage that moves furniture.
         let f = role_label(ctx);
-        let n = values.len().max(1) as f32;
-        let cw = (rc.content.w - rc.label_w - rc.m.seg_gap * (n - 1.0)) / n;
         let cur = get(self);
-        for (i, bits) in values.iter().enumerate() {
-            let r = Rect::new(
-                rc.content.x + rc.label_w + (cw + rc.m.seg_gap) * i as f32,
-                rc.band.y,
-                cw,
-                rc.band.h,
-            );
+        for (bits, r) in values.iter().zip(chip_rects(values.len(), rc)) {
             let hover = ctx.mouse.over(r);
             let on = cur == *bits;
             let st = ladder(
@@ -5868,12 +6078,7 @@ impl Settings {
         // Same as the segments: the value keeps the row's role until a
         // cycler role is a decision someone has made.
         let f = role_label(ctx);
-        let r = Rect::new(
-            rc.content.x + rc.label_w,
-            rc.band.y,
-            rc.content.w - rc.label_w,
-            rc.band.h,
-        );
+        let r = cycle_rect(rc);
         let hover = ctx.mouse.over(r);
         let st = ladder(
             th,
@@ -9255,7 +9460,8 @@ mod tests {
         viewport_home();
     }
 
-    /// §8.3/2 — everything a page describes is reachable.
+    /// §8.3/2 — everything the window describes is reachable, band by
+    /// band and in BOTH shapes of the window.
     ///
     /// Every row that carries an act must land in the hit map AND in the
     /// focus chain: a control the mouse can press but Tab cannot reach
@@ -9263,84 +9469,185 @@ mod tests {
     /// BOARDS cross is skipped — it is the one page whose contents no
     /// row describes ([`Ctrl::Custom`]).
     ///
-    /// Two frames per page, at rest and scrolled to the end, and the
-    /// union of the two has to hold everything: a row is off screen for
-    /// part of the travel now, and off screen is off the chain — but
-    /// there must be no row that is off screen for all of it.
+    /// The description is walked band by band, and inside a banded
+    /// region column by column ([`described_acts`]), with the window's
+    /// own navigation ahead of it ([`window_acts`]) — so a page that
+    /// grows a second column is swept in it and not around it.
+    ///
+    /// TWO SHAPES, because the fold moves the navigation out of its
+    /// columns and into the flow: at the smallest window the whole thing
+    /// is one list inside the one scroll, at the largest it stands in
+    /// three panels, and neither shape may hide what the other offers.
+    ///
+    /// The hit map is asked of the SWEEP — a target is owed to the
+    /// pointer somewhere along the travel, not at every stop of it — and
+    /// the chain is asked of EVERY FRAME. That is M5: a row off the
+    /// frame keeps its place in the Tab order out of the rect the layout
+    /// gave it, so a route with a hole in it is a fault at whatever the
+    /// page happens to be scrolled to. Before M5 this could only be the
+    /// union too, and a chain that came and went with the scroll passed
+    /// it.
     #[test]
     fn every_described_control_is_reachable() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
-        for p in PAGES.iter() {
-            let mut hit: Vec<Act> = Vec::new();
-            let mut chained: Vec<Act> = Vec::new();
-            let mut reference = furnished();
-            reference.view = p.view;
-            editor_ajar(&mut reference);
-            // The five hand-written stops died with the whole-theme
-            // sections: the editor page is many viewports long now, and a
-            // fixed list would go quietly stale on the NEXT section too —
-            // reporting a mid-page control unreachable when only the sweep
-            // was. So the stops are walked from the page's own length, a
-            // half-viewport apart (rows are far shorter than half a
-            // viewport, so consecutive stops overlap), and the far end is
-            // still the clamp's own MAX/4.
-            let stops: Vec<f32> = {
-                let mut dl = nacelle::draw::DrawList::new();
-                let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-                let content = content_rect(modal_rect(ctx.w, ctx.h));
-                let m = Metrics::of(&ctx, content);
-                let view = reference.body_box(p, m, content);
-                let length = reference.flow_h(p, m, content);
-                let stride = (view.h * 0.5).max(1.0);
-                let mut out = vec![0.0];
-                let mut at = stride;
-                while at < length {
-                    out.push(at);
-                    at += stride;
+        for h in [HEIGHTS[0], HEIGHTS[4]] {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            for p in PAGES.iter() {
+                let mut hit: Vec<Act> = Vec::new();
+                let mut reference = furnished();
+                reference.view = p.view;
+                editor_ajar(&mut reference);
+                let described = window_acts(&reference, p);
+                // The five hand-written stops died with the whole-theme
+                // sections: the editor page is many viewports long now, and a
+                // fixed list would go quietly stale on the NEXT section too —
+                // reporting a mid-page control unreachable when only the sweep
+                // was. So the stops are walked from the page's own length, a
+                // half-viewport apart (rows are far shorter than half a
+                // viewport, so consecutive stops overlap), and the far end is
+                // still the clamp's own MAX/4.
+                let stops: Vec<f32> = {
+                    let mut dl = nacelle::draw::DrawList::new();
+                    let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+                    let content = content_rect(modal_rect(ctx.w, ctx.h));
+                    let m = Metrics::of(&ctx, content);
+                    let view = reference.body_box(p, m, content);
+                    let length = reference.flow_h(p, m, content);
+                    let stride = (view.h * 0.5).max(1.0);
+                    let mut out = vec![0.0];
+                    let mut at = stride;
+                    while at < length {
+                        out.push(at);
+                        at += stride;
+                    }
+                    out.push(f32::MAX / 4.0);
+                    out
+                };
+                for stop in stops {
+                    let mut s = furnished();
+                    s.view = p.view;
+                    // Every condition set at once, so the reachability sweep
+                    // covers the conditional rows as well.
+                    editor_ajar(&mut s);
+                    if stop > 0.0 {
+                        s.scroll.set_offset(stop);
+                    }
+                    let mut fc = FocusCtl::new();
+                    let mut dl = nacelle::draw::DrawList::new();
+                    fc.begin_frame();
+                    let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+                    ctx.focus = Some(&mut fc);
+                    s.draw(&mut ctx);
+                    // The chain answers about the last COMPLETED frame, so
+                    // the frame the drawing built has to be closed before it
+                    // can be read back.
+                    fc.begin_frame();
+                    hit.extend(s.hits.iter().map(|&(_, a)| a));
+                    if let Some(i) =
+                        described.iter().position(|a| fc.rect_of(focus_id(*a)).is_none())
+                    {
+                        panic!(
+                            "{} at {h}px: #{i} of the {} controls the window describes \
+                             is not in the chain of the frame at {stop} px",
+                            p.title,
+                            described.len()
+                        );
+                    }
                 }
-                out.push(f32::MAX / 4.0);
-                out
-            };
-            for stop in stops {
-                let mut s = furnished();
-                s.view = p.view;
-                // Every condition set at once, so the reachability sweep
-                // covers the conditional rows as well.
-                editor_ajar(&mut s);
-                if stop > 0.0 {
-                    s.scroll.set_offset(stop);
+                for act in &described {
+                    assert!(
+                        hit.contains(act),
+                        "{} at {h}px: a described control is missing from the hit map",
+                        p.title
+                    );
                 }
-                let mut fc = FocusCtl::new();
-                let mut dl = nacelle::draw::DrawList::new();
-                fc.begin_frame();
-                let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-                ctx.focus = Some(&mut fc);
-                s.draw(&mut ctx);
-                // The chain answers about the last COMPLETED frame, so
-                // the frame the drawing built has to be closed before it
-                // can be read back.
-                fc.begin_frame();
-                hit.extend(s.hits.iter().map(|&(_, a)| a));
-                chained.extend(
-                    window_acts(&s, p)
-                        .into_iter()
-                        .filter(|a| fc.rect_of(focus_id(*a)).is_some()),
-                );
-            }
-            for act in window_acts(&reference, p) {
-                assert!(
-                    hit.contains(&act),
-                    "{}: a described control is missing from the hit map",
-                    p.title
-                );
-                assert!(
-                    chained.contains(&act),
-                    "{}: a described control never joined the focus chain",
-                    p.title
-                );
             }
         }
+        viewport_home();
+    }
+
+    /// M5, the other half — the keyboard brings what it lands on into
+    /// the frame.
+    ///
+    /// The chain is whole in every frame now, so Tab can land on a row
+    /// the page is not showing. Left alone that is worse than the hole
+    /// it replaced: the ring would be nowhere, and the row would be
+    /// neither seen nor pressable, because Enter reads the hit map and
+    /// an unseen row is not in it. So every page is walked with Tab from
+    /// end to end, redrawing between presses exactly as the program
+    /// does, and after every press whatever the chain landed on that
+    /// belongs to the FLOW has to stand inside the box the flow is read
+    /// in. What stands in the navigation's own columns is not the
+    /// scroll's to move and is not asked (nor is what the page PINS,
+    /// which is outside that box by construction and always on screen).
+    ///
+    /// Both shapes again: folded, the navigation is part of the flow and
+    /// is chased with it.
+    #[test]
+    fn the_keyboard_scrolls_to_whatever_it_lands_on() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let tab = KeyEv { key: FKey::Tab, mods: Mods::NONE, repeat: false, text: None };
+        /// One frame, closed so the chain can be read and walked. The
+        /// boundary is crossed ONCE per frame — a second crossing would
+        /// swap the chain back out and the walk would be reading the
+        /// frame before last.
+        fn frame(
+            fonts: &mut nacelle::font::FontSystem,
+            s: &mut Settings,
+            fc: &mut FocusCtl,
+            h: f32,
+        ) {
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, fonts, h, 1.0);
+            ctx.focus = Some(fc);
+            s.draw(&mut ctx);
+            fc.begin_frame();
+        }
+        let mut walked = 0;
+        for h in [HEIGHTS[0], HEIGHTS[4]] {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            for p in PAGES.iter() {
+                let mut s = furnished();
+                s.view = p.view;
+                editor_ajar(&mut s);
+                let folded = {
+                    let mut dl = nacelle::draw::DrawList::new();
+                    let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+                    let content = content_rect(modal_rect(ctx.w, ctx.h));
+                    Panes::of(p.view, Metrics::of(&ctx, content), content).folded
+                };
+                let flowed = flowed_acts(&s, p, folded);
+                let mut fc = FocusCtl::new();
+                frame(&mut fonts, &mut s, &mut fc, h);
+                // Once round the whole chain, and a few presses over.
+                for _ in 0..window_acts(&s, p).len() + 8 {
+                    s.key(&tab, &mut fc);
+                    frame(&mut fonts, &mut s, &mut fc, h);
+                    let Some(id) = fc.focused() else { continue };
+                    let Some(i) = flowed.iter().position(|a| focus_id(*a) == id) else {
+                        continue;
+                    };
+                    let r = fc.rect_of(id).expect("the chain lost what it just landed on");
+                    let view = s.flow.view;
+                    walked += 1;
+                    assert!(
+                        r.y >= view.y - 0.01 && r.bottom() <= view.bottom() + 0.01,
+                        "{} at {h}px: the ring on #{i} of the {} rows that flow stands \
+                         {:?} outside the frame {:?} the page is read in",
+                        p.title,
+                        flowed.len(),
+                        (r.y, r.bottom()),
+                        (view.y, view.bottom())
+                    );
+                }
+            }
+        }
+        assert!(walked > 0, "the walk never landed on a row of any page's flow");
+        viewport_home();
     }
 
     /// The live acts of a run of navigation rows, in the order the
@@ -9391,34 +9698,66 @@ mod tests {
             Chrome::Close => Act::Close,
             Chrome::Back => Act::Back,
         }];
-        for row in page_rows(page) {
-            // A hidden row IS NOT THERE (Row::when), so it is not owed a
-            // hit either; the loop below draws with every condition set so
-            // the conditional rows are exercised too.
-            if !(row.enabled)(s) || !(row.when)(s) {
+        out.extend(page_rows(page).flat_map(|row| row_acts(s, row)));
+        out
+    }
+
+    /// The acts of the bands that FLOW, in registration order: what the
+    /// window's one scroll is answerable for.
+    ///
+    /// A pinned band stands outside the box the flow is read in and is
+    /// always on screen, so it is not the scroll's; the navigation is
+    /// the scroll's only where the window has FOLDED, which is when its
+    /// entries are bands of the flow like any other
+    /// ([`Settings::frame_zones`]).
+    ///
+    /// This reads the description the way [`described_acts`] does and
+    /// the way the window registers it — an independent reading of the
+    /// same table, which is what lets it check the drawing rather than
+    /// echo it.
+    fn flowed_acts(s: &Settings, page: &'static Page, folded: bool) -> Vec<Act> {
+        let mut out: Vec<Act> = Vec::new();
+        if folded {
+            out.extend(rail_acts(s));
+            out.extend(sub_acts(s, page.view));
+        }
+        for zone in page.zones {
+            if matches!(zone, Zone::Pinned { .. }) {
                 continue;
             }
-            match &row.ctrl {
-                Ctrl::Toggle { act, .. }
-                | Ctrl::Slider { act, .. }
-                | Ctrl::Cycle { act, .. }
-                | Ctrl::Button { act, .. } => out.push(*act),
-                Ctrl::Chips { values, act, .. } => {
-                    out.extend(values.iter().map(|v| act(*v)))
-                }
-                // Every verb of an action bar, left to right.
-                Ctrl::Bar { items } => out.extend(items.iter().map(|&(_, a)| a)),
-                // The anchor alone: what the list holds is only on
-                // screen while it is open, which is another test's
-                // question (`an_open_list_offers_every_name_it_has`).
-                Ctrl::Drop { list } => out.push(Act::ListBtn(*list)),
-                Ctrl::Section { .. }
-                | Ctrl::Note { .. }
-                | Ctrl::Hint { .. }
-                | Ctrl::Custom { .. } => {}
-            }
+            out.extend(zone_rows(zone).flat_map(|row| row_acts(s, row)));
         }
         out
+    }
+
+    /// Every act ONE row offers, in the order it registers them — the
+    /// description's own answer to what [`Settings::targets`] places.
+    ///
+    /// A hidden row IS NOT THERE (`Row::when`) and a disabled one
+    /// registers nothing (R6), so neither offers anything; the sweeps
+    /// draw with every condition set, so the conditional rows are
+    /// exercised all the same.
+    fn row_acts(s: &Settings, row: &'static Row) -> Vec<Act> {
+        if !(row.enabled)(s) || !(row.when)(s) {
+            return Vec::new();
+        }
+        match &row.ctrl {
+            Ctrl::Toggle { act, .. }
+            | Ctrl::Slider { act, .. }
+            | Ctrl::Cycle { act, .. }
+            | Ctrl::Button { act, .. } => vec![*act],
+            Ctrl::Chips { values, act, .. } => values.iter().map(|v| act(*v)).collect(),
+            // Every verb of an action bar, left to right.
+            Ctrl::Bar { items } => items.iter().map(|&(_, a)| a).collect(),
+            // The anchor alone: what the list holds is only on screen
+            // while it is open, which is another test's question
+            // (`an_open_list_offers_every_name_it_has`).
+            Ctrl::Drop { list } => vec![Act::ListBtn(*list)],
+            Ctrl::Section { .. }
+            | Ctrl::Note { .. }
+            | Ctrl::Hint { .. }
+            | Ctrl::Custom { .. } => Vec::new(),
+        }
     }
 }
 
