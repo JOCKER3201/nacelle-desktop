@@ -98,7 +98,7 @@ use nacelle::theme::bake::{
 use nacelle::theme::parse::State;
 use nacelle::theme::{self, TokenId};
 use nacelle::view::scroll::{self, ScrollPhysics, ScrollView, ScrollbarLook};
-use nacelle::view::{CtxSurface, Snap};
+use nacelle::view::{CtxSurface, Snap, Surface};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -6082,66 +6082,83 @@ impl Settings {
     /// ITS SHADES, which is the owner's ask in his own words — "hue ten
     /// sam, odcień koloru inny".
     ///
-    /// Nothing here decides what those shades are. The three tokens are
-    /// [component]'s, they point at three rungs of the surface ladder,
-    /// and the ladder is one hue at six lightnesses — so the difference
-    /// between the bands is a SHADE by construction and a theme that
-    /// re-points one band re-points only that one. Naming a rung here
-    /// instead would weld the settings columns to the desktop field and
-    /// no theme could ever part them again.
+    /// Nothing here decides what those shades are. THREE COLUMNS, THREE
+    /// NAMES: `component.settings.rail_fill`, `.sub_fill` and
+    /// `.page_fill`, all three the master's, so a theme re-shades any
+    /// one of them on its own. Naming a rung here instead would weld the
+    /// settings columns to the desktop field and no theme could ever
+    /// part them again.
+    ///
+    /// The master writes the three as ONE EXPRESSION off ONE ANCHOR —
+    /// the window body, lifted by `settings.band_lift` once and twice —
+    /// which is what keeps them a ladder when a theme, BASIC or the
+    /// editor's BACKGROUND section moves the body. That is the master's
+    /// arrangement and not this function's: what stands here is a name,
+    /// a box and a paint.
     ///
     /// Painted BEFORE the navigation and the body, and over each
     /// column's whole rectangle exactly as [`Panes`] cut it: the beds
     /// are the ground everything else in the window stands on.
     ///
-    /// FOLDED, this is one band and not three. There are no columns
-    /// below `settings.col_min_w` — the rail's rows become the first
-    /// bands of one vertical flow — so `page` is the whole interior and
-    /// `rail`/`sub` are nothing at all.
+    /// FOLDED, there are no columns at all. Below `settings.col_min_w`
+    /// the rail's rows become the first bands of one vertical flow, so
+    /// `rail`/`sub` are nothing and the page is the whole interior.
     ///
-    /// AND THE PAGE HAS NO BED OF ITS OWN: the WINDOW BODY is it. The
-    /// two columns are the DEVIATIONS from the rung the window already
-    /// stands on, and a deviation is the only thing there is to paint.
+    /// A BAND WHOSE COLOUR IS THE SENTINEL IS NOT PAINTED, which is how
+    /// the master ships the page's: `none` answers `color()` with alpha
+    /// 0, the toolkit's own spelling of "there is nothing to draw here"
+    /// (`libnacelle/tests/sentinel_none_colour.rs`), and the page's bed
+    /// is already on the screen — the WINDOW BODY, laid by
+    /// `window::frame` over that whole area. Two things make a second
+    /// coat of it wrong rather than merely redundant, and both are why
+    /// this is a sentinel and not a comparison of two colours:
     ///
-    /// WHY, MEASURED. The rung `component.panel.fill` names — what
-    /// `window::frame` lays — is TRANSLUCENT (`@surface.panel`, alpha
-    /// 0.82). A rectangle of it over the body composes the alpha a
-    /// second time and the page stops matching the window it is in:
-    /// over the field the window stands on, the body's own pixel is
-    /// #131E19 and the doubled one #15201B, an OKLab dE of 0.0078 —
-    /// small, plainly visible as a lighter panel, and larger on a theme
-    /// whose backdrop is further from the rung.
-    ///
-    /// AND THE TWO WORSE CASES, which is why this is not a comparison
-    /// of the two colours with a paint when they differ:
-    ///
+    /// * ALPHA COMPOSES TWICE. `component.panel.fill` is translucent
+    ///   (`@surface.panel`, alpha 0.82). Over the field the window
+    ///   stands on, the body's own pixel is #131E19 and the doubled one
+    ///   #15201B, an OKLab dE of 0.0078 — plainly a lighter panel, and
+    ///   larger on a theme whose backdrop is further from the rung.
     /// * GLASS. Where `elev.panel.glass.rank` lifts the body off its
-    ///   fill altogether the body is a blur, and ANY bed over it — the
-    ///   same rung or another — is the end of the blur the BACKGROUND
-    ///   section just put there.
-    /// * A MOVED BODY. The editor's SOLID writes `component.panel.fill`
-    ///   (`edit::glass_edits`), and a settings token copying that rung
-    ///   would not follow it — so a rule that paints when the two
-    ///   differ would put the OLD rung back over the colour just
-    ///   chosen.
+    ///   fill altogether the body is a BLUR, and any opaque bed over it
+    ///   is the end of the blur the BACKGROUND section just put there.
     ///
-    /// The body is the page's bed under every one of those, because it
-    /// is the same surface and not a copy of it. The master says so in
-    /// its own voice: `[component] settings` names the rail's band and
-    /// the sub-page column's, and NOT the page's, because to re-shade
-    /// the page an author moves `panel.fill` — the body the page is
-    /// part of. Two names, three bands, one surface.
+    /// A theme that wants the page bedded anyway says so by giving
+    /// `page_fill` a colour, and then it is painted like the other two.
+    ///
+    /// AND THE BEDS WEAR THE THEME'S CORNER. `settings.band_corner` is
+    /// the radius and `settings.band_corner_mode` the cut, both read
+    /// through the toolkit's own pair so that SQUARE, ROUND and CHAMFER
+    /// all answer here exactly as they answer everywhere else. All four
+    /// corners take it: the bands are laid inside `content_rect`, which
+    /// holds `modal.pad` clear of the frame on every side one could
+    /// meet, so no band corner ever reaches the modal's own edge — a
+    /// band is a plate lying ON the body, not a piece cut out of it.
+    /// The master carries the measurement and the one case that would
+    /// change the answer.
     fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
         static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
         static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
+        static PAGE_FILL: OnceLock<TokenId> = OnceLock::new();
         let th = theme::resolved();
         let bands = [
             (nav.rail, &RAIL_FILL, "component.settings.rail_fill"),
             (nav.sub, &SUB_FILL, "component.settings.sub_fill"),
+            (Some(nav.page), &PAGE_FILL, "component.settings.page_fill"),
         ];
+        let mut sf = CtxSurface::new(ctx);
+        let cut = nacelle::view::paint::corner_style(&mut sf, "settings.band_corner_mode");
         for (box_, cell, name) in bands {
             let Some(r) = box_ else { continue };
-            ctx.dl.rect(r.x, r.y, r.w, r.h, col(th.color(tok(cell, name))));
+            let fill = col(th.color(tok(cell, name)));
+            if fill.a <= 0.0 {
+                continue;
+            }
+            // Asked per band, not once: `pill` and the rest of §5.0's
+            // sentinels are words ABOUT THE BOX, and the three boxes are
+            // three different shapes.
+            let radius =
+                nacelle::view::paint::corner_radius(&mut sf, "settings.band_corner", r, 1.0);
+            sf.ring_fill(r, cut, radius, fill);
         }
     }
 
@@ -9459,15 +9476,26 @@ mod tests {
     ///
     /// The owner's own pair: a column's CONTAINER and a control's PLATE.
     ///
+    /// AND THE COLUMNS ARE NOT BLACK WHEN THE THEME IS NOT BLACK. A HUE
+    /// drag is a ROTATION, so this test could turn the whole interface
+    /// and never notice that two of the three columns were the sRGB codes
+    /// 6 and 19 — which is what the owner photographed on 2026-08-17 and
+    /// what a hue check structurally cannot see. `off_black` is the
+    /// second ruler; the gate is on the LIGHTNESS slider standing still,
+    /// because dragged to its floor BASIC really may take the whole
+    /// interface down to a black theme and a black theme's beds are
+    /// allowed to be black.
+    ///
     /// EVERY READING IS DECODED FIRST. "One hue at three lightnesses" is
     /// a claim about OKLCh, OKLCh is defined over LINEAR light, and the
     /// bake answers sRGB-encoded — so a reading taken without
     /// `to_linear` measures a different quantity and the sentence stops
     /// meaning what it says. On the master's own bands it is not a
-    /// rounding either: the three lightnesses read 0.2698 / 0.4036 /
-    /// 0.4840 encoded against 0.1150 / 0.1780 / 0.2320 decoded, and the
-    /// hue the three are supposed to SHARE spread 166.46 / 169.28 /
-    /// 169.04 instead of standing on one number.
+    /// rounding either: the three lightnesses read 0.2320 / 0.2784 /
+    /// 0.3341 decoded, where the page's own bed alone reads 0.4840
+    /// encoded — twice its decoded number — and where, read encoded, the
+    /// hue the three are supposed to SHARE spreads nearly three degrees
+    /// instead of standing on one.
     #[test]
     fn a_basic_hue_drag_turns_the_window_and_keeps_one_hue_in_three_shades() {
         let _g = crate::widgets::theme_test_lock();
@@ -9498,9 +9526,10 @@ mod tests {
 
             let rail = lch(live("component.settings.rail_fill"));
             let sub = lch(live("component.settings.sub_fill"));
-            // The page's band is the window BODY's own token: the master
-            // names the two deviations and leaves the third to the
-            // surface the page is already a part of.
+            // The page's band is the window BODY's own token. The master
+            // ships `settings.page_fill` as the sentinel and anchors the
+            // other two to this one, so this is both the page's bed and
+            // the number the other two are measured from.
             let page = lch(live("component.panel.fill"));
             // The window really turned, by the slider's own degrees.
             assert!(
@@ -9529,14 +9558,36 @@ mod tests {
                 sub.l,
                 plate.l
             );
-            // And the three columns are still three shades of it.
+            // And the three columns are still three shades of it,
+            // climbing outward: the page is the well, the navigation the
+            // rim.
             assert!(
-                rail.l < sub.l && sub.l < page.l,
+                page.l < sub.l && sub.l < rail.l,
                 "at {turn} deg the three columns stopped being a ladder: {} {} {}",
-                rail.l,
+                page.l,
                 sub.l,
-                page.l
+                rail.l
             );
+            // AND NOT ONE OF THEM IS BLACK. The rotation this test drives
+            // cannot darken anything, so a black band here is a black
+            // band in the theme — the owner's screenshot, and the fault
+            // no hue assertion above could ever have seen.
+            for (name, c) in [
+                ("rail", live("component.settings.rail_fill")),
+                ("sub", live("component.settings.sub_fill")),
+                ("page", live("component.panel.fill")),
+            ] {
+                let black = nacelle::theme::Color::from_hex("#000000").expect("black");
+                let off = nacelle::theme::Color::wcag_contrast(c.to_linear(), black.to_linear());
+                // The floor libnacelle's band test sets and states: between
+                // the master's own body rung (1.26) and `@surface.base`
+                // (1.12), the rung a column used to be pinned to.
+                assert!(
+                    off >= 1.15,
+                    "at {turn} deg the {name} column reads {off} against pure black — \
+                     the window turned but one of its columns is a black stripe"
+                );
+            }
             // ONE hue between themselves, and this is the assertion the
             // SPACE is load-bearing for. The two COLUMNS take their h
             // from one token (`@surface.hue`) and stand on one number:
@@ -9574,6 +9625,128 @@ mod tests {
         // The preview is this test's, and it does not leave the room in
         // it: every other test that reads the theme would be reading
         // this one's drag.
+        nacelle::theme::clear_preview();
+        viewport_home();
+    }
+
+    /// THE OTHER HALF OF THE OWNER'S SCREENSHOT: the editor's BACKGROUND
+    /// section moves the WHOLE window, and the columns go with it.
+    ///
+    /// WHAT WENT WRONG. BACKGROUND writes the window body as an ABSOLUTE
+    /// colour off its own sliders — `component.panel.fill` on SOLID
+    /// (`edit::glass_edits`) — while the two navigation columns were
+    /// pinned to rungs of the surface ladder that no slider on that page
+    /// touches. Drag the background and the page turned; the columns did
+    /// not. What the owner photographed was a window in two colours,
+    /// which is the same fault as the black stripes and not a second one.
+    ///
+    /// WHERE IT IS FIXED, and why nothing here does the fixing. The
+    /// master anchors all three beds to ONE token — the body — so the
+    /// columns follow it by construction, in the theme, and this window
+    /// keeps carrying names to the theme and painting back what it is
+    /// given. This test is the proof of the whole chain: slider,
+    /// `editor_edits`, `set_preview`, bake, and the three colours that
+    /// come back out.
+    ///
+    /// AND IT GUARDS THE SECTION IT LEANS ON. SOLID, BLUR and FROSTED
+    /// GLASS each still do their own job, because a fix to the columns
+    /// that quietly cost the window its glass would be a worse trade
+    /// than the fault.
+    #[test]
+    fn the_background_section_moves_all_three_columns_at_once() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        nacelle::theme::clear_preview();
+
+        let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
+        let hue_gap = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        fn live(name: &str) -> nacelle::theme::Color {
+            let t = theme::resolved();
+            col(t.color(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}"))))
+        }
+        fn live_px(name: &str) -> f32 {
+            let t = theme::resolved();
+            t.px(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}")))
+        }
+
+        let master_hue = lch(live("component.panel.fill")).h;
+        let mut s = editor_open();
+        // SOLID, with the background's own colour dragged a long way off
+        // the master's mint: the HSV track is brightness, saturation, hue,
+        // and 20 deg of HSV is nowhere near where this theme stands.
+        s.current_background = Some("SOLID".to_string());
+        s.wash = [70, 60, 20];
+        s.bg_opacity = 100;
+        s.apply_editor_preview();
+
+        let page = lch(live("component.panel.fill"));
+        let sub = lch(live("component.settings.sub_fill"));
+        let rail = lch(live("component.settings.rail_fill"));
+
+        // The body really left the theme it opened on — or the assertion
+        // below would be comparing three colours that never moved.
+        assert!(
+            hue_gap(page.h, master_hue) > 20.0,
+            "the BACKGROUND slider did not move the body at all: {} vs {}",
+            master_hue,
+            page.h
+        );
+        // AND ALL THREE COLUMNS WENT WITH IT. This is the divergence,
+        // measured: pinned to the ladder the two columns would have
+        // stayed on the master's hue while the page took the slider's.
+        for (name, c) in [("sub", sub), ("rail", rail)] {
+            assert!(
+                hue_gap(c.h, page.h) < 2.0,
+                "the {name} column stayed behind while BACKGROUND moved the page: \
+                 {} vs {}",
+                c.h,
+                page.h
+            );
+        }
+        // Still three shades, still climbing outward, still not black.
+        assert!(
+            sub.l - page.l > 0.03 && rail.l - sub.l > 0.03,
+            "the three columns stopped being three shades: {} {} {}",
+            page.l,
+            sub.l,
+            rail.l
+        );
+        let black = nacelle::theme::Color::from_hex("#000000").expect("black");
+        for (name, c) in [
+            ("page", live("component.panel.fill")),
+            ("sub", live("component.settings.sub_fill")),
+            ("rail", live("component.settings.rail_fill")),
+        ] {
+            let off = nacelle::theme::Color::wcag_contrast(c.to_linear(), black.to_linear());
+            assert!(off >= 1.15, "the {name} column came out black: {off}");
+        }
+
+        // THE SECTION STILL DOES ITS OWN JOB. BLUR raises the pyramid
+        // rank and leaves the wash empty — the master's own `none`, alpha
+        // 0 — and FROSTED raises the rank AND lays a wash over it. If
+        // either had been lost to this fix the window would have gained
+        // three shades and given up its glass.
+        s.current_background = Some("BLUR".to_string());
+        s.apply_editor_preview();
+        assert!(live_px("elev.panel.glass.rank") > 0.0, "BLUR stopped blurring");
+        assert_eq!(
+            live("elev.panel.glass.wash").a,
+            0.0,
+            "BLUR laid a wash; the tint alone is what BLUR is"
+        );
+        s.current_background = Some("FROSTED GLASS".to_string());
+        s.bg_coverage = 42;
+        s.apply_editor_preview();
+        assert!(live_px("elev.panel.glass.rank") > 0.0, "FROSTED stopped blurring");
+        assert!(
+            live("elev.panel.glass.wash").a > 0.0,
+            "FROSTED lost its wash; a frosted pane you can read through is a blur"
+        );
+
         nacelle::theme::clear_preview();
         viewport_home();
     }
@@ -10539,28 +10712,39 @@ mod tests {
     }
 
     /// ŻYCZENIE 1, MEASURED HERE. The three columns are three DIFFERENT
-    /// colours of ONE hue, and every one of the three comes out of the
-    /// theme.
+    /// colours of ONE hue, every one of the three comes out of the theme,
+    /// and — since the owner's screenshot of 2026-08-17 — not one of them
+    /// is BLACK.
     ///
     /// The window's half of the claim is what this can check: that each
-    /// bed is the box [`Panes`] cut and carries the colour ITS OWN TOKEN
-    /// resolves to — no fourth colour mixed in Rust, and no two beds
-    /// sharing a token. That the three tokens are three rungs of one
-    /// ladder is the MASTER's claim and is measured over the master, in
+    /// bed is the box [`Panes`] cut, wears the corner the THEME states,
+    /// and carries the colour ITS OWN TOKEN resolves to — no fourth
+    /// colour mixed in Rust, no radius written here, and no two beds
+    /// sharing a token. That the three tokens are three shades of one
+    /// ladder is the MASTER's claim, measured over the master in
     /// libnacelle (`the_three_settings_bands_are_three_shades_of_one_hue`).
     ///
-    /// TWO OF THE THREE ARE PAINTED HERE, and the master names exactly
-    /// those two. The page's bed is the WINDOW BODY, `component.panel
-    /// .fill`, and that rung is translucent — so laying a bed of it over
-    /// the body composes its alpha twice. Measured on the master, over
-    /// the field the window stands on: the body's own pixel is #131E19
-    /// and the doubled one #15201B, an OKLab dE of 0.0078. It is the
-    /// same for the FOLDED window, where the page is the whole interior.
+    /// TWO OF THE THREE ARE PAINTED under the master and the third is
+    /// NAMED: `component.settings.page_fill` ships as the sentinel `none`
+    /// because the page's bed is the WINDOW BODY, `component.panel.fill`,
+    /// and that rung is translucent — laying a bed of it over the body
+    /// composes its alpha twice (#131E19 against #15201B over the field
+    /// the window stands on, an OKLab dE of 0.0078). A theme that gives
+    /// the token a colour gets a third band, and that is measured here as
+    /// well: a name with no reader is exactly what the previous shape of
+    /// this window was rightly held to account for.
+    ///
+    /// WHY BLACKNESS IS AN ASSERTION OF ITS OWN. The step gates below read
+    /// OKLab L, and OKLab L cannot tell a dark shade from black — the two
+    /// beds the owner photographed were an honest 0.063 apart by that
+    /// ruler and the sRGB codes 6 and 19 on the screen. `off_black` is
+    /// WCAG contrast against pure black, whose 0.05 flare pedestal makes
+    /// it steepest exactly where OKLab L flattens.
     ///
     /// Every lightness and hue below is read in LINEAR light: OKLCh is
     /// defined over it, the bake answers sRGB-encoded, and the two are
-    /// far apart — the rungs read 0.2698 / 0.4036 / 0.4840 encoded
-    /// against 0.1150 / 0.1780 / 0.2320 decoded.
+    /// far apart — the master's three beds are 0.2320 / 0.2784 / 0.3341
+    /// decoded, and the first of them alone reads 0.4840 encoded.
     #[test]
     fn the_three_columns_are_three_shades_the_theme_chose() {
         let _g = crate::widgets::theme_test_lock();
@@ -10571,12 +10755,14 @@ mod tests {
         nacelle::theme::clear_preview();
         let s = furnished();
         let mut fonts = nacelle::font::FontSystem::new();
-        /// Every rect one call to [`Settings::draw_bands`] laid down.
+        /// Every bed one call to [`Settings::draw_bands`] laid down: the
+        /// box, the four corners it was cut with, and the colour.
+        type Bed = ([f32; 4], [nacelle::draw::Corner; 4], nacelle::theme::Color);
         fn bands(
             s: &Settings,
             fonts: &mut nacelle::font::FontSystem,
             h: f32,
-        ) -> (Vec<([f32; 4], nacelle::theme::Color)>, Panes, Rect) {
+        ) -> (Vec<Bed>, Panes, Rect) {
             // Recording, so the bands can be read back as commands: the
             // shipping list keeps no register at all.
             let mut dl = nacelle::draw::DrawList::recording();
@@ -10590,7 +10776,14 @@ mod tests {
                 .cmds()
                 .iter()
                 .filter_map(|c| match c {
-                    nacelle::draw::DrawCmd::Rect { r, color } => Some((*r, *color)),
+                    // A BED IS A RING FILL, whatever the cut. `ring_fill`
+                    // keeps its own name in the register even when every
+                    // corner is square and the tessellator takes the
+                    // one-quad path, which is what lets this test ask a
+                    // SQUARE theme the same question it asks a round one.
+                    nacelle::draw::DrawCmd::RingFill { r, corners, color } => {
+                        Some((*r, *corners, *color))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -10601,16 +10794,31 @@ mod tests {
             let d = (a - b).rem_euclid(360.0);
             d.min(360.0 - d)
         };
+        /// How far a bed stands off pure black, as WCAG 2.x contrast.
+        /// The same ruler libnacelle's band test uses, and for the reason
+        /// given there: `(Y + 0.05)/0.05` moves fastest in the region
+        /// OKLab L flattens, so it is the one measure that answers "is
+        /// this a shade or a black stripe".
+        fn off_black(c: nacelle::theme::Color) -> f32 {
+            let black = nacelle::theme::Color::from_hex("#000000").expect("black");
+            nacelle::theme::Color::wcag_contrast(c.to_linear(), black.to_linear())
+        }
+        /// The floor a whole COLUMN of interface must clear, set between
+        /// two of the master's own rungs: `@surface.panel` — the window
+        /// body, the darkest bed this master stands a control on — reads
+        /// 1.26, and `@surface.base`, one of the two rungs the columns
+        /// used to be pinned to, reads 1.12.
+        const NOT_BLACK: f32 = 1.15;
 
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
         let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
         assert!(!nav.folded, "the window folded at a width it fits in");
-        assert_eq!(drawn.len(), 2, "two columns to bed; the page's bed is the body");
+        assert_eq!(drawn.len(), 2, "two columns to bed; the page's is the sentinel");
         // Each band is its column's own rectangle — the same cut the
         // rows are laid in, or the bed and what stands on it would
         // disagree about where the column is.
-        let boxes: Vec<[f32; 4]> = drawn.iter().map(|(r, _)| *r).collect();
+        let boxes: Vec<[f32; 4]> = drawn.iter().map(|(r, _, _)| *r).collect();
         let same = |b: &[f32; 4], r: Rect| {
             let want = [r.x, r.y, r.w, r.h];
             b.iter().zip(want.iter()).all(|(a, w)| (a - w).abs() < 0.01)
@@ -10630,16 +10838,18 @@ mod tests {
         let of = |n: &str| {
             col(th.color(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}"))))
         };
+        let px = |n: &str| th.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}")));
+        // The page's bed is DECLARED, and what it is declared as is the
+        // sentinel: the name exists so a theme may bed the page, and the
+        // master declines because the body is already standing there.
+        assert_eq!(
+            of("component.settings.page_fill").a,
+            0.0,
+            "the master bedded the page a second time; the body's `panel.fill` is it"
+        );
         let want =
             [of("component.settings.rail_fill"), of("component.settings.sub_fill")];
-        // And the master names those two and no third: a `page_fill` back
-        // in it would be a token this window could only honour by bedding
-        // the body a second time.
-        assert!(
-            nacelle::theme::id("component.settings.page_fill").is_none(),
-            "the master named the page's bed again; the body's `panel.fill` is it"
-        );
-        for (i, (_, got)) in drawn.iter().enumerate() {
+        for (i, (_, _, got)) in drawn.iter().enumerate() {
             let w = want[i];
             assert!(
                 (got.r - w.r).abs() < 1e-6
@@ -10648,9 +10858,54 @@ mod tests {
                 "band #{i} was not painted in the colour its token names"
             );
         }
+
+        // THE CORNER COMES FROM THE THEME, and from both halves of the
+        // pair: `settings.band_corner` is the length and
+        // `settings.band_corner_mode` the cut. All four corners carry the
+        // same one — a band stands `modal.pad` clear of the modal's frame
+        // on every side that could meet it, so it is a plate lying ON the
+        // body and not a piece cut out of it, and a plate is cut the same
+        // all round.
+        let radius = px("settings.band_corner");
+        assert!(radius > 0.0, "the master states no radius for a column's bed");
+        for (i, (_, corners, _)) in drawn.iter().enumerate() {
+            for (k, c) in corners.iter().enumerate() {
+                assert_eq!(
+                    c.style,
+                    nacelle::draw::CornerStyle::Round,
+                    "band #{i} corner {k} is not the cut `corner.mode` states"
+                );
+                assert!(
+                    (c.size - radius).abs() < 0.01,
+                    "band #{i} corner {k} is {} px where the theme says {radius}",
+                    c.size
+                );
+            }
+        }
+
+        // AND NOT ONE BED IS BLACK. The two the window painted, and the
+        // body standing where the page is — which is the third bed as
+        // far as the eye is concerned.
+        let body = col(th.bed(nacelle::theme::id("component.panel.fill").expect("no body")));
+        for (name, c) in [("rail", want[0]), ("sub", want[1]), ("page", body)] {
+            assert!(
+                off_black(c) >= NOT_BLACK,
+                "the {name} column reads {} against pure black — a black stripe, \
+                 not a shade of the theme",
+                off_black(c)
+            );
+        }
+        // The gate is the one that catches the defect and not one every
+        // colour passes: the rung the rail used to be pinned to is below
+        // it, measured rather than remembered.
+        assert!(
+            off_black(of("surface.void")) < NOT_BLACK,
+            "`surface.void` now clears the black floor, so this gate no longer \
+             separates a column's bed from the swapchain clear colour"
+        );
+
         // AND THE PAGE KEEPS THE BODY'S OWN PIXEL. Nothing is laid over
         // it, so what stands there is what `window::frame` laid.
-        let body = col(th.bed(nacelle::theme::id("component.panel.fill").expect("no body")));
         assert!(
             !boxes.iter().any(|b| same(b, nav.page)),
             "the page was bedded a second time over the window body"
@@ -10680,19 +10935,19 @@ mod tests {
         {
             // Two degrees, which is what libnacelle holds each rung to
             // against the SEED over the master — read in linear light
-            // the three sit on ONE number (166.46 deg on the master's
-            // mint) because they take their hue from ONE token, and the
-            // tolerance is float noise and the sRGB rounding. Read
-            // encoded they spread nearly three degrees and this
-            // assertion would fail, which is the point of the space.
+            // the three sit on ONE number because they come out of ONE
+            // token, and the tolerance is float noise and the sRGB
+            // rounding. Read encoded they spread nearly three degrees
+            // and this assertion would fail, which is the point of the
+            // space.
             assert!(
                 hue_gap(a.h, b.h) < 2.0,
                 "{n}: two settings beds are two COLOURS ({} vs {} deg), not two shades",
                 a.h,
                 b.h
             );
-            // The master's rungs, decoded: 0.1150 / 0.1780 / 0.2320, so
-            // the smaller of the two steps is 0.054.
+            // The master's three, decoded: 0.2320 / 0.2784 / 0.3341, so
+            // the smaller of the two steps is 0.046.
             assert!(
                 (a.l - b.l).abs() > 0.03,
                 "{n}: two settings beds are the same shade ({} vs {})",
@@ -10700,10 +10955,19 @@ mod tests {
                 b.l
             );
         }
+        // AND THE STAIRCASE CLIMBS OUTWARD: the page is the well, the
+        // navigation the rim.
+        assert!(
+            page.l < sub.l && sub.l < rail.l,
+            "the columns are not a staircase: {} {} {}",
+            page.l,
+            sub.l,
+            rail.l
+        );
 
         // FOLDED: NO bed at all. There are no columns to shade
         // differently — the page is the whole interior and the body is
-        // already standing on the page's own rung — so the folded window
+        // already standing on the page's own bed — so the folded window
         // looks exactly as it did before any of this existed.
         let mut folded_seen = false;
         for h in HEIGHTS {
@@ -10720,30 +10984,82 @@ mod tests {
             "no window height in HEIGHTS folds — the folded band was never measured"
         );
 
-        // AND A THEME STILL MOVES THE PAGE'S BED — through the token
-        // that IS the page's bed. The body's own fill is what stands
-        // under the page, so re-pointing it moves the page and nothing
-        // in this window has to be told: the two columns keep their own
-        // tokens and stay where the theme put them.
+        // A THEME MOVES ALL THREE AT ONCE, through the one token the
+        // master anchors them to. This is the divergence the owner
+        // photographed — the page followed the editor's BACKGROUND
+        // sliders and the two columns did not — written as the theme
+        // those sliders write.
         {
             let _t = crate::widgets::Themed::new(
                 "page-bed",
-                "[component]\npanel.fill = @surface.void\n",
+                "[component]\npanel.fill = oklch(0.4200, 0.0400, 292.00 / 0.820)\n",
             );
             theme::set_viewport(1080.0, 1.0);
             let th = theme::resolved();
-            let moved = col(th.bed(
+            let of = |n: &str| {
+                col(th.color(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}"))))
+            };
+            let moved = lch(col(th.bed(
                 nacelle::theme::id("component.panel.fill").expect("no body"),
-            ));
-            let void =
-                col(th.color(nacelle::theme::id("surface.void").expect("no void")));
-            assert!(
-                (moved.r - void.r).abs() < 1e-6 && (moved.a - void.a).abs() < 1e-6,
-                "the fixture did not move the body's bed"
-            );
+            )));
+            assert!((moved.l - 0.42).abs() < 0.01, "the fixture did not move the body");
             let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
             assert!(!nav.folded);
             assert_eq!(drawn.len(), 2, "a moved body grew the window a third bed");
+            for (name, c) in [
+                ("rail", lch(of("component.settings.rail_fill"))),
+                ("sub", lch(of("component.settings.sub_fill"))),
+            ] {
+                assert!(
+                    hue_gap(c.h, moved.h) < 2.0,
+                    "the {name} column stayed on the old hue while the body moved: \
+                     {} vs {}",
+                    c.h,
+                    moved.h
+                );
+                assert!(
+                    c.l > moved.l + 0.03,
+                    "the {name} column did not climb off the body it follows: {} vs {}",
+                    c.l,
+                    moved.l
+                );
+            }
+        }
+
+        // AND THE PAGE'S NAME IS NOT DECORATION: give it a colour and
+        // this window beds the page too, in the box `Panes` cut for it.
+        {
+            let _t = crate::widgets::Themed::new(
+                "page-bedded",
+                "[component]\nsettings.page_fill = @surface.sunken\n",
+            );
+            theme::set_viewport(1080.0, 1.0);
+            let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
+            assert!(!nav.folded);
+            assert_eq!(drawn.len(), 3, "the page's own token was not honoured");
+            assert!(
+                drawn.iter().any(|(b, _, _)| same(b, nav.page)),
+                "the third bed is not the page's box"
+            );
+        }
+
+        // AND THE CUT IS THE THEME'S, not this window's: a master word
+        // away, every bed goes square.
+        {
+            let _t = crate::widgets::Themed::new("square-beds", "[corner]\nmode = square\n");
+            theme::set_viewport(1080.0, 1.0);
+            let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
+            assert!(!nav.folded);
+            assert!(!drawn.is_empty(), "nothing was drawn to check the cut on");
+            for (i, (_, corners, _)) in drawn.iter().enumerate() {
+                for c in corners {
+                    assert_eq!(
+                        c.style,
+                        nacelle::draw::CornerStyle::Square,
+                        "band #{i} kept its arc under a theme that asked for square corners"
+                    );
+                }
+            }
         }
         viewport_home();
     }
