@@ -3122,7 +3122,13 @@ struct Metrics {
     /// yet reserves for saying so.
     hint_inset: f32,
     corner_w: f32,
-    list_w: f32,
+    /// `settings.list_w_frac` itself, NOT a width. A listed button is a
+    /// fraction of the REGION it stands in — and since the window grew
+    /// its rail and sub-rail, the region is no longer the whole content
+    /// box. Resolving it here against `content.w` made every listed
+    /// button 60% of the WINDOW inside a panel roughly half that wide,
+    /// so the plate hung out of its column and off the window.
+    list_frac: f32,
 }
 
 impl Metrics {
@@ -3159,7 +3165,7 @@ impl Metrics {
             corner_w: (content.w * th.px(tok(&BACK_W_FRAC, "settings.back_w_frac")))
                 .max(th.px(tok(&BACK_W_MIN, "settings.back_w_min")))
                 .max(th.px(tok(&BACK_W_MIN_PX, "settings.back_w_min_min_px"))),
-            list_w: content.w * th.px(tok(&LIST_W_FRAC, "settings.list_w_frac")),
+            list_frac: th.px(tok(&LIST_W_FRAC, "settings.list_w_frac")),
         }
     }
 
@@ -5986,9 +5992,10 @@ impl Settings {
     }
 
     fn button_rect(kind: BtnKind, rc: RowCtx) -> Rect {
-        let x = rc.content.x + (rc.content.w - rc.m.list_w) / 2.0;
+        let listed_w = (rc.content.w * rc.m.list_frac).min(rc.content.w);
+        let x = rc.content.x + (rc.content.w - listed_w) / 2.0;
         match kind {
-            BtnKind::Listed => Rect::new(x, rc.band.y, rc.m.list_w, rc.m.btn_h),
+            BtnKind::Listed => Rect::new(x, rc.band.y, listed_w, rc.m.btn_h),
             BtnKind::Wide => {
                 Rect::new(rc.content.x, rc.band.y, rc.content.w, rc.m.btn_h)
             }
@@ -8510,6 +8517,19 @@ mod tests {
                             p.title,
                             (r.y, r.bottom()),
                             (content.y, content.bottom())
+                        );
+                        // And the same question sideways, which nothing
+                        // asked until the window grew a rail: a listed
+                        // button was a fraction of the WHOLE content box
+                        // while standing in a panel roughly half that
+                        // wide, so its plate hung out of the window.
+                        assert!(
+                            r.x >= content.x - 0.01
+                                && r.right() <= content.right() + 0.01,
+                            "{} at {h}px: a target sits {:?} outside {:?} sideways",
+                            p.title,
+                            (r.x, r.right()),
+                            (content.x, content.right())
                         );
                     }
                 }
