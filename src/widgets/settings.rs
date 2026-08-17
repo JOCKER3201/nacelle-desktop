@@ -833,6 +833,31 @@ fn hsv_track_of(c: nacelle::theme::Color) -> [u32; 3] {
     ]
 }
 
+/// A slider triple back to a colour: the inverse of [`hsv_track_of`], and
+/// the ONE map this way for the reason there is one map the other.
+///
+/// The three readers are the write-out (`editor_edits`, where a track
+/// becomes a value in the file), BASIC's fold, which carries a track the
+/// three sliders moved but do not author, and the tests that measure
+/// either.
+///
+/// THE DECODE IS PART OF THE MAP. The tracks hold an sRGB-ENCODED colour
+/// and OKLCh is defined over LINEAR light, so the trip is HSV -> sRGB ->
+/// LINEAR -> OKLCh and the decode is not optional. Without it the editor
+/// wrote a lighter colour than the slider showed and — since the next
+/// visit seeds off what was written — every visit wrote a lighter one
+/// still: the accent's L climbed 0.8200 -> 0.8904 -> 0.9413 -> 0.9715 with
+/// nobody dragging anything.
+///
+/// `a` is the CALLER's: 1.0 where the model forces opacity anyway, the
+/// seed's own where the model passes a colour's channel through (menu,
+/// tooltip, track).
+fn oklch_of_track(hsv: &[u32; 3], a: f32) -> nacelle::theme::color::Oklch {
+    let (r, g, b) =
+        hsv_to_rgb(hsv[2] as f32, hsv[1] as f32 / 100.0, hsv[0] as f32 / 100.0);
+    nacelle::theme::Color { r, g, b, a }.to_linear().to_oklch()
+}
+
 fn is_track(act: Act) -> bool {
     slider_of(act).is_some()
 }
@@ -4250,6 +4275,18 @@ impl Settings {
         }
         self.surface_lift = span_back(moved.surface_lift, SURFACE_LIFT_WALL);
         self.text_lift = span_back(moved.text_lift, TEXT_LIFT_WALL);
+        // THE BODY'S BED COMES TOO. The BACKGROUND section holds it as an
+        // absolute colour and not as one of the ten authors, so the move
+        // does not re-derive it — but the screen has been SHOWING it
+        // turned (`editor_edits` carries it there), and ADVANCED has to
+        // carry on from what the screen showed rather than from what the
+        // track still said. Both quads, not just the live one: which of
+        // them is written is the kind list's business, and a kind chosen
+        // after the drag would otherwise arrive on the old hue.
+        for t in [&mut self.tint, &mut self.wash] {
+            let moved = tone.shift(oklch_of_track(t, 1.0));
+            *t = onto_tracks(moved);
+        }
         // A hue move re-welds the beds to the accent — BASIC's promise of
         // one hue for the whole interface — so ADVANCED carries on
         // writing the reference rather than a number of its own.
@@ -4329,27 +4366,14 @@ impl Settings {
             Glass, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
         // The sliders are HSV — brightness, saturation, hue — and the file
-        // wants OKLCh, so the value crosses HSV -> sRGB -> LINEAR -> OKLCh
-        // here. See `hsv_to_rgb` for why HSV: brightness 100 % must be the
-        // hue's own full brightness, never white. The alpha is the
-        // CALLER's: 1.0 where the model forces opacity anyway, the seed's
-        // own where the model passes a colour's channel through (menu,
-        // tooltip, track).
-        //
-        // THE DECODE IS THE INVERSE OF THE SEEDING, and the pair has to
-        // stay a pair: `seed_editor_from_theme` puts the bake's ENCODED
-        // colour on the tracks, so the way back decodes before it asks for
-        // an OKLCh. Skipping it wrote a lighter colour than the slider
-        // showed, and — since the next visit seeds off what was written —
-        // every visit wrote a lighter one still.
-        let of = |hsv: &[u32; 3], a: f32| {
-            let (r, g, b) = hsv_to_rgb(
-                hsv[2] as f32,
-                hsv[1] as f32 / 100.0,
-                hsv[0] as f32 / 100.0,
-            );
-            nacelle::theme::Color { r, g, b, a }.to_linear().to_oklch()
-        };
+        // wants OKLCh, so every value below crosses HSV -> sRGB -> LINEAR
+        // -> OKLCh on the way out. That map is [`oklch_of_track`], written
+        // once and paired with [`hsv_track_of`] going the other way; the
+        // decode in the middle of it is why they must stay a pair, and
+        // what happens when they do not is recorded there. See
+        // [`hsv_to_rgb`] for why HSV at all: brightness 100 % must be the
+        // hue's own full brightness, never white.
+        let of = oklch_of_track;
         // What the LIVE theme already dresses — the two `halo_dressed`
         // answers the model asks its caller for, read off the bake here so
         // the model itself stays pure.
@@ -4380,11 +4404,32 @@ impl Settings {
                 "FROSTED GLASS" => Glass::Frosted,
                 _ => Glass::Solid,
             };
+            // BASIC'S PROMISE, KEPT FOR THE BODY TOO. This section writes
+            // the window body's bed as an ABSOLUTE colour — `panel.fill`
+            // on SOLID, the glass tint and wash otherwise — and BASIC's
+            // ten authors do not include it, so a hue drag turned the
+            // rail, the sub-page column and every other bed and left the
+            // BODY on the theme's old hue. Measured on the master at the
+            // first slider position the gate takes: rail 203.46 deg, sub
+            // 203.46 deg, the body still 166.22. It is the same case
+            // `tone_edits` answers by re-pointing `surface.hue` at the
+            // accent, except a literal cannot be re-pointed — so it is
+            // carried, by the model's own arithmetic ([`Tone::shift`]).
+            //
+            // Gated exactly as the tone edits are (BASIC, and seeds to
+            // move from), so the preview and the ten-token move can never
+            // be shifted by different amounts; and undone the moment the
+            // fold banks the move onto the tracks and puts the sliders
+            // back at rest, so nothing is applied twice.
+            let carry = match (self.editor_basic, self.tone_seeds) {
+                (true, Some(_)) => self.tone_of(),
+                _ => nacelle::theme::edit::Tone::NEUTRAL,
+            };
             edits.extend(glass_edits(
                 Scope::Theme,
                 kind,
-                of(&self.tint, 1.0),
-                of(&self.wash, 1.0),
+                carry.shift(of(&self.tint, 1.0)),
+                carry.shift(of(&self.wash, 1.0)),
                 self.bg_opacity as f32 / 100.0,
                 1.0 + self.bg_depth.min(100) as f32 / 50.0,
                 self.bg_coverage as f32 / 100.0,
@@ -6058,15 +6103,14 @@ impl Settings {
     /// two columns are the DEVIATIONS from the rung the window already
     /// stands on, and a deviation is the only thing there is to paint.
     ///
-    /// WHY, MEASURED. `component.panel.fill` — what `window::frame`
-    /// lays — and `component.settings.page_fill` are the same rung of
-    /// the same ladder in the master, and that rung is TRANSLUCENT
-    /// (`@surface.panel`, alpha 0.82). A rectangle of it over the body
-    /// composes the alpha a second time and the page stops matching the
-    /// window it is in: over the field the window stands on, the body's
-    /// own pixel is #131E19 and the doubled one #15201B, an OKLab dE of
-    /// 0.0078 — small, plainly visible as a lighter panel, and larger
-    /// on a theme whose backdrop is further from the rung.
+    /// WHY, MEASURED. The rung `component.panel.fill` names — what
+    /// `window::frame` lays — is TRANSLUCENT (`@surface.panel`, alpha
+    /// 0.82). A rectangle of it over the body composes the alpha a
+    /// second time and the page stops matching the window it is in:
+    /// over the field the window stands on, the body's own pixel is
+    /// #131E19 and the doubled one #15201B, an OKLab dE of 0.0078 —
+    /// small, plainly visible as a lighter panel, and larger on a theme
+    /// whose backdrop is further from the rung.
     ///
     /// AND THE TWO WORSE CASES, which is why this is not a comparison
     /// of the two colours with a paint when they differ:
@@ -6076,16 +6120,17 @@ impl Settings {
     ///   same rung or another — is the end of the blur the BACKGROUND
     ///   section just put there.
     /// * A MOVED BODY. The editor's SOLID writes `component.panel.fill`
-    ///   (`edit::glass_edits`) and does not touch the settings tokens,
-    ///   so the two stop being equal the moment somebody picks a
-    ///   background — and a rule that paints when they differ would put
-    ///   the OLD rung back over the colour just chosen.
+    ///   (`edit::glass_edits`), and a settings token copying that rung
+    ///   would not follow it — so a rule that paints when the two
+    ///   differ would put the OLD rung back over the colour just
+    ///   chosen.
     ///
     /// The body is the page's bed under every one of those, because it
-    /// is the same surface and not a copy of it. The master's
-    /// `settings.page_fill` therefore says which rung the body stands
-    /// on and nothing else reads it; that is a note for the master's
-    /// next pass, not a look this window may take into its own hands.
+    /// is the same surface and not a copy of it. The master says so in
+    /// its own voice: `[component] settings` names the rail's band and
+    /// the sub-page column's, and NOT the page's, because to re-shade
+    /// the page an author moves `panel.fill` — the body the page is
+    /// part of. Two names, three bands, one surface.
     fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
         static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
         static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
@@ -9453,7 +9498,10 @@ mod tests {
 
             let rail = lch(live("component.settings.rail_fill"));
             let sub = lch(live("component.settings.sub_fill"));
-            let page = lch(live("component.settings.page_fill"));
+            // The page's band is the window BODY's own token: the master
+            // names the two deviations and leaves the third to the
+            // surface the page is already a part of.
+            let page = lch(live("component.panel.fill"));
             // The window really turned, by the slider's own degrees.
             assert!(
                 hue_gap(sub.h, before.h + turn as f32) < 6.0,
@@ -9490,11 +9538,20 @@ mod tests {
                 page.l
             );
             // ONE hue between themselves, and this is the assertion the
-            // SPACE is load-bearing for: the three bands take their h
-            // from one token (`@surface.hue`), so decoded they stand on
-            // ONE number — a half-degree is float noise and nothing
-            // else. Read encoded they spread nearly three degrees, and
-            // a reader could not tell that apart from a real drift.
+            // SPACE is load-bearing for. The two COLUMNS take their h
+            // from one token (`@surface.hue`) and stand on one number:
+            // 203.46 against 203.46 at the first position. The BODY
+            // lands a quarter-degree off it (203.22) and not on it,
+            // because its colour is not a reference — the BACKGROUND
+            // section holds it on integer HSV sliders, and BASIC's hue
+            // is carried onto it by `Tone::shift`. One notch of that
+            // slider is the finest the body's bed can be stated at, and
+            // 0.24 deg is well inside one notch.
+            //
+            // Read ENCODED instead of decoded the three spread nearly
+            // three degrees — six times the quantisation and the thing
+            // this tolerance is really here to catch, because a reader
+            // could not tell that apart from a real drift.
             let spread = hue_gap(rail.h, sub.h).max(hue_gap(sub.h, page.h));
             assert!(
                 spread < 0.5,
@@ -10492,14 +10549,13 @@ mod tests {
     /// ladder is the MASTER's claim and is measured over the master, in
     /// libnacelle (`the_three_settings_bands_are_three_shades_of_one_hue`).
     ///
-    /// TWO OF THE THREE ARE PAINTED HERE. The page's bed is the WINDOW
-    /// BODY — `component.settings.page_fill` points at the same rung
-    /// `component.panel.fill` does — and that rung is translucent, so
-    /// laying it again over the body composes its alpha twice. Measured
-    /// on the master, over the field the window stands on: the body's
-    /// own pixel is #131E19 and the doubled one #15201B, an OKLab dE of
-    /// 0.0078. It is the same for the FOLDED window, where the page is
-    /// the whole interior.
+    /// TWO OF THE THREE ARE PAINTED HERE, and the master names exactly
+    /// those two. The page's bed is the WINDOW BODY, `component.panel
+    /// .fill`, and that rung is translucent — so laying a bed of it over
+    /// the body composes its alpha twice. Measured on the master, over
+    /// the field the window stands on: the body's own pixel is #131E19
+    /// and the doubled one #15201B, an OKLab dE of 0.0078. It is the
+    /// same for the FOLDED window, where the page is the whole interior.
     ///
     /// Every lightness and hue below is read in LINEAR light: OKLCh is
     /// defined over it, the bake answers sRGB-encoded, and the two are
@@ -10574,13 +10630,17 @@ mod tests {
         let of = |n: &str| {
             col(th.color(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}"))))
         };
-        let want = [
-            of("component.settings.page_fill"),
-            of("component.settings.rail_fill"),
-            of("component.settings.sub_fill"),
-        ];
+        let want =
+            [of("component.settings.rail_fill"), of("component.settings.sub_fill")];
+        // And the master names those two and no third: a `page_fill` back
+        // in it would be a token this window could only honour by bedding
+        // the body a second time.
+        assert!(
+            nacelle::theme::id("component.settings.page_fill").is_none(),
+            "the master named the page's bed again; the body's `panel.fill` is it"
+        );
         for (i, (_, got)) in drawn.iter().enumerate() {
-            let w = want[i + 1];
+            let w = want[i];
             assert!(
                 (got.r - w.r).abs() < 1e-6
                     && (got.g - w.g).abs() < 1e-6
@@ -10602,26 +10662,20 @@ mod tests {
         assert!(body.a < 1.0, "the body's rung went opaque — this test is measuring nothing");
         let field = of("surface.base");
         let once = nacelle::theme::Color::composite_as_rendered(body, field);
-        let twice = nacelle::theme::Color::composite_as_rendered(want[0], once);
+        let twice = nacelle::theme::Color::composite_as_rendered(body, once);
         let doubled = nacelle::theme::Color::delta_e_ok(once.to_linear(), twice.to_linear());
         assert!(
             doubled > 0.005,
-            "the page's rung and the body's no longer compose to two different \
-             pixels ({} vs {}) — either the master parted them or the alpha went, \
-             and this test can no longer see the defect it guards",
+            "one coat of the body's rung and two no longer compose to two \
+             different pixels ({} vs {}) — the alpha went, and this test can no \
+             longer see the defect it guards",
             once.to_hex(),
             twice.to_hex()
         );
         // THREE COLOURS, ONE HUE — the owner's "hue ten sam, odcień
         // koloru inny", read off what the window really shows: the two
         // beds it laid, and the BODY standing where the page is.
-        let (page, rail, sub) = (lch(body), lch(want[1]), lch(want[2]));
-        // The page's shade is the rung its token names, which is the
-        // master's way of saying "the body is the page's bed".
-        assert!(
-            (page.l - lch(want[0]).l).abs() < 1e-4,
-            "the body is no longer standing on the rung `settings.page_fill` names"
-        );
+        let (page, rail, sub) = (lch(body), lch(want[0]), lch(want[1]));
         for (a, b, n) in [(page, rail, "page/rail"), (page, sub, "page/sub"), (rail, sub, "rail/sub")]
         {
             // Two degrees, which is what libnacelle holds each rung to
