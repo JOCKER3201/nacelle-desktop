@@ -1353,6 +1353,17 @@ fn zone_gap() -> f32 {
 /// One reader for the bands and one for the window's own three panels:
 /// the page and the columns inside it fold on the same word, which is
 /// why "there is no room" means one thing in this window and not two.
+///
+/// Measured 2026-08-17, and the THEME's to answer, not this file's: at
+/// the master's `72u` the threshold scales with the screen, so whether
+/// a band stands in columns is very nearly the question of how much of
+/// the content box its page HAS. A page standing beside BOTH navigation
+/// columns keeps a little over half of it, and its own columns fall
+/// short at every height the program is built for — FONT is one list
+/// even at 2160 px, by four pixels. A page beside the rail alone
+/// (COLOR) stands in columns from 1080 px up. Moving the number is the
+/// owner's call and a `libnacelle` commit; nothing here may hard-code
+/// around it.
 fn col_min_w() -> f32 {
     static MIN_W: OnceLock<TokenId> = OnceLock::new();
     static MIN_W_PX: OnceLock<TokenId> = OnceLock::new();
@@ -3219,6 +3230,36 @@ impl Panes {
             sub,
             page: Rect::new(x, content.y, (content.right() - x).max(0.0), content.h),
             folded: false,
+        }
+    }
+}
+
+/// The box a page's ROWS really stand in: the page's own box less the
+/// lane the scrollbar keeps beside them.
+///
+/// An inset bar takes its lane OUT of the rows' box, so it stands
+/// BESIDE the controls instead of over them — the owner's ask, and the
+/// master's `scrollbar.mode` decision. The lane is reserved at the
+/// bar's WIDEST (hover included): a lane that appeared only while
+/// scrolling would reflow every row under the pointer.
+///
+/// Asked by the MEASUREMENT as well as by the drawing. A band folds on
+/// its WIDTH (M4), so a page measured at one width and drawn at another
+/// would not even be the same height — the scroll would stop short of a
+/// list it had itself made longer. The clip, the scroll's span and the
+/// bar go on measuring the FULL box: only the rows are narrowed, and
+/// the bar has to be drawn against the edge the lane was cut from.
+fn rows_box(page_box: Rect) -> Rect {
+    let look = ScrollbarLook::from_theme();
+    let lane = scroll::inset_w(&look).max(match look.mode {
+        scroll::ScrollbarMode::Inset => look.w_hover + 2.0 * look.margin,
+        _ => 0.0,
+    });
+    let w = (page_box.w - lane).max(0.0);
+    match look.edge {
+        scroll::ScrollbarEdge::Right => Rect::new(page_box.x, page_box.y, w, page_box.h),
+        scroll::ScrollbarEdge::Left => {
+            Rect::new(page_box.x + lane, page_box.y, w, page_box.h)
         }
     }
 }
@@ -5129,13 +5170,16 @@ impl Settings {
     /// of it here, so every caller — the drawing, the scroll, the tests
     /// — asks one question and gets the box the flow really has.
     fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
-        let nav = Panes::of(page.view, m, content);
-        let box_ = nav.page;
+        let box_ = Panes::of(page.view, m, content).page;
+        // The box is the FULL one — the clip and the bar are drawn on it
+        // — but what a pinned band COSTS is measured where its rows
+        // stand, which is beside the bar's lane ([`rows_box`]).
+        let rows = rows_box(box_);
         let top = body_top(page, m, box_);
         let mut bottom = box_.bottom();
         for zone in page.zones {
             if matches!(zone, Zone::Pinned { .. }) {
-                bottom -= m.gap + self.zone_h(zone, m, box_);
+                bottom -= m.gap + self.zone_h(zone, m, rows);
             }
         }
         Rect::new(box_.x, top, box_.w, (bottom - top).max(0.0))
@@ -5222,14 +5266,19 @@ impl Settings {
     /// whole content box, exactly as [`Settings::body_box`] takes it —
     /// the navigation is taken out of it here too, and the folded
     /// window's navigation bands are part of this length.
+    ///
+    /// Measured in [`rows_box`], which is where the drawing puts the
+    /// rows: a band folds on its width, so a length taken at the full
+    /// box would be a length of a page nobody is looking at.
     fn flow_h(&self, page: &'static Page, m: Metrics, content: Rect) -> f32 {
         let nav = Panes::of(page.view, m, content);
+        let box_ = rows_box(nav.page);
         let mut h = 0.0;
         for zone in self.frame_zones(page, &nav) {
             if matches!(zone, Zone::Pinned { .. }) {
                 continue;
             }
-            let zh = self.zone_h(zone, m, nav.page);
+            let zh = self.zone_h(zone, m, box_);
             if zh <= 0.0 {
                 continue;
             }
@@ -5251,44 +5300,16 @@ impl Settings {
     /// afterwards, outside it, which is why the flow can no longer meet
     /// them.
     fn draw_body(&mut self, ctx: &mut Ctx, page: &'static Page, m: Metrics, content: Rect) {
-        // An inset bar takes its lane OUT of the rows' box, so it stands
-        // BESIDE the controls instead of over them — the owner's ask, and
-        // the master's `scrollbar.mode` decision. The lane is reserved at
-        // the bar's WIDEST (hover included): a lane that appeared only
-        // while scrolling would reflow every row under the pointer.
-        let look = ScrollbarLook::from_theme();
-        let lane = scroll::inset_w(&look).max(match look.mode {
-            scroll::ScrollbarMode::Inset => look.w_hover + 2.0 * look.margin,
-            _ => 0.0,
-        });
         // The navigation is taken out of the content box FIRST: the
         // scrollbar's lane belongs to the PAGE's box, not to the
         // window's, or the rail would be pushed over by a bar that is
-        // nowhere near it.
+        // nowhere near it. The FULL box survives for the clip, the
+        // scroll's span and the bar; only the rows stand beside the lane
+        // ([`rows_box`]), and the bar is drawn against the original edge
+        // — otherwise it would hug the narrowed edge and stand over the
+        // rows again, just from the other side of its own lane.
         let nav = Panes::of(page.view, m, content);
-        // The FULL box survives for the bar: the lane is carved out of the
-        // rows' box only, and the bar is drawn against the original edge —
-        // otherwise it would hug the narrowed edge and stand over the rows
-        // again, just from the other side of its own lane.
-        let page_box = nav.page;
-        // The clip, the scroll span and the bar all live on the FULL box —
-        // the lane is carved from the ROWS' box only. A clip that ended at
-        // the lane would be a second statement of the same width, and the
-        // two would drift.
-        let rows_box = match look.edge {
-            scroll::ScrollbarEdge::Right => Rect::new(
-                page_box.x,
-                page_box.y,
-                (page_box.w - lane).max(0.0),
-                page_box.h,
-            ),
-            scroll::ScrollbarEdge::Left => Rect::new(
-                page_box.x + lane,
-                page_box.y,
-                (page_box.w - lane).max(0.0),
-                page_box.h,
-            ),
-        };
+        let rows_box = rows_box(nav.page);
         // Both of these take the WHOLE content box and split it again —
         // one split, stated in [`Panes::of`], so a test that measures a
         // page and the frame that draws it cannot answer differently.
@@ -8173,11 +8194,12 @@ mod tests {
                 let where_ = format!("{} at {h}px", p.title);
                 // The bands that FLOW this frame, in the box they flow
                 // in — which at a narrow window is the navigation ahead
-                // of the page and not the page alone. Asked of the same
-                // two functions the drawing asks, or the walk would be
+                // of the page and not the page alone, and which is the
+                // page's box less the scrollbar's lane. Asked of the same
+                // three functions the drawing asks, or the walk would be
                 // measuring a window nobody is looking at.
                 let nav = Panes::of(p.view, m, content);
-                let box_ = nav.page;
+                let box_ = rows_box(nav.page);
                 // Walk the description band by band, at the furthest the
                 // offset goes, and inside a banded region column by
                 // column: the last row of EVERY column has to be
@@ -8468,6 +8490,80 @@ mod tests {
         for (region, _, _) in &regions {
             assert!((region.y - box_.y).abs() < 0.01 && (region.h - box_.h).abs() < 0.01);
         }
+        viewport_home();
+    }
+
+    /// M4 in the small — a band with no room for its columns is the
+    /// list it was before it had them.
+    ///
+    /// Above the threshold the columns stand beside one another and none
+    /// of them starts below the band's own top edge. Below it every
+    /// column has the WHOLE width and starts under the one before it,
+    /// `modal.row_gap` down — which is the space every one of those rows
+    /// already leaves under itself, so a folded band is exactly the run
+    /// of rows the page wrote before it had columns.
+    ///
+    /// The boxes are synthetic on purpose, a pixel either side of
+    /// `settings.col_min_w`: what is under test is the RULE, not the
+    /// width the tokens happen to leave on one screen.
+    #[test]
+    fn a_band_with_no_room_for_its_columns_is_the_list_it_was() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        let s = furnished();
+        let band = &PROBE_ZONES[0];
+        let (min, gap) = (col_min_w(), col_gap());
+        let wide = Rect::new(10.0, 20.0, 2.0 * (min + 1.0) + gap, 700.0);
+        let narrow = Rect::new(10.0, 20.0, 2.0 * (min - 1.0) + gap, 700.0);
+        assert!(!zone_folded(band, wide), "a band with the width for its columns folded");
+        assert!(
+            zone_folded(band, narrow),
+            "a band a pixel short of the width stood in columns"
+        );
+
+        // Standing: two boxes side by side, both at the band's top.
+        let (regions, offsets) =
+            (zone_regions(band, wide), s.zone_offsets(band, m, wide));
+        assert!(
+            offsets.iter().all(|&d| d == 0.0),
+            "a column standing beside its neighbour started below the band"
+        );
+        assert!(
+            regions[1].0.x >= regions[0].0.right() + gap - 0.01,
+            "the standing columns are not the gutter apart"
+        );
+
+        // Folded: the whole width each, one under the other.
+        let (regions, offsets) =
+            (zone_regions(band, narrow), s.zone_offsets(band, m, narrow));
+        for (region, _, _) in &regions {
+            assert!(
+                (region.x - narrow.x).abs() < 0.01 && (region.w - narrow.w).abs() < 0.01,
+                "a folded column did not take the whole width"
+            );
+        }
+        let first = s.rows_h(PROBE_COLUMNS[0].rows, m, narrow);
+        assert!(offsets[0] == 0.0, "the first column of a folded band moved");
+        assert!(
+            (offsets[1] - (first + m.gap)).abs() < 0.01,
+            "the second column starts {} px down and the first ends {} px down",
+            offsets[1],
+            first
+        );
+        // And the band is as deep as the two together, so whatever
+        // follows it starts below BOTH — the height and the drawing read
+        // this one arithmetic.
+        let stacked = offsets[1] + s.rows_h(PROBE_COLUMNS[1].rows, m, narrow);
+        assert!(
+            (s.zone_h(band, m, narrow) - stacked).abs() < 0.01,
+            "a folded band is not as deep as the columns it stacked"
+        );
         viewport_home();
     }
 
@@ -8887,119 +8983,230 @@ mod tests {
         viewport_home();
     }
 
-    /// M4 in the large — the whole window folds, and the chain does not
-    /// move a step when it does.
+    /// M4 in the large — the whole window folds, and the FOCUS CHAIN
+    /// does not move a step when it does.
     ///
     /// At the smallest window the three panels cannot all have their
     /// width, so there are no panels: the rail's sections, the section's
     /// pages and the page itself become one vertical list inside the one
-    /// scroll. At the largest they stand side by side. Two things have
-    /// to survive that: every control the window offers is still
-    /// offered, and every frame still registers in the order the
-    /// DESCRIPTION writes — so Tab walks one route whatever shape the
-    /// window is in, and a reader who learned the route on one screen
-    /// keeps it on another.
+    /// scroll, and a band of columns runs its columns one after the
+    /// other down that list instead of beside one another. At the
+    /// largest, all of it stands side by side. Three things have to
+    /// survive that, on EVERY page and at EVERY window the program is
+    /// built for:
+    ///
+    /// * every frame registers in the order the DESCRIPTION writes, and
+    ///   never in the order the geometry happens to stand in;
+    /// * a sweep from end to end reaches everything the window promises
+    ///   — one shape may not hide what another offers;
+    /// * so the sequence of `FocusId`s is the SAME sequence at every
+    ///   height, which is what M4 is for: Tab walks one route whatever
+    ///   shape the window is in, and a reader who learned the route on
+    ///   one screen keeps it on another.
+    ///
+    /// The chain is read by WALKING it — `Nav::Next` from the head until
+    /// it comes back round — and not by asking whether an id registered
+    /// somewhere in the frame. Tab order is the question, so Tab is what
+    /// answers it. The hit map is walked beside it, because a route the
+    /// pointer cannot follow is half a window.
+    ///
+    /// The order is checked FRAME BY FRAME and not across the sweep: a
+    /// pinned band is on screen at every stop while the rows above it
+    /// come and go, so "the order they were first seen in" is the
+    /// scroll's order and not the chain's. Inside one frame the question
+    /// is exact — because no control appears twice, a frame that is a
+    /// subsequence of the description IS the description with some of it
+    /// missing, in the description's own order.
     #[test]
     fn the_window_folds_to_one_list_and_the_chain_keeps_its_order() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
-        /// Sweeps one window height and answers with every act it saw.
+
+        /// One frame of one page: the Tab route it built and the targets
+        /// it left, each in the order the frame made them and mapped
+        /// back to the acts the description names its controls by.
         ///
-        /// The order is checked FRAME BY FRAME and not across the
-        /// sweep: a pinned band is on screen at every stop while the
-        /// rows above it come and go, so "the order they were first
-        /// seen in" is the scroll's order and not the chain's. Inside
-        /// one frame the question is exact — what the frame registered
-        /// has to be the description's list with some of it missing,
-        /// never re-ordered.
-        ///
-        /// The corner button is dropped throughout: it registers at the
-        /// head of the chain and is PAINTED last, so the hit map is the
-        /// one place its position is not the chain's
-        /// ([`Settings::draw`]).
-        fn sweep(
+        /// An id or a target the description does not name — a board's
+        /// thumbnail, a row of an open list — is not one of the page's
+        /// described controls and has no place in the answer.
+        fn frame(
             fonts: &mut nacelle::font::FontSystem,
             view: View,
             h: f32,
-        ) -> Vec<Act> {
-            theme::resolved();
-            theme::set_viewport(h, 1.0);
-            let p = page(view);
-            // Half a viewport per stop, so consecutive stops overlap —
-            // every row is far shorter than half a viewport — and the
-            // far end is the clamp's own, exactly as the reachability
-            // sweep walks a page.
-            let (stride, length) = {
-                let mut dl = nacelle::draw::DrawList::new();
-                let ctx = probe(&mut dl, fonts, h, 1.0);
-                let content = content_rect(modal_rect(ctx.w, ctx.h));
-                let m = Metrics::of(&ctx, content);
-                let s = furnished();
-                ((s.body_box(p, m, content).h * 0.5).max(1.0), s.flow_h(p, m, content))
-            };
-            let mut stops: Vec<f32> = vec![f32::MAX / 4.0];
-            let mut at = 0.0;
-            while at < length {
-                stops.push(at);
-                at += stride;
+            stop: f32,
+            named: &[(FocusId, Act)],
+        ) -> (Vec<Act>, Vec<Act>) {
+            let mut s = furnished();
+            s.view = view;
+            // Every `Row::when` condition set at once, so the sweep
+            // walks the conditional rows as well.
+            editor_ajar(&mut s);
+            s.scroll.set_offset(stop);
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, fonts, h, 1.0);
+            ctx.focus = Some(&mut fc);
+            s.draw(&mut ctx);
+            // The chain answers about the last COMPLETED frame, so the
+            // frame the drawing built has to be closed before Tab can
+            // walk it.
+            fc.begin_frame();
+            let hits: Vec<Act> = s
+                .hits
+                .iter()
+                .map(|&(_, a)| a)
+                .filter(|a| named.iter().any(|(_, n)| n == a))
+                .collect();
+            let mut chain: Vec<Act> = Vec::new();
+            fc.focus(None);
+            if !fc.nav(Nav::Next) {
+                return (chain, hits);
             }
-            let described: Vec<Act> = {
-                let mut s = furnished();
-                s.view = view;
-                window_acts(&s, p).into_iter().filter(|a| *a != Act::Close).collect()
-            };
-            let mut out: Vec<Act> = Vec::new();
-            for stop in stops {
-                let mut s = furnished();
-                s.view = view;
-                s.scroll.set_offset(stop);
-                let mut dl = nacelle::draw::DrawList::new();
-                let mut ctx = probe(&mut dl, fonts, h, 1.0);
-                s.draw(&mut ctx);
-                let frame: Vec<Act> =
-                    s.hits.iter().map(|&(_, a)| a).filter(|a| *a != Act::Close).collect();
-                let mut want = described.iter();
-                for act in &frame {
-                    assert!(
-                        want.any(|d| d == act),
-                        "{} at {h}px: the frame registers {} controls in an \
-                         order the description does not write",
-                        p.title,
-                        frame.len()
-                    );
-                    if !out.contains(act) {
-                        out.push(*act);
-                    }
+            let head = fc.focused();
+            let mut at = head;
+            // Bounded, because a chain that never came back round would
+            // hang the suite rather than fail it. The bound is every
+            // control the page describes and a board's worth of
+            // thumbnails over.
+            for _ in 0..named.len() + 64 {
+                if let Some((_, act)) = named.iter().find(|(id, _)| Some(*id) == at) {
+                    chain.push(*act);
+                }
+                fc.nav(Nav::Next);
+                at = fc.focused();
+                if at == head {
+                    return (chain, hits);
                 }
             }
-            out
+            panic!("the focus chain never came back to its head");
         }
-        for view in [View::LookFeel, View::Font, View::Color] {
-            let p = page(view);
-            // The two shapes really are two shapes, or the comparison
-            // below would be one shape measured twice.
-            for (h, want_folded) in [(HEIGHTS[0], true), (HEIGHTS[4], false)] {
-                theme::set_viewport(h, 1.0);
-                let mut dl = nacelle::draw::DrawList::new();
-                let ctx = probe(&mut dl, &mut fonts, h, 1.0);
-                let content = content_rect(modal_rect(ctx.w, ctx.h));
-                let m = Metrics::of(&ctx, content);
-                assert_eq!(
-                    Panes::of(view, m, content).folded,
-                    want_folded,
-                    "{} at {h}px is not the shape this test is about",
-                    p.title
+
+        /// A frame is the description with some of it missing, never
+        /// re-ordered: every act it made stands after the one before it
+        /// in the description too.
+        fn in_order(frame: &[Act], described: &[Act], page: &str, h: f32, what: &str) {
+            let mut want = described.iter();
+            for act in frame {
+                assert!(
+                    want.any(|d| d == act),
+                    "{page} at {h}px: {what} is out of the order the description \
+                     writes — it registered the places {:?}",
+                    frame
+                        .iter()
+                        .map(|a| described.iter().position(|d| d == a))
+                        .collect::<Vec<_>>()
                 );
             }
-            let narrow = sweep(&mut fonts, view, HEIGHTS[0]);
-            let wide = sweep(&mut fonts, view, HEIGHTS[4]);
-            assert!(
-                narrow.len() == wide.len() && narrow.iter().all(|a| wide.contains(a)),
-                "{}: folding the window lost or gained a control — {} narrow \
-                 against {} wide",
-                p.title,
-                narrow.len(),
-                wide.len()
+        }
+
+        /// Everything the description promises was reached somewhere in
+        /// the sweep. What is missing is named by its PLACE in the
+        /// description, which is where it is read.
+        fn all_of_it(seen: &[Act], described: &[Act], page: &str, h: f32, what: &str) {
+            if let Some(i) = described.iter().position(|a| !seen.contains(a)) {
+                panic!(
+                    "{page} at {h}px: #{i} of the {} controls it describes {what}",
+                    described.len()
+                );
+            }
+        }
+
+        for p in PAGES.iter() {
+            let described: Vec<Act> = {
+                let mut s = furnished();
+                s.view = p.view;
+                editor_ajar(&mut s);
+                window_acts(&s, p)
+            };
+            let named: Vec<(FocusId, Act)> =
+                described.iter().map(|&a| (focus_id(a), a)).collect();
+            // The pointer is owed the same list WITHOUT the corner
+            // button, which is dropped from both sides below: it
+            // registers at the head of the chain and is PAINTED last, so
+            // the hit map is the one place its position is not the
+            // chain's ([`Settings::draw`]).
+            let pressed: Vec<Act> = described
+                .iter()
+                .copied()
+                .filter(|a| !matches!(a, Act::Close | Act::Back))
+                .collect();
+            for h in HEIGHTS {
+                theme::resolved();
+                theme::set_viewport(h, 1.0);
+                // Half a viewport per stop, so consecutive stops overlap
+                // — every row is far shorter than half a viewport — and
+                // the far end is the clamp's own, exactly as the
+                // reachability sweep walks a page.
+                let stops: Vec<f32> = {
+                    let mut dl = nacelle::draw::DrawList::new();
+                    let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+                    let content = content_rect(modal_rect(ctx.w, ctx.h));
+                    let m = Metrics::of(&ctx, content);
+                    let mut s = furnished();
+                    s.view = p.view;
+                    editor_ajar(&mut s);
+                    let stride = (s.body_box(p, m, content).h * 0.5).max(1.0);
+                    let length = s.flow_h(p, m, content);
+                    let mut out = vec![0.0];
+                    let mut at = stride;
+                    while at < length {
+                        out.push(at);
+                        at += stride;
+                    }
+                    out.push(f32::MAX / 4.0);
+                    out
+                };
+                let mut walked: Vec<Act> = Vec::new();
+                let mut pointed: Vec<Act> = Vec::new();
+                for stop in stops {
+                    let (chain, hits) = frame(&mut fonts, p.view, h, stop, &named);
+                    let hits: Vec<Act> = hits
+                        .into_iter()
+                        .filter(|a| !matches!(a, Act::Close | Act::Back))
+                        .collect();
+                    in_order(&chain, &described, p.title, h, "the focus chain");
+                    in_order(&hits, &pressed, p.title, h, "the hit map");
+                    for act in chain {
+                        if !walked.contains(&act) {
+                            walked.push(act);
+                        }
+                    }
+                    for act in hits {
+                        if !pointed.contains(&act) {
+                            pointed.push(act);
+                        }
+                    }
+                }
+                all_of_it(&walked, &described, p.title, h, "never joined the focus chain");
+                all_of_it(&pointed, &pressed, p.title, h, "never became a target");
+            }
+        }
+
+        // The shapes really are different shapes, or all of the above is
+        // one window measured five times. The WINDOW folds at the
+        // smallest height and stands in three panels at the largest; a
+        // BAND of columns folds with it and stands again once its own
+        // columns have the width. Both sides of M4 are therefore walked
+        // above, because both are true somewhere in the ladder.
+        for (h, window_folded, band_folded) in
+            [(HEIGHTS[0], true, true), (HEIGHTS[4], false, false)]
+        {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            let mut dl = nacelle::draw::DrawList::new();
+            let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let nav = Panes::of(View::Color, m, content);
+            assert_eq!(
+                nav.folded, window_folded,
+                "the window at {h}px is not the shape this test is about"
+            );
+            assert_eq!(
+                zone_folded(&COLOR_ZONES[0], rows_box(nav.page)),
+                band_folded,
+                "the COLOR page's band at {h}px is not the shape this test is about"
             );
         }
         viewport_home();
