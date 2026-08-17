@@ -5186,6 +5186,9 @@ impl Settings {
         // are the first bands of the flow instead — same order, one
         // shape fewer.
         let nav = Panes::of(page.view, m, content);
+        // The beds first, under everything: three shades of one colour
+        // where the window has its columns, one bed where it has folded.
+        self.draw_bands(ctx, &nav);
         self.draw_nav(ctx, page, m, &nav);
         self.draw_body(ctx, page, m, content);
         self.button_drawn(ctx, corner, chrome_label, chrome_act, Some(ring));
@@ -5490,6 +5493,45 @@ impl Settings {
             anchor -= zh + m.gap;
         }
         self.draw_scrollbar(ctx, view, length);
+    }
+
+    /// The three columns' beds: ONE COLOUR OF THE THEME'S AT THREE OF
+    /// ITS SHADES, which is the owner's ask in his own words — "hue ten
+    /// sam, odcień koloru inny".
+    ///
+    /// Nothing here decides what those shades are. The three tokens are
+    /// [component]'s, they point at three rungs of the surface ladder,
+    /// and the ladder is one hue at six lightnesses — so the difference
+    /// between the bands is a SHADE by construction and a theme that
+    /// re-points one band re-points only that one. Naming a rung here
+    /// instead would weld the settings columns to the desktop field and
+    /// no theme could ever part them again.
+    ///
+    /// Painted BEFORE the navigation and the body, and over each
+    /// column's whole rectangle exactly as [`Panes`] cut it: the beds
+    /// are the ground everything else in the window stands on.
+    ///
+    /// FOLDED, this is one band and not three. There are no columns
+    /// below `settings.col_min_w` — the rail's rows become the first
+    /// bands of one vertical flow — so `page` is the whole interior and
+    /// `rail`/`sub` are nothing at all. `settings.page_fill` is the rung
+    /// the window BODY already stands on, so the folded window looks
+    /// exactly as it did before this existed: no stripes, and no case in
+    /// Rust to keep them away.
+    fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
+        static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
+        static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
+        static PAGE_FILL: OnceLock<TokenId> = OnceLock::new();
+        let th = theme::resolved();
+        let bands = [
+            (Some(nav.page), &PAGE_FILL, "component.settings.page_fill"),
+            (nav.rail, &RAIL_FILL, "component.settings.rail_fill"),
+            (nav.sub, &SUB_FILL, "component.settings.sub_fill"),
+        ];
+        for (box_, cell, name) in bands {
+            let Some(r) = box_ else { continue };
+            ctx.dl.rect(r.x, r.y, r.w, r.h, col(th.color(tok(cell, name))));
+        }
     }
 
     /// The two navigation columns, where the window has not folded.
@@ -9162,6 +9204,153 @@ mod tests {
         viewport_home();
     }
 
+    /// ŻYCZENIE 1, MEASURED HERE. The three columns are painted in three
+    /// DIFFERENT colours of ONE hue, and every one of the three comes
+    /// out of the theme.
+    ///
+    /// The window's half of the claim is what this can check: that the
+    /// three bands are drawn, that each is the box [`Panes`] cut, and
+    /// that each carries the colour ITS OWN TOKEN resolves to — no
+    /// fourth colour mixed in Rust, and no two bands sharing a token.
+    /// That the three tokens are three rungs of one ladder is the
+    /// MASTER's claim and is measured over the master, in libnacelle
+    /// (`the_three_settings_bands_are_three_shades_of_one_hue`).
+    ///
+    /// The folded window is the other half: one band and not three, so
+    /// the vertical list cannot come out striped.
+    #[test]
+    fn the_three_columns_are_three_shades_the_theme_chose() {
+        let _g = crate::widgets::theme_test_lock();
+        let s = furnished();
+        let mut fonts = nacelle::font::FontSystem::new();
+        /// Every rect one call to [`Settings::draw_bands`] laid down.
+        fn bands(
+            s: &Settings,
+            fonts: &mut nacelle::font::FontSystem,
+            h: f32,
+        ) -> (Vec<([f32; 4], nacelle::theme::Color)>, Panes, Rect) {
+            // Recording, so the bands can be read back as commands: the
+            // shipping list keeps no register at all.
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let nav = Panes::of(View::LookFeel, m, content);
+            s.draw_bands(&mut ctx, &nav);
+            let out = ctx
+                .dl
+                .cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::Rect { r, color } => Some((*r, *color)),
+                    _ => None,
+                })
+                .collect();
+            (out, nav, content)
+        }
+        let lch = |c: nacelle::theme::Color| c.to_oklch();
+        let hue_gap = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
+        assert!(!nav.folded, "the window folded at a width it fits in");
+        assert_eq!(drawn.len(), 3, "three columns, three beds");
+        // Each band is its column's own rectangle — the same cut the
+        // rows are laid in, or the bed and what stands on it would
+        // disagree about where the column is.
+        let boxes: Vec<[f32; 4]> = drawn.iter().map(|(r, _)| *r).collect();
+        for (name, r) in [
+            ("page", nav.page),
+            ("rail", nav.rail.expect("no rail")),
+            ("sub", nav.sub.expect("no column of pages")),
+        ] {
+            let want = [r.x, r.y, r.w, r.h];
+            assert!(
+                boxes.iter().any(|b| b
+                    .iter()
+                    .zip(want.iter())
+                    .all(|(a, w)| (a - w).abs() < 0.01)),
+                "the {name} column has no bed of its own"
+            );
+        }
+        // Every colour is the one ITS token resolves to: the window
+        // carries a name to the theme and paints back what it is given.
+        let th = theme::resolved();
+        let of = |n: &str| {
+            col(th.color(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}"))))
+        };
+        let want = [
+            of("component.settings.page_fill"),
+            of("component.settings.rail_fill"),
+            of("component.settings.sub_fill"),
+        ];
+        for (i, (_, got)) in drawn.iter().enumerate() {
+            let w = want[i];
+            assert!(
+                (got.r - w.r).abs() < 1e-6
+                    && (got.g - w.g).abs() < 1e-6
+                    && (got.b - w.b).abs() < 1e-6,
+                "band #{i} was not painted in the colour its token names"
+            );
+        }
+        // THREE COLOURS, ONE HUE — the owner's "hue ten sam, odcień
+        // koloru inny", read off the pixels the window actually laid.
+        let (page, rail, sub) = (lch(want[0]), lch(want[1]), lch(want[2]));
+        for (a, b, n) in [(page, rail, "page/rail"), (page, sub, "page/sub"), (rail, sub, "rail/sub")]
+        {
+            // Six degrees, and the number has a reason. libnacelle holds
+            // each rung to 2 deg of the SEED over the master; this pair
+            // is two ends of that ladder, each of them rounded into sRGB
+            // on the way to the screen, and the rounding turns a hue by a
+            // degree or so more at the dark end than at the light one. So
+            // the pair's tolerance is the rung's, doubled and rounded up.
+            // It is nowhere near a colour DIFFERENCE: the severity roles,
+            // which are meant to be told apart by hue, sit more than 15
+            // deg from one another.
+            assert!(
+                hue_gap(a.h, b.h) < 6.0,
+                "{n}: two settings columns are two COLOURS ({} vs {} deg), not two shades",
+                a.h,
+                b.h
+            );
+            assert!(
+                (a.l - b.l).abs() > 0.03,
+                "{n}: two settings columns are the same shade ({} vs {})",
+                a.l,
+                b.l
+            );
+        }
+
+        // FOLDED: one bed over the whole interior. There are no columns
+        // to shade differently, so there is nothing to stripe.
+        let mut folded_seen = false;
+        for h in HEIGHTS {
+            theme::set_viewport(h, 1.0);
+            let (drawn, nav, content) = bands(&s, &mut fonts, h);
+            if !nav.folded {
+                continue;
+            }
+            folded_seen = true;
+            assert_eq!(drawn.len(), 1, "a folded window painted more than one bed");
+            let r = drawn[0].0;
+            assert!(
+                (r[0] - content.x).abs() < 0.01
+                    && (r[2] - content.w).abs() < 0.01
+                    && (r[3] - content.h).abs() < 0.01,
+                "the folded window's one bed is not its whole interior"
+            );
+        }
+        assert!(
+            folded_seen,
+            "no window height in HEIGHTS folds — the folded band was never measured"
+        );
+        viewport_home();
+    }
+
     /// The rail shows every section it has, at every window height the
     /// program is built for.
     ///
@@ -9794,4 +9983,5 @@ fn next_of(list: &[String], current: Option<String>) -> Option<String> {
         },
     }
 }
+
 
