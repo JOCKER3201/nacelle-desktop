@@ -717,6 +717,20 @@ fn main() {
 
     let mut settings = widgets::settings::Settings::new();
     settings.color_enabled = color_mgr.is_some();
+    // And WHICH spaces this compositor can be asked for, so the window
+    // leaves out what this machine cannot show rather than offering it
+    // and logging a refusal when it is picked (the screen decision's
+    // rule, applied to the HDR half of the list). None and not an empty
+    // list where there is no colour manager: a window nobody told has
+    // learnt nothing, which is a different thing from learning that
+    // every space is out of reach.
+    settings.set_supported_spaces(color_mgr.as_ref().map(|mgr| {
+        config::COLOR_SPACES
+            .iter()
+            .filter(|space| mgr.supports(space))
+            .map(|space| space.to_string())
+            .collect()
+    }));
     // Frosted-glass preferences: the radius goes to the renderer, the
     // opacity into the tint of every glass quad drawn this frame.
     let (blur_radius, blur_opacity) = config::blur_prefs();

@@ -139,7 +139,10 @@ use std::path::{Path, PathBuf};
 // where a constant is declared is not their business. The gutter's own
 // bound is not among them: it is applied where the field is read and
 // nothing outside asks for it.
-pub use model::{COLOR_SPACES, GRID_MAX, GRID_MIN};
+pub use model::{
+    color_spaces, space_range, SpaceRange, COLOR_SPACES, COLOR_SPACE_TABLE, GRID_MAX,
+    GRID_MIN,
+};
 
 
 

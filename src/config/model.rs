@@ -514,18 +514,93 @@ impl GridConf {
     }
 }
 
-/// The colour spaces the COLOR view offers, in display order. Names
-/// map to the Color Management protocol's named primaries + transfer
-/// function pairs in the application.
-pub const COLOR_SPACES: [&str; 7] = [
-    "auto",
-    "srgb",
-    "display p3",
-    "adobe rgb",
-    "bt2020 pq",
-    "bt2020 hlg",
-    "scrgb linear",
+/// The dynamic range a colour space asks the display for.
+///
+/// The COLOR view offers ONE list of spaces and the HDR switch decides
+/// which half of the table it holds, so the half a space belongs to is
+/// part of the space's own record and not a second table written out
+/// beside it: a space added to [`COLOR_SPACE_TABLE`] cannot go missing
+/// from an offer, because the row does not compile without saying which
+/// offer it stands in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpaceRange {
+    /// A standard-range space: the offer the switch shows when it is off.
+    Sdr,
+    /// A high-range space: the offer the switch shows when it is on.
+    Hdr,
+    /// Neither, and therefore both. Only "auto", which names no space at
+    /// all — it hands the choice back to the compositor — so it is never
+    /// the wrong one to be looking at and stands in both offers.
+    Either,
+}
+
+impl SpaceRange {
+    /// Whether a space of this range stands in the offer the switch is
+    /// showing.
+    pub const fn in_offer(self, hdr: bool) -> bool {
+        match self {
+            SpaceRange::Either => true,
+            SpaceRange::Sdr => !hdr,
+            SpaceRange::Hdr => hdr,
+        }
+    }
+}
+
+/// The colour spaces the COLOR view offers, in display order, each with
+/// the dynamic range it asks for. Names map to the Color Management
+/// protocol's named primaries + transfer function pairs in the
+/// application.
+///
+/// THE one statement of the split. Both offers are read off this table
+/// ([`color_spaces`]) and so is the switch's own state
+/// ([`space_range`]); nothing anywhere lists three names of its own.
+pub const COLOR_SPACE_TABLE: [(&str, SpaceRange); 7] = [
+    ("auto", SpaceRange::Either),
+    ("srgb", SpaceRange::Sdr),
+    ("display p3", SpaceRange::Sdr),
+    ("adobe rgb", SpaceRange::Sdr),
+    // ST 2084 is the display's own curve; HLG is a broadcast one and
+    // scRGB linear is a compositing space — all three are high range,
+    // and which of them a switch should reach for is the settings
+    // window's business, not this table's.
+    ("bt2020 pq", SpaceRange::Hdr),
+    ("bt2020 hlg", SpaceRange::Hdr),
+    ("scrgb linear", SpaceRange::Hdr),
 ];
+
+/// Every name the table holds, in the same order — what a written value
+/// is validated against, which is a question about the whole vocabulary
+/// and not about either offer. DERIVED, so it cannot fall behind.
+pub const COLOR_SPACES: [&str; COLOR_SPACE_TABLE.len()] = {
+    let mut out = [""; COLOR_SPACE_TABLE.len()];
+    let mut i = 0;
+    while i < COLOR_SPACE_TABLE.len() {
+        out[i] = COLOR_SPACE_TABLE[i].0;
+        i += 1;
+    }
+    out
+};
+
+/// The range a name asks for. A name from outside the table asks for
+/// nothing this program knows — and cannot reach here from the
+/// configuration, because [`ColorConf::space`] has already turned such a
+/// name into "auto".
+pub fn space_range(name: &str) -> SpaceRange {
+    COLOR_SPACE_TABLE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, r)| r)
+        .unwrap_or(SpaceRange::Either)
+}
+
+/// The names ONE offer holds, in the table's display order.
+pub fn color_spaces(hdr: bool) -> Vec<&'static str> {
+    COLOR_SPACE_TABLE
+        .iter()
+        .filter(|(_, r)| r.in_offer(hdr))
+        .map(|&(n, _)| n)
+        .collect()
+}
 
 /// The colour pipeline: a Wayland-session matter throughout — read,
 /// shown and applied only there.
