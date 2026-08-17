@@ -256,6 +256,22 @@ enum Knob {
     BarTrackB,
     BarTrackS,
     BarTrackH,
+    // ---- the BASIC page (2026-08-17). Three knobs for the WHOLE theme,
+    // ---- and every one of them a RELATIVE move over whatever the theme
+    // ---- already says — a rotation, a multiplier and an offset. They
+    // ---- are not a fourth way of writing a colour: the model turns them
+    // ---- into edits to the AUTHORS the rest of the theme derives from
+    // ---- (`theme::edit::tone_edits`), and the cascade does the rest.
+    /// Degrees the whole theme is turned by. One hue for the interface,
+    /// and the severity roles carried round together so `ok` stays as
+    /// far from `critical` as its author put it.
+    ToneHue,
+    /// The multiplier over every author's chroma; 100 is the theme
+    /// unchanged.
+    ToneSat,
+    /// The offset over every author's lightness and over the surface and
+    /// text ladders' two lifts; 50 is the theme unchanged.
+    ToneLight,
 }
 
 /// Which of the editor's switches a toggle row flips. Named like [`Knob`]
@@ -344,6 +360,11 @@ enum Act {
     PadTrack,
     EditGrid,
     SizeTrack(Sect),
+    /// The editor's BASIC/ADVANCED switch, at the head of the page.
+    /// Steps to the other mode and shows which one is in force
+    /// ([`Ctrl::Cycle`] with two members is a toggle that says its own
+    /// state, which a bare switch could not).
+    EditorMode,
     /// One of the theme editor's colour tracks.
     EditorTrack(Knob),
     /// One of the theme editor's switches ([`Flip`]).
@@ -440,6 +461,7 @@ fn focus_id(act: Act) -> FocusId {
         EditorSave => FocusId::of("settings.editor.save"),
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
+        EditorMode => FocusId::of("settings.editor.mode"),
         EditorTrack(k) => FocusId::of(match k {
             Knob::EdgeL => "settings.editor.edge.l",
             Knob::EdgeC => "settings.editor.edge.c",
@@ -504,6 +526,9 @@ fn focus_id(act: Act) -> FocusId {
             Knob::BarTrackB => "settings.editor.scrollbar.track.b",
             Knob::BarTrackS => "settings.editor.scrollbar.track.s",
             Knob::BarTrackH => "settings.editor.scrollbar.track.h",
+            Knob::ToneHue => "settings.editor.tone.hue",
+            Knob::ToneSat => "settings.editor.tone.sat",
+            Knob::ToneLight => "settings.editor.tone.light",
         }),
         EditorFlip(f) => FocusId::of(match f {
             Flip::SurfaceOwnHue => "settings.editor.surface.own_hue",
@@ -737,6 +762,47 @@ fn band_back(x: f32, lo: f32, hi: f32) -> u32 {
     ((x - lo) / (hi - lo) * 100.0).round().clamp(0.0, 100.0) as u32
 }
 
+// ---- BASIC's three tracks. Their ends are the CONTROL's own span and
+// ---- not a gamut wall: the owner ruled gamut limits out ("BEZ
+// ---- OGRANICZEŃ zakresu"), and the model clamps nothing but what the
+// ---- numbers MEAN — lightness stays inside 0..1, chroma cannot go
+// ---- negative, hue wraps. What a track's end says is only how far one
+// ---- drag can carry you, which is the same statement the other
+// ---- eighty-two tracks in this file make with their own `range`.
+
+/// A whole turn of the circle, in degrees.
+const TONE_HUE_MAX: u32 = 359;
+/// Up to twice the theme's own chroma; 100 leaves it alone, 0 greys it.
+const TONE_SAT_MAX: u32 = 200;
+/// The lightness offset's half-span. The bake clamps `surface.lift` to
+/// 0.09 and `text.lift` to 0.10 (`bake.rs:519`, `:525`), so a track that
+/// went further would have ends that do nothing.
+const TONE_LIGHT_SPAN: f32 = 0.10;
+/// One whole unit of the LIGHTNESS track, in OKLab L: the 0..100 track
+/// covers -span..+span, so a unit is a fiftieth of the span.
+const TONE_LIGHT_UNIT: f32 = TONE_LIGHT_SPAN / 50.0;
+
+/// The three tracks at REST — the theme exactly as it stands. A
+/// rotation of nothing, a multiplier of one and an offset of zero, which
+/// is [`nacelle::theme::edit::Tone::NEUTRAL`] in track units.
+const TONE_REST: [u32; 3] = [0, 100, 50];
+
+/// A colour on the editor's three HSV tracks — brightness, saturation,
+/// hue, in the whole units a slider moves.
+///
+/// The ONE map that way. Both readers use it: the seeding, which brings
+/// the theme's own colours onto the tracks, and BASIC's fold, which
+/// brings a moved author onto the same tracks. Two copies of it would
+/// be two chances for the two to round a colour differently.
+fn hsv_track_of(c: nacelle::theme::Color) -> [u32; 3] {
+    let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
+    [
+        (v * 100.0).round().clamp(0.0, 100.0) as u32,
+        (sat * 100.0).round().clamp(0.0, 100.0) as u32,
+        h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
+    ]
+}
+
 fn is_track(act: Act) -> bool {
     slider_of(act).is_some()
 }
@@ -745,7 +811,7 @@ fn is_track(act: Act) -> bool {
 fn slider_of(act: Act) -> Option<&'static Ctrl> {
     PAGES
         .iter()
-        .flat_map(page_rows)
+        .flat_map(all_page_rows)
         .map(|r| &r.ctrl)
         .find(|c| matches!(c, Ctrl::Slider { act: a, .. } if *a == act))
 }
@@ -1162,12 +1228,21 @@ enum Ctrl {
     /// ONLY statement of a slider's limits: the drag, the keyboard step
     /// and the knob position all read them here (R7). The font ranges
     /// mirror the clamps in `config.rs`, which owns the data's range.
+    ///
+    /// `step` is a QUESTION and not a number, because one family of
+    /// sliders cannot answer it in the description: the theme editor's
+    /// BASIC tracks step by what the swapchain can actually show, and
+    /// the bit depth that says so is a setting the window carries and
+    /// the user can change while the editor is open ([`Settings::tone_step`]).
+    /// Every other slider answers with a constant ([`step_1`] and its
+    /// two siblings), which is the same statement it made before and in
+    /// the same place — R7 is intact.
     Slider {
         label: &'static str,
         act: Act,
         unit: Unit,
         range: (u32, u32),
-        step: u32,
+        step: fn(&Settings) -> u32,
         get: fn(&Settings) -> u32,
         set: fn(&mut Settings, u32),
         /// Writes the value to nacelle-desktop.ron.
@@ -1237,6 +1312,21 @@ struct Row {
 
 fn always(_: &Settings) -> bool {
     true
+}
+
+// The constant answers to `Ctrl::Slider`'s step. Percent tracks step 5
+// per press; cell counts, pixels and every 0..100 track step 1; the
+// blur's pyramid steps 2. Exactly the numbers the descriptions carried
+// as literals before the field became a question — one function each,
+// the way [`always`] is the constant answer to `Row::when`.
+fn step_1(_: &Settings) -> u32 {
+    1
+}
+fn step_2(_: &Settings) -> u32 {
+    2
+}
+fn step_5(_: &Settings) -> u32 {
+    5
 }
 
 const fn row(ctrl: Ctrl) -> Row {
@@ -1335,7 +1425,16 @@ enum Chrome {
 #[derive(Clone, Copy)]
 enum Zone {
     /// A full-width band: what every page was before there were bands.
-    Flow { cols: Cols, rows: &'static [Row] },
+    ///
+    /// `when` is [`Row::when`]'s own word one level up: a band that
+    /// answers false IS NOT THERE — no height in the flow, no drawing,
+    /// no place in the chain and nothing in the hit map. It exists
+    /// because a MODE is a property of a whole run of rows and not of
+    /// any one of them: the theme editor's ADVANCED page is eighty-six
+    /// rows that are all there together or not at all, and writing the
+    /// same condition on every one of them would be one decision spelt
+    /// eighty-six times, with eighty-six chances to spell it wrong.
+    Flow { when: fn(&Settings) -> bool, cols: Cols, rows: &'static [Row] },
     /// Columns of EQUAL width beside one another, `settings.col_gap`
     /// between them. Registration and drawing run COLUMN BY COLUMN —
     /// the whole of the first, then the whole of the second — so the
@@ -1373,9 +1472,39 @@ fn zone_rows(zone: &'static Zone) -> Box<dyn Iterator<Item = &'static Row>> {
     }
 }
 
-/// Every row a page describes, in registration order.
-fn page_rows(page: &'static Page) -> impl Iterator<Item = &'static Row> {
+/// Whether a band stands in this frame at all ([`Zone::Flow`]'s `when`).
+/// Asked wherever a page's bands are walked, so the description and the
+/// drawing cannot disagree about which page the editor is showing.
+fn zone_shown(zone: &'static Zone, s: &Settings) -> bool {
+    match zone {
+        Zone::Flow { when, .. } => when(s),
+        _ => true,
+    }
+}
+
+/// Every row a page DESCRIBES, standing or not, in registration order.
+///
+/// The mode-blind reading, and it has exactly one caller: [`slider_of`],
+/// which answers "what does this act drive" and must answer it about a
+/// declaration rather than about the frame on screen.
+fn all_page_rows(page: &'static Page) -> impl Iterator<Item = &'static Row> {
     page.zones.iter().flat_map(zone_rows)
+}
+
+/// Every row a page is SHOWING, in registration order — the bands whose
+/// `when` says no left out, exactly as the walker leaves them out.
+///
+/// The window itself never asks: its walkers go through
+/// [`Settings::frame_zones`], which has already dropped the bands that
+/// are not standing. This is the TESTS' independent reading of the same
+/// table — the thing that lets them check the drawing instead of
+/// echoing it — so it is built only for them.
+#[cfg(test)]
+fn page_rows<'a>(
+    page: &'static Page,
+    s: &'a Settings,
+) -> impl Iterator<Item = &'static Row> + 'a {
+    page.zones.iter().filter(move |z| zone_shown(z, s)).flat_map(zone_rows)
 }
 
 /// The gutter between two columns of a band.
@@ -1444,7 +1573,7 @@ fn zone_folded(zone: &'static Zone, box_: Rect) -> bool {
 /// the split is stated once and cannot drift.
 fn zone_regions(zone: &'static Zone, box_: Rect) -> Vec<(Rect, Cols, &'static [Row])> {
     match zone {
-        Zone::Flow { cols, rows } | Zone::Pinned { cols, rows } => {
+        Zone::Flow { cols, rows, .. } | Zone::Pinned { cols, rows } => {
             vec![(box_, *cols, *rows)]
         }
         Zone::Cols { columns } => {
@@ -1582,9 +1711,9 @@ static LOOKFEEL_SUBRAIL_ROWS: [Row; 3] = [
 /// The navigation as BANDS, for the folded window: the same two tables,
 /// laid down the one list instead of beside it. Statics because a band
 /// is `&'static` everywhere else in this file.
-static RAIL_ZONE: Zone = Zone::Flow { cols: Cols::None, rows: &RAIL_ROWS };
+static RAIL_ZONE: Zone = Zone::Flow { when: always, cols: Cols::None, rows: &RAIL_ROWS };
 static LOOKFEEL_SUBRAIL_ZONE: Zone =
-    Zone::Flow { cols: Cols::None, rows: &LOOKFEEL_SUBRAIL_ROWS };
+    Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_SUBRAIL_ROWS };
 
 /// The second column of a section: its entries, and the BAND those same
 /// entries stand in once the window has folded. One table for both,
@@ -1730,6 +1859,90 @@ static LOOKFEEL_RESET_ROWS: [Row; 9] = [
 /// opens it takes the window's content area over, exactly as it will
 /// when there is an editor to put there. Building that editor is
 /// another stage's work (decision §3, requirement 3).
+/// Whether the editor is on its BASIC page. The two bands' conditions
+/// and nothing else — one question, asked twice, so the two can never
+/// both stand or both be missing.
+fn editor_basic(s: &Settings) -> bool {
+    s.editor_basic
+}
+fn editor_advanced(s: &Settings) -> bool {
+    !s.editor_basic
+}
+
+/// The switch at the HEAD of the editor, before every section: which of
+/// the two pages is showing.
+///
+/// A [`Ctrl::Cycle`] and not a [`Ctrl::Toggle`], because with two
+/// members "step to the next" IS a toggle — and this one says which
+/// mode is in force in the mode's own word, which a switch showing an
+/// on/off state could not. The same control COLOR's SPACE, LUT and ICC
+/// are, and no new kind for a two-valued button.
+static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
+    label: "MODE",
+    get: |s| if s.editor_basic { "BASIC" } else { "ADVANCED" }.to_string(),
+    act: Act::EditorMode,
+})];
+
+/// THE WHOLE THEME ON THREE SLIDERS — the editor's BASIC page.
+///
+/// Three questions, and the reason three of them can move a hundred
+/// colours is that they do not move colours at all: the model turns
+/// them into edits to the AUTHORS everything else is derived from
+/// (`theme::edit::tone_edits` — `palette.accent`, the seven
+/// `severity.<role>.text`, `surface.lift` and `text.lift`), and the
+/// cascade does what it already does.
+///
+/// EVERY ONE IS RELATIVE, by the owner's decision. HUE is a rotation,
+/// SATURATION a multiplier and LIGHTNESS an offset, so each of them
+/// leaves every difference the theme's author wrote exactly where it
+/// was. That is what keeps a theme from flattening into one colour, and
+/// it is what makes ONE HUE FOR THE INTERFACE and A ROTATION FOR
+/// SEVERITY the same mechanism instead of two: the chrome family has
+/// one author, so turning it lands surfaces, containers, controls and
+/// text on a single shared hue, while the severity family has seven, so
+/// the same turn carries all of them and green `ok` stays as far from
+/// red `critical` as it was. What tells the families apart afterwards is
+/// SHADE, and the shades are the master's own ladders, which this page
+/// never touches — the owner's ŻYCZENIE 2b, and it needed no second
+/// mechanism.
+///
+/// The three tracks step by what the pipeline can SHOW
+/// ([`Settings::tone_step`]), which is why `step` is a question and not
+/// a literal here.
+static EDITOR_BASIC_ROWS: [Row; 4] = [
+    row_after(Ctrl::Section { title: "THE WHOLE THEME" }, Gap::None),
+    row(Ctrl::Slider {
+        label: "HUE",
+        act: Act::EditorTrack(Knob::ToneHue),
+        unit: Unit::None,
+        range: (0, TONE_HUE_MAX),
+        step: |s| s.tone_step()[0],
+        get: |s| s.tone[0],
+        set: |s, v| s.tone[0] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "SATURATION",
+        act: Act::EditorTrack(Knob::ToneSat),
+        unit: Unit::None,
+        range: (0, TONE_SAT_MAX),
+        step: |s| s.tone_step()[1],
+        get: |s| s.tone[1],
+        set: |s, v| s.tone[1] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+    row(Ctrl::Slider {
+        label: "LIGHTNESS",
+        act: Act::EditorTrack(Knob::ToneLight),
+        unit: Unit::None,
+        range: (0, 100),
+        step: |s| s.tone_step()[2],
+        get: |s| s.tone[2],
+        set: |s, v| s.tone[2] = v,
+        save: |s| s.apply_editor_preview(),
+    }),
+];
+
 /// The editor's first section. The border is one kind and one colour, and
 /// the colour is three numbers because the theme writes colours as
 /// `oklch(L, C, H)` — three sliders is the shape of the value, not a
@@ -1748,6 +1961,11 @@ static LOOKFEEL_RESET_ROWS: [Row; 9] = [
 /// ONLY for a number the model takes, and the model takes only tokens
 /// with a named reader in Rust — the iron rule, held on both sides of
 /// the seam.
+///
+/// Since 2026-08-17 this is the ADVANCED page of two, and it is
+/// UNCHANGED by the other one: the switch above it and BASIC's three
+/// sliders are bands of their own, and the only thing that happened to
+/// these eighty-six rows is that their band now has a condition.
 static EDITOR_ROWS: [Row; 86] = [
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
@@ -1756,7 +1974,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::EdgeL),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.edge[0],
         set: |s, v| s.edge[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -1766,7 +1984,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::EdgeC),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.edge[1],
         set: |s, v| s.edge[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -1776,7 +1994,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::EdgeH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.edge[2],
         set: |s, v| s.edge[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -1795,7 +2013,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BgOpacity),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bg_opacity,
             set: |s, v| s.bg_opacity = v,
             save: |s| s.apply_editor_preview(),
@@ -1810,7 +2028,7 @@ static EDITOR_ROWS: [Row; 86] = [
             // 0..100 mapped onto the pyramid's 1.0..3.0: the emitter mixes
             // two rungs by the fraction, so every stop is a real depth.
             range: (0, 100),
-            step: 2,
+            step: step_2,
             get: |s| s.bg_depth,
             set: |s, v| s.bg_depth = v,
             save: |s| s.apply_editor_preview(),
@@ -1823,7 +2041,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BgCoverage),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bg_coverage,
             set: |s, v| s.bg_coverage = v,
             save: |s| s.apply_editor_preview(),
@@ -1835,7 +2053,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TintB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tint[0],
         set: |s, v| s.tint[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -1845,7 +2063,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TintS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tint[1],
         set: |s, v| s.tint[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -1855,7 +2073,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TintH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.tint[2],
         set: |s, v| s.tint[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -1865,7 +2083,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::WashB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.wash[0],
         set: |s, v| s.wash[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -1875,7 +2093,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::WashS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.wash[1],
         set: |s, v| s.wash[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -1885,7 +2103,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::WashH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.wash[2],
         set: |s, v| s.wash[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -1905,7 +2123,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::AccentB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.accent[0],
         set: |s, v| s.accent[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -1915,7 +2133,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::AccentS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.accent[1],
         set: |s, v| s.accent[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -1925,7 +2143,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::AccentH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.accent[2],
         set: |s, v| s.accent[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -1946,7 +2164,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::SurfHue),
             unit: Unit::None,
             range: (0, 359),
-            step: 5,
+            step: step_5,
             get: |s| s.surface_hue,
             set: |s, v| s.surface_hue = v,
             save: |s| s.apply_editor_preview(),
@@ -1959,7 +2177,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::SurfLift),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.surface_lift,
         set: |s, v| s.surface_lift = v,
         save: |s| s.apply_editor_preview(),
@@ -1970,7 +2188,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::SurfChroma),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.surface_chroma,
         set: |s, v| s.surface_chroma = v,
         save: |s| s.apply_editor_preview(),
@@ -1983,7 +2201,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TextLift),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.text_lift,
         set: |s, v| s.text_lift = v,
         save: |s| s.apply_editor_preview(),
@@ -1993,7 +2211,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TextChroma),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.text_chroma,
         set: |s, v| s.text_chroma = v,
         save: |s| s.apply_editor_preview(),
@@ -2009,7 +2227,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::SevB),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.severity_idx().map_or(0, |i| s.severity[i][0]),
             set: |s, v| s.set_severity(0, v),
             save: |s| s.apply_editor_preview(),
@@ -2022,7 +2240,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::SevS),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.severity_idx().map_or(0, |i| s.severity[i][1]),
             set: |s, v| s.set_severity(1, v),
             save: |s| s.apply_editor_preview(),
@@ -2035,7 +2253,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::SevH),
             unit: Unit::None,
             range: (0, 359),
-            step: 5,
+            step: step_5,
             get: |s| s.severity_idx().map_or(0, |i| s.severity[i][2]),
             set: |s, v| s.set_severity(2, v),
             save: |s| s.apply_editor_preview(),
@@ -2055,7 +2273,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::CornerSm),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.corner_sm,
             set: |s, v| s.corner_sm = v,
             save: |s| s.apply_editor_preview(),
@@ -2068,7 +2286,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::CornerMd),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.corner_md,
             set: |s, v| s.corner_md = v,
             save: |s| s.apply_editor_preview(),
@@ -2081,7 +2299,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::CornerLg),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.corner_lg,
             set: |s, v| s.corner_lg = v,
             save: |s| s.apply_editor_preview(),
@@ -2096,7 +2314,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::CornerSeg),
             unit: Unit::None,
             range: (3, 16),
-            step: 1,
+            step: step_1,
             get: |s| s.corner_segments,
             set: |s, v| s.corner_segments = v,
             save: |s| s.apply_editor_preview(),
@@ -2110,7 +2328,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::Hairline),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.stroke_hair,
             set: |s, v| s.stroke_hair = v,
             save: |s| s.apply_editor_preview(),
@@ -2136,7 +2354,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingW),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_width,
             set: |s, v| s.ring_width = v,
             save: |s| s.apply_editor_preview(),
@@ -2149,7 +2367,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingOffset),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_offset,
             set: |s, v| s.ring_offset = v,
             save: |s| s.apply_editor_preview(),
@@ -2162,7 +2380,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingB),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_colour[0],
             set: |s, v| s.ring_colour[0] = v,
             save: |s| s.apply_editor_preview(),
@@ -2175,7 +2393,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingS),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_colour[1],
             set: |s, v| s.ring_colour[1] = v,
             save: |s| s.apply_editor_preview(),
@@ -2188,7 +2406,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingH),
             unit: Unit::None,
             range: (0, 359),
-            step: 5,
+            step: step_5,
             get: |s| s.ring_colour[2],
             set: |s, v| s.ring_colour[2] = v,
             save: |s| s.apply_editor_preview(),
@@ -2203,7 +2421,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingDash),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_dash,
             set: |s, v| s.ring_dash = v,
             save: |s| s.apply_editor_preview(),
@@ -2216,7 +2434,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::RingGap),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_gap,
             set: |s, v| s.ring_gap = v,
             save: |s| s.apply_editor_preview(),
@@ -2237,7 +2455,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::HaloAlpha),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.ring_halo_alpha,
             set: |s, v| s.ring_halo_alpha = v,
             save: |s| s.apply_editor_preview(),
@@ -2251,7 +2469,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::UnfocusedDim),
         unit: Unit::None,
         range: (30, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.unfocused_dim,
         set: |s, v| s.unfocused_dim = v,
         save: |s| s.apply_editor_preview(),
@@ -2265,7 +2483,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuFillB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_fill[0],
         set: |s, v| s.menu_fill[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2275,7 +2493,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuFillS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_fill[1],
         set: |s, v| s.menu_fill[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2285,7 +2503,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuFillH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.menu_fill[2],
         set: |s, v| s.menu_fill[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2295,7 +2513,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuEdgeB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_edge[0],
         set: |s, v| s.menu_edge[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2305,7 +2523,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuEdgeS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_edge[1],
         set: |s, v| s.menu_edge[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2315,7 +2533,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuEdgeH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.menu_edge[2],
         set: |s, v| s.menu_edge[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2327,7 +2545,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuEdgeW),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_edge_w,
         set: |s, v| s.menu_edge_w = v,
         save: |s| s.apply_editor_preview(),
@@ -2337,7 +2555,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuHintB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_hint[0],
         set: |s, v| s.menu_hint[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2347,7 +2565,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuHintS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.menu_hint[1],
         set: |s, v| s.menu_hint[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2357,7 +2575,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::MenuHintH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.menu_hint[2],
         set: |s, v| s.menu_hint[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2370,7 +2588,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipFillB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_fill[0],
         set: |s, v| s.tip_fill[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2380,7 +2598,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipFillS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_fill[1],
         set: |s, v| s.tip_fill[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2390,7 +2608,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipFillH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.tip_fill[2],
         set: |s, v| s.tip_fill[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2400,7 +2618,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipEdgeB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_edge[0],
         set: |s, v| s.tip_edge[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2410,7 +2628,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipEdgeS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_edge[1],
         set: |s, v| s.tip_edge[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2420,7 +2638,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipEdgeH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.tip_edge[2],
         set: |s, v| s.tip_edge[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2430,7 +2648,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipEdgeW),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_edge_w,
         set: |s, v| s.tip_edge_w = v,
         save: |s| s.apply_editor_preview(),
@@ -2440,7 +2658,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipTextB),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_text[0],
         set: |s, v| s.tip_text[0] = v,
         save: |s| s.apply_editor_preview(),
@@ -2450,7 +2668,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipTextS),
         unit: Unit::None,
         range: (0, 100),
-        step: 1,
+        step: step_1,
         get: |s| s.tip_text[1],
         set: |s, v| s.tip_text[1] = v,
         save: |s| s.apply_editor_preview(),
@@ -2460,7 +2678,7 @@ static EDITOR_ROWS: [Row; 86] = [
         act: Act::EditorTrack(Knob::TipTextH),
         unit: Unit::None,
         range: (0, 359),
-        step: 5,
+        step: step_5,
         get: |s| s.tip_text[2],
         set: |s, v| s.tip_text[2] = v,
         save: |s| s.apply_editor_preview(),
@@ -2479,7 +2697,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarW),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bar_w,
             set: |s, v| s.bar_w = v,
             save: |s| s.apply_editor_preview(),
@@ -2492,7 +2710,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarWHover),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bar_w_hover,
             set: |s, v| s.bar_w_hover = v,
             save: |s| s.apply_editor_preview(),
@@ -2514,7 +2732,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarFade),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bar_fade,
             set: |s, v| s.bar_fade = v,
             save: |s| s.apply_editor_preview(),
@@ -2535,7 +2753,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarTrackB),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bar_track_colour[0],
             set: |s, v| s.bar_track_colour[0] = v,
             save: |s| s.apply_editor_preview(),
@@ -2548,7 +2766,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarTrackS),
             unit: Unit::None,
             range: (0, 100),
-            step: 1,
+            step: step_1,
             get: |s| s.bar_track_colour[1],
             set: |s, v| s.bar_track_colour[1] = v,
             save: |s| s.apply_editor_preview(),
@@ -2561,7 +2779,7 @@ static EDITOR_ROWS: [Row; 86] = [
             act: Act::EditorTrack(Knob::BarTrackH),
             unit: Unit::None,
             range: (0, 359),
-            step: 5,
+            step: step_5,
             get: |s| s.bar_track_colour[2],
             set: |s, v| s.bar_track_colour[2] = v,
             save: |s| s.apply_editor_preview(),
@@ -2601,7 +2819,7 @@ static FONT_TERM_ROWS: [Row; 4] = [
         act: Act::SizeTrack(Sect::Term),
         unit: Unit::Tight,
         range: (50, 200),
-        step: 5,
+        step: step_5,
         get: |s| s.cur_size[0],
         set: |s, v| s.cur_size[0] = v,
         save: |s| config::set_term_font_size(s.cur_size[0]),
@@ -2628,7 +2846,7 @@ static FONT_UI_ROWS: [Row; 4] = [
         act: Act::SizeTrack(Sect::Ui),
         unit: Unit::Tight,
         range: (30, 125),
-        step: 5,
+        step: step_5,
         get: |s| s.cur_size[1],
         set: |s, v| s.cur_size[1] = v,
         save: |s| config::set_ui_font_size(s.cur_size[1]),
@@ -2658,7 +2876,7 @@ static GRID_ROWS: [Row; 5] = [
         act: Act::ColsTrack,
         unit: Unit::None,
         range: (GRID_MIN, GRID_MAX),
-        step: 1,
+        step: step_1,
         get: |s| s.grid_cols,
         set: |s, v| s.grid_cols = v,
         save: |s| config::set_grid_cols(s.grid_cols),
@@ -2668,7 +2886,7 @@ static GRID_ROWS: [Row; 5] = [
         act: Act::RowsTrack,
         unit: Unit::None,
         range: (GRID_MIN, GRID_MAX),
-        step: 1,
+        step: step_1,
         get: |s| s.grid_rows,
         set: |s, v| s.grid_rows = v,
         save: |s| config::set_grid_rows(s.grid_rows),
@@ -2679,7 +2897,7 @@ static GRID_ROWS: [Row; 5] = [
             act: Act::PadTrack,
             unit: Unit::Px,
             range: (0, 40),
-            step: 1,
+            step: step_1,
             get: |s| s.grid_pad,
             set: |s, v| s.grid_pad = v,
             save: |s| config::set_grid_padding(s.grid_pad),
@@ -2707,7 +2925,7 @@ static SOUND_ROWS: [Row; 4] = [
         act: Act::VolumeTrack,
         unit: Unit::Percent,
         range: (0, 100),
-        step: 5,
+        step: step_5,
         get: |s| s.sound_volume,
         set: |s, v| s.sound_volume = v,
         save: |s| config::set_sound_volume(s.sound_volume),
@@ -2791,7 +3009,7 @@ static BLUR_ROWS: [Row; 2] = [
         act: Act::BlurRadiusTrack,
         unit: Unit::Percent,
         range: (0, 100),
-        step: 5,
+        step: step_5,
         get: |s| s.blur_radius,
         set: |s, v| s.blur_radius = v,
         save: |s| config::set_blur_radius(s.blur_radius),
@@ -2801,7 +3019,7 @@ static BLUR_ROWS: [Row; 2] = [
         act: Act::BlurOpacityTrack,
         unit: Unit::Percent,
         range: (0, 100),
-        step: 5,
+        step: step_5,
         get: |s| s.blur_opacity,
         set: |s, v| s.blur_opacity = v,
         save: |s| config::set_blur_opacity(s.blur_opacity),
@@ -2891,14 +3109,14 @@ fn addon_report(installed: bool, problems: &[nacelle::settings::Problem]) -> Vec
 // side by side and fold back to the one list where the width runs out.
 
 static LOOKFEEL_ZONES: [Zone; 2] = [
-    Zone::Flow { cols: Cols::None, rows: &LOOKFEEL_ROWS },
+    Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_ROWS },
     Zone::Pinned { cols: Cols::None, rows: &LOOKFEEL_FOOTER },
 ];
 
 static LOOKFEEL_RESET_ZONES: [Zone; 1] =
-    [Zone::Flow { cols: Cols::None, rows: &LOOKFEEL_RESET_ROWS }];
+    [Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_RESET_ROWS }];
 
-/// The editor is ONE flow and a pinned bar, and stays one deliberately.
+/// The editor is a switch, ONE of two pages, and a pinned bar.
 ///
 /// §3 drew it as BORDER beside BACKGROUND, and that was true of the page
 /// it described: two lists and a handful of sliders. The page has nine
@@ -2908,8 +3126,21 @@ static LOOKFEEL_RESET_ZONES: [Zone; 1] =
 /// specification's own answer for the grown editor is a rail of
 /// categories (its step 3, `settings.rail_w_frac`), which is a different
 /// mechanism from a columned band and a different sitting.
-static EDITOR_ZONES: [Zone; 2] = [
-    Zone::Flow { cols: Cols::None, rows: &EDITOR_ROWS },
+///
+/// FOUR BANDS AND THE MODE IS THE MIDDLE TWO. The switch stands first,
+/// on every frame, because the owner asked for it "na samej górze
+/// strony"; then exactly one of the two pages, by its band's own `when`;
+/// then the bar, which belongs to BOTH — SAVE, SAVE AS and CANCEL write
+/// and drop the same edit set whichever page made it.
+///
+/// The two page bands are mutually exclusive by construction
+/// ([`editor_basic`] and [`editor_advanced`] are one question and its
+/// negation), so the flow can never carry both and can never carry
+/// neither.
+static EDITOR_ZONES: [Zone; 4] = [
+    Zone::Flow { when: always, cols: Cols::None, rows: &EDITOR_MODE_ROWS },
+    Zone::Flow { when: editor_basic, cols: Cols::None, rows: &EDITOR_BASIC_ROWS },
+    Zone::Flow { when: editor_advanced, cols: Cols::None, rows: &EDITOR_ROWS },
     Zone::Pinned { cols: Cols::None, rows: &EDITOR_BAR },
 ];
 
@@ -2930,6 +3161,7 @@ static FONT_COLUMNS: [ZCol; 2] = [
 static FONT_ZONES: [Zone; 1] = [Zone::Cols { columns: &FONT_COLUMNS }];
 
 static GRID_ZONES: [Zone; 1] = [Zone::Flow {
+    when: always,
     // Measured against the widest of the three labels rather than each
     // one's own, so all three tracks line up.
     cols: Cols::Measured { label: "COLUMNS", value: "100 PX" },
@@ -2937,12 +3169,13 @@ static GRID_ZONES: [Zone; 1] = [Zone::Flow {
 }];
 
 static SOUND_ZONES: [Zone; 1] = [Zone::Flow {
+    when: always,
     cols: Cols::Measured { label: "VOLUME", value: "100 %" },
     rows: &SOUND_ROWS,
 }];
 
 static BOARDS_ZONES: [Zone; 2] = [
-    Zone::Flow { cols: Cols::None, rows: &BOARDS_ROWS },
+    Zone::Flow { when: always, cols: Cols::None, rows: &BOARDS_ROWS },
     Zone::Pinned { cols: Cols::None, rows: &BOARDS_HINT },
 ];
 
@@ -2954,11 +3187,12 @@ static COLOR_COLUMNS: [ZCol; 2] = [
 static COLOR_ZONES: [Zone; 1] = [Zone::Cols { columns: &COLOR_COLUMNS }];
 
 static BLUR_ZONES: [Zone; 1] = [Zone::Flow {
+    when: always,
     cols: Cols::Measured { label: "OPACITY", value: "100 %" },
     rows: &BLUR_ROWS,
 }];
 
-static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { cols: Cols::None, rows: &ADDONS_ROWS }];
+static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, cols: Cols::None, rows: &ADDONS_ROWS }];
 
 /// The whole window. Indexed by [`View`], which `pages_are_in_view_order`
 /// keeps true.
@@ -3372,6 +3606,20 @@ pub struct Settings {
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
+    /// Which of the editor's two pages is showing: BASIC's three
+    /// sliders, or the ADVANCED page that has always been here. The
+    /// window keeps BOTH pages' state at all times — that is the whole
+    /// of "switching modes loses no work", and the reason this is one
+    /// bool beside the rest of the editor rather than two editors.
+    editor_basic: bool,
+    /// BASIC's three sliders in TRACK units, indexed HUE, SATURATION,
+    /// LIGHTNESS. [`TONE_REST`] is the theme untouched.
+    tone: [u32; 3],
+    /// What BASIC's relative move is relative TO: the theme's own
+    /// authors, read off the live bake when the page was seeded. `None`
+    /// until it has been — an unseeded BASIC writes nothing, the same
+    /// neutrality `current_border`'s `None` earned.
+    tone_seeds: Option<nacelle::theme::edit::ToneSeeds>,
     /// The border colour the editor is showing, as OKLCh in whole units:
     /// lightness 0..100, chroma 0..40, hue 0..359. A slider moves whole
     /// numbers, and the theme's own colours are written to four decimal
@@ -3609,6 +3857,13 @@ impl Settings {
             bg_depth: 50,
             bg_coverage: 42,
             naming: None,
+            // The editor opens on ADVANCED — the page that has always
+            // been there — with BASIC's three sliders at rest and no
+            // seeds yet, so a BASIC page that was somehow reached before
+            // `seed_editor_from_theme` ran would write nothing at all.
+            editor_basic: false,
+            tone: TONE_REST,
+            tone_seeds: None,
             edge: [70, 12, 200],
             // The whole-theme sections. OPENING VALUES ONLY, and never a
             // frame's: the one road onto the editor page
@@ -3843,9 +4098,172 @@ impl Settings {
         }
     }
 
+    /// BASIC's three sliders as the model's own relative move.
+    ///
+    /// [`TONE_REST`] maps to `Tone::NEUTRAL` exactly, which is what
+    /// makes "open BASIC and touch nothing" a no-op all the way to the
+    /// file.
+    fn tone_of(&self) -> nacelle::theme::edit::Tone {
+        nacelle::theme::edit::Tone {
+            hue_deg: self.tone[0] as f32,
+            sat: self.tone[1] as f32 / 100.0,
+            light: span_of(self.tone[2], TONE_LIGHT_SPAN),
+        }
+    }
+
+    /// How far one press of each BASIC slider moves it, in that track's
+    /// own whole units.
+    ///
+    /// THE NOTCH IS THE PIPELINE'S, not a look and not a taste. The
+    /// model works it out from the swapchain's bit depth — one output
+    /// code is `q = 1/(2^bits - 1)`, and a notch is the smallest move
+    /// that can change one code — and the depth is a SETTING, chosen on
+    /// SETTINGS -> COLOR (the DEPTH chips) and kept in the desktop's
+    /// config beside the space, the LUT and the ICC profile. libnacelle
+    /// has no config and could not read it; a theme token would let a
+    /// file lie about the hardware. So it crosses the seam as an
+    /// argument, from the copy this window took on the way into the
+    /// editor.
+    ///
+    /// EIGHT BITS WHEN NOBODY HAS SAID — the model's own
+    /// `DEFAULT_DEPTH_BITS` and this program's `ColorConf::DEPTH`, the
+    /// same number in both places because it is the floor every
+    /// swapchain supports. A notch coarser than the pipeline is honest;
+    /// a notch finer is a slider that does nothing for several presses
+    /// and reads as broken.
+    ///
+    /// NEVER BELOW ONE. These tracks carry whole numbers, so one unit is
+    /// the finest move that exists here whatever the depth says — at ten
+    /// bits and up the notch is already smaller than a unit, and the
+    /// answer is simply the track's own resolution.
+    fn tone_step(&self) -> [u32; 3] {
+        // The seed's own chroma, which is what a rotation and a scaling
+        // move along: a grey theme gets coarse notches, and that is
+        // right — turning a grey moves nothing however far it goes.
+        let seed_chroma = self.tone_seeds.map_or(0.0, |s| s.accent.c);
+        let st = nacelle::theme::edit::tone_step(Some(self.color_depth), seed_chroma);
+        let unit = |x: f32, per_unit: f32| {
+            let n = (x / per_unit).round();
+            if n.is_finite() { (n as u32).max(1) } else { 1 }
+        };
+        [
+            unit(st.hue_deg, 1.0),
+            unit(st.sat, 0.01),
+            unit(st.light, TONE_LIGHT_UNIT),
+        ]
+    }
+
+    /// BASIC's move, folded into the ADVANCED page's own controls.
+    ///
+    /// This is what makes leaving BASIC keep its work. BASIC is
+    /// RELATIVE, so its edits exist only while its band is standing;
+    /// the moment the page turns, `editor_edits` stops writing them and
+    /// the ADVANCED sliders answer for the same ten authors alone. So
+    /// the move has to become THEIR value, and the model's own
+    /// `ToneSeeds::shifted` is the arithmetic — the same clamps the
+    /// writes use, so the fold and the preview cannot drift.
+    ///
+    /// WHY THIS AND NOT A RE-SEED FROM THE BAKE. Re-reading the whole
+    /// page off the live theme looks like the simpler answer and is a
+    /// trap: a preview carries COLOURS and LENGTHS into the bake but not
+    /// enum WORDS (`enum_word_of` answers off the schema), so a re-seed
+    /// would quietly put a chosen corner cut, ring style, background
+    /// kind and scrollbar mode back to whatever the FILE says — and
+    /// exactly the unsaved ADVANCED work the switch is supposed to
+    /// protect would be the work it destroyed. Measured, 2026-08-17.
+    ///
+    /// WHAT THE FOLD CANNOT CARRY, measured 2026-08-17. The ADVANCED
+    /// page edits colours on three HSV tracks over sRGB — the owner's
+    /// decision of 2026-08-16, and how every colour on that page has
+    /// always worked — while BASIC writes `oklch(...)` and, by the
+    /// owner's "BEZ OGRANICZEŃ zakresu", is not held to any gamut. So a
+    /// BASIC move that lands OUTSIDE sRGB (a light violet, say: the
+    /// LIGHTNESS slider up and the HUE slider round to 295 deg) arrives
+    /// at a page that has no way to write it, and `from_oklch` maps it
+    /// in: the hue and the lightness come through exactly, the chroma
+    /// comes through as far as sRGB reaches. Nothing else can happen
+    /// while the destination page is an sRGB editor — and losing a
+    /// little chroma is the small loss; refusing to fold at all would
+    /// lose the whole move.
+    ///
+    /// Nothing outside the ten authors is touched.
+    fn fold_tone_into_advanced(&mut self) {
+        let Some(seeds) = self.tone_seeds else { return };
+        let tone = self.tone_of();
+        if tone == nacelle::theme::edit::Tone::NEUTRAL {
+            return;
+        }
+        let moved = seeds.shifted(tone);
+        self.accent = hsv_track_of(nacelle::theme::Color::from_oklch(moved.accent));
+        for i in 0..SEVERITY_ROLES.len() {
+            self.severity[i] =
+                hsv_track_of(nacelle::theme::Color::from_oklch(moved.severity[i]));
+            // ADVANCED writes only the roles a slider TOUCHED, and the
+            // rotation moved all seven — so all seven are now the page's
+            // own words, or the next preview would put the theme's back.
+            self.severity_touched[i] = true;
+        }
+        self.surface_lift = span_back(moved.surface_lift, 0.09);
+        self.text_lift = span_back(moved.text_lift, 0.10);
+        // A hue move re-welds the beds to the accent — BASIC's promise of
+        // one hue for the whole interface — so ADVANCED carries on
+        // writing the reference rather than a number of its own.
+        if tone.hue_deg != 0.0 {
+            self.surface_own_hue = false;
+        }
+        // The seeds are now what the sliders left behind, and the
+        // sliders are back at rest: the move has become part of what a
+        // NEXT visit to BASIC would be relative to.
+        self.tone_seeds = Some(moved);
+        self.tone = TONE_REST;
+    }
+
+    /// The theme's AUTHORS as they stand, and the three sliders back at
+    /// rest — what BASIC's relative move is measured from.
+    ///
+    /// Read off the LIVE bake, preview included, so arriving on BASIC
+    /// from a page of ADVANCED edits measures from what is on the screen
+    /// and not from what is in the file. A token this build cannot read
+    /// leaves the seeds unset altogether and BASIC writes nothing, which
+    /// is the same neutrality every other unseeded set in this editor
+    /// keeps: better a page that does nothing than one that guesses.
+    fn seed_tone_from_theme(&mut self) {
+        let t = nacelle::theme::resolved();
+        let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
+        let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
+        self.tone = TONE_REST;
+        let Some(accent) = col_of("palette.accent") else {
+            self.tone_seeds = None;
+            return;
+        };
+        let accent = accent.to_oklch();
+        // A role whose author this build cannot read follows the accent,
+        // which is where the rotation would carry it in any case.
+        let mut severity = [accent; 7];
+        for (i, (_, token, _)) in SEVERITY_ROLES.iter().enumerate() {
+            if let Some(c) = col_of(token) {
+                severity[i] = c.to_oklch();
+            }
+        }
+        self.tone_seeds = Some(nacelle::theme::edit::ToneSeeds {
+            accent,
+            severity,
+            surface_lift: px("surface.lift"),
+            text_lift: px("text.lift"),
+        });
+    }
+
     /// The whole of what the editor is set to, as the token edits both the
     /// PREVIEW and a SAVE are made of — one builder, or the file and the
     /// screen would drift.
+    ///
+    /// BASIC does not REPLACE this set, it lands ON it. The advanced
+    /// controls were all seeded off the theme, so carrying them is
+    /// carrying the theme's own state; BASIC then overrides the ten
+    /// authors it moves and leaves everything else — a corner cut, a
+    /// scrollbar's width, a focus ring — exactly where ADVANCED left it.
+    /// That is what makes the switch lossless in the BASIC direction:
+    /// the page the user cannot see is still in the edit.
     fn editor_edits(&self) -> Vec<nacelle::theme::edit::Edit> {
         use nacelle::theme::edit::{
             accent_edit, border_colour_edit, border_edits, focus_ring_edits, glass_edits,
@@ -4016,6 +4434,26 @@ impl Settings {
                 self.bar_track.then(|| of(&self.bar_track_colour, self.bar_track_a)),
             ));
         }
+        // ---- BASIC (2026-08-17), last and over the top of the rest.
+        // The three sliders move ten AUTHORS; everything above either
+        // agrees with them or is about something else entirely, and the
+        // ten that overlap are the ten BASIC is FOR.
+        if self.editor_basic {
+            if let Some(seeds) = self.tone_seeds {
+                let tone = self.tone_of();
+                for e in nacelle::theme::edit::tone_edits(Scope::Theme, &seeds, tone) {
+                    // ONE assignment per token. A list carrying a token
+                    // twice would save a file with the key written twice
+                    // in one section, and then the file and the screen
+                    // would be answering to two different rules about
+                    // which of the two wins.
+                    match edits.iter_mut().find(|b| b.token == e.token) {
+                        Some(slot) => *slot = e,
+                        None => edits.push(e),
+                    }
+                }
+            }
+        }
         edits
     }
 
@@ -4059,14 +4497,7 @@ impl Settings {
         let word =
             |n: &str| nacelle::theme::id(n).and_then(nacelle::theme::enum_word_of);
         let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
-        let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| {
-            let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
-            *slot = [
-                (v * 100.0).round().clamp(0.0, 100.0) as u32,
-                (sat * 100.0).round().clamp(0.0, 100.0) as u32,
-                h.rem_euclid(360.0).round().clamp(0.0, 359.0) as u32,
-            ];
-        };
+        let seed = |slot: &mut [u32; 3], c: nacelle::theme::Color| *slot = hsv_track_of(c);
 
         // The border: colour and kind.
         if let Some(c) = col_of("elev.panel.edge.color") {
@@ -4207,6 +4638,12 @@ impl Settings {
             seed(&mut self.bar_track_colour, c);
             self.bar_track_a = c.a;
         }
+        // BASIC's own seeds, off the same bake and in the same breath:
+        // the two pages open on ONE theme, so whatever re-seeds one
+        // re-seeds the other. The three sliders come back to rest here,
+        // which is what makes CANCEL and the door leave BASIC showing
+        // "the theme as it stands" rather than a move already made.
+        self.seed_tone_from_theme();
     }
 
     /// A theme's name may be its file's name, nothing more.
@@ -4493,6 +4930,31 @@ impl Settings {
                 self.editor_pulse = None;
                 self.seed_editor_from_theme();
             }
+            // NEITHER PAGE EATS THE OTHER'S WORK, and the two directions
+            // are not symmetrical, because the two pages are not.
+            //
+            // BASIC -> ADVANCED FOLDS. BASIC's edits are relative and
+            // stop being written the moment its band stops standing, so
+            // the move is handed to the ten ADVANCED controls that
+            // answer for the same authors and the sliders come back to
+            // rest ([`Settings::fold_tone_into_advanced`]). The look
+            // does not move; only who is writing it does.
+            //
+            // ADVANCED -> BASIC TAKES SEEDS AND NOTHING ELSE. The
+            // advanced controls hold work that is in no file yet, and
+            // BASIC lands ON their edit rather than replacing it, so
+            // there is nothing to hand over — only the question "what is
+            // the move relative to", answered off the live theme.
+            Act::EditorMode => {
+                let folding = self.editor_basic;
+                self.editor_basic = !folding;
+                if folding {
+                    self.fold_tone_into_advanced();
+                } else {
+                    self.seed_tone_from_theme();
+                }
+                self.apply_editor_preview();
+            }
             Act::EditorSaveAs => {
                 use nacelle::object::text_input::{InputModel, Validator};
                 self.naming = Some(
@@ -4635,6 +5097,13 @@ impl Settings {
                 // no Theme=, moves no selection, and takes the window's
                 // content area over instead — which is why it answers
                 // false: nothing about the configuration changed.
+                //
+                // The colour depth is read on the way in, the way the
+                // COLOR page reads its own: BASIC's sliders notch by what
+                // the swapchain can show ([`Settings::tone_step`]), and a
+                // depth chosen in an earlier session would otherwise not
+                // be known here until somebody had opened COLOR.
+                self.color_depth = config::color_prefs().depth;
                 self.seed_editor_from_theme();
                 self.go(View::ThemeEditor);
             }
@@ -5070,7 +5539,7 @@ impl Settings {
         else {
             return false;
         };
-        let v = get(self) as i64 + dir as i64 * step as i64;
+        let v = get(self) as i64 + dir as i64 * step(self) as i64;
         set(self, v.clamp(lo as i64, hi as i64) as u32);
         save(self);
         self.mark_dirty(act);
@@ -5327,7 +5796,11 @@ impl Settings {
             out.push(&RAIL_ZONE);
             out.extend(subrail_zone(page.view));
         }
-        out.extend(page.zones.iter());
+        // A band whose `when` says no is not in this frame at all — the
+        // theme editor's other page. This is the ONE place the flow, the
+        // length, the chain and the hit map all read, so the mode cannot
+        // be showing on one of them and hidden on another.
+        out.extend(page.zones.iter().filter(|z| zone_shown(z, self)));
         out
     }
 
@@ -8338,6 +8811,451 @@ mod tests {
         );
     }
 
+    // --------------------------------------------- the editor's BASIC page
+
+    /// An editor sitting on a real theme: the page seeded off the live
+    /// bake, exactly as [`Act::ThemesEditor`] leaves it.
+    fn editor_open() -> Settings {
+        let mut s = furnished();
+        s.view = View::ThemeEditor;
+        s.seed_editor_from_theme();
+        s
+    }
+
+    /// ŻYCZENIE 2, the switch. It stands at the HEAD of the page, before
+    /// every section, and it is the ONE control both modes share with the
+    /// footer — press it and the page under it is the other page.
+    #[test]
+    fn the_mode_switch_heads_the_editor_and_swaps_the_page_under_it() {
+        let _g = crate::widgets::theme_test_lock();
+        let page = &PAGES[View::ThemeEditor as usize];
+        let mut s = editor_open();
+
+        // AT THE TOP. `described_acts` walks the page band by band in
+        // registration order and puts the chrome at its head, so the
+        // mode is the first thing the page itself offers.
+        let described = described_acts(&s, page);
+        assert!(
+            described.get(1) == Some(&Act::EditorMode),
+            "the mode switch is not the first control on the editor page"
+        );
+
+        // ADVANCED is what the door opens on, and it is the page that
+        // was always here: its sections are all offering their controls.
+        assert!(!s.editor_basic, "the editor opened on BASIC");
+        let advanced = described_acts(&s, page);
+        assert!(
+            advanced.contains(&Act::EditorTrack(Knob::EdgeL)),
+            "ADVANCED is not showing the border section"
+        );
+        assert!(
+            !advanced.contains(&Act::EditorTrack(Knob::ToneHue)),
+            "ADVANCED is showing a BASIC slider"
+        );
+
+        // The switch flips it, and the two pages trade places whole.
+        s.perform(Act::EditorMode, 0.0);
+        assert!(s.editor_basic, "the switch did not reach BASIC");
+        let basic = described_acts(&s, page);
+        for k in [Knob::ToneHue, Knob::ToneSat, Knob::ToneLight] {
+            assert!(
+                basic.contains(&Act::EditorTrack(k)),
+                "BASIC is missing one of its three sliders"
+            );
+        }
+        assert!(
+            !basic.iter().any(|a| matches!(
+                a,
+                Act::EditorTrack(Knob::EdgeL) | Act::EditorTrack(Knob::CornerSm)
+            )),
+            "BASIC is still showing ADVANCED's controls"
+        );
+        // The verbs belong to BOTH pages: the bar is pinned, not banded.
+        for verb in [Act::EditorSave, Act::EditorSaveAs, Act::EditorCancel] {
+            assert!(basic.contains(&verb), "BASIC lost one of the editor's verbs");
+            assert!(advanced.contains(&verb), "ADVANCED lost one of the editor's verbs");
+        }
+        // And back, on the same one control.
+        s.perform(Act::EditorMode, 0.0);
+        assert!(!s.editor_basic, "the switch is one-way");
+    }
+
+    /// BASIC's three sliders write the theme's AUTHORS, and nothing that
+    /// the cascade derives.
+    ///
+    /// The set is the model's ([`nacelle::theme::edit::tone_edits`]) and
+    /// libnacelle holds it to its ten tokens; what this measures is the
+    /// WINDOW's half — that the sliders are wired to it at all, that a
+    /// drag changes what would be written, and that the rest of the
+    /// editor's set is still in the edit underneath.
+    #[test]
+    fn the_basic_sliders_move_the_authors_and_leave_the_rest_standing() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0);
+        assert!(s.tone_seeds.is_some(), "BASIC opened without seeds to move from");
+
+        // AT REST the page is a no-op: `TONE_REST` is `Tone::NEUTRAL`,
+        // so opening BASIC and touching nothing must not move a colour.
+        assert_eq!(s.tone, TONE_REST);
+        assert_eq!(s.tone_of(), nacelle::theme::edit::Tone::NEUTRAL);
+        let rest = s.editor_edits();
+        let value = |v: &Vec<nacelle::theme::edit::Edit>, t: &str| {
+            v.iter().find(|e| e.token == t).map(|e| e.value.clone())
+        };
+
+        // A TURN. Every author moves, and the ones that are not authors
+        // are not touched.
+        s.tone[0] = 90;
+        let turned = s.editor_edits();
+        for token in [
+            "palette.accent",
+            "severity.ok.text",
+            "severity.critical.text",
+            "surface.lift",
+            "text.lift",
+        ] {
+            assert!(value(&turned, token).is_some(), "BASIC wrote no {token}");
+        }
+        assert_ne!(
+            value(&turned, "palette.accent"),
+            value(&rest, "palette.accent"),
+            "the HUE slider moved and the seed did not"
+        );
+        // The severity family is CARRIED, not flattened: all seven
+        // authors ride the same turn, which is what keeps `ok` and
+        // `critical` different colours (measured over the master in
+        // libnacelle).
+        assert_eq!(
+            turned.iter().filter(|e| e.token.starts_with("severity.")).count(),
+            7,
+            "the turn did not carry every severity role"
+        );
+        // Pinning a DERIVED token would cut the cascade at the joint and
+        // the next drag would find it deaf.
+        for derived in ["hue.accent", "chroma.accent", "surface.chroma", "text.chroma"] {
+            let before = value(&rest, derived);
+            assert_eq!(
+                value(&turned, derived),
+                before,
+                "BASIC's HUE slider wrote `{derived}`, which the cascade derives"
+            );
+        }
+        // ONE assignment per token, or the saved file would carry a key
+        // twice in one section.
+        let mut names: Vec<&str> = turned.iter().map(|e| e.token).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "the edit set carries a token twice");
+        // The rest of the theme is still underneath: BASIC lands ON the
+        // editor's set, it does not replace it.
+        for token in ["elev.panel.edge.color", "corner.mode", "scrollbar.mode"] {
+            assert!(
+                value(&turned, token).is_some(),
+                "BASIC dropped `{token}` out of the edit"
+            );
+        }
+
+        // The other two sliders move it too, each in its own way.
+        s.tone = TONE_REST;
+        s.tone[1] = 150;
+        assert_ne!(
+            value(&s.editor_edits(), "palette.accent"),
+            value(&rest, "palette.accent"),
+            "the SATURATION slider moved and nothing followed"
+        );
+        s.tone = TONE_REST;
+        s.tone[2] = 80;
+        let lifted = s.editor_edits();
+        assert_ne!(
+            value(&lifted, "surface.lift"),
+            value(&rest, "surface.lift"),
+            "the LIGHTNESS slider left the surface ladder where it was"
+        );
+        assert_ne!(
+            value(&lifted, "text.lift"),
+            value(&rest, "text.lift"),
+            "the LIGHTNESS slider left the text ladder where it was"
+        );
+    }
+
+    /// NEITHER MODE EATS THE OTHER'S WORK — the owner's condition on the
+    /// switch, in both directions.
+    #[test]
+    fn switching_editor_modes_loses_no_work() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        // A choice only ADVANCED can make, and one only BASIC can.
+        s.current_corner = Some("CHAMFER".to_string());
+        s.ring_on = true;
+        s.current_ring_style = Some("DASHED".to_string());
+
+        s.perform(Act::EditorMode, 0.0);
+        // ADVANCED -> BASIC keeps the advanced page untouched: those
+        // controls hold work that is in no file yet.
+        assert_eq!(s.current_corner.as_deref(), Some("CHAMFER"), "the cut was lost");
+        assert!(s.ring_on && s.current_ring_style.as_deref() == Some("DASHED"));
+        // And the edit still carries it, so the SCREEN keeps it too.
+        assert!(
+            s.editor_edits().iter().any(|e| e.token == "corner.mode"),
+            "the cut fell out of the edit on the way into BASIC"
+        );
+        // BASIC opens at rest over whatever is on the screen.
+        assert_eq!(s.tone, TONE_REST, "BASIC opened with a move already made");
+
+        // A turn, then back to ADVANCED.
+        s.tone[0] = 120;
+        s.tone[2] = 70;
+        let basic_edit = s.editor_edits();
+        let accent_after_turn = basic_edit
+            .iter()
+            .find(|e| e.token == "palette.accent")
+            .map(|e| e.value.clone());
+        s.perform(Act::EditorMode, 0.0);
+        assert!(!s.editor_basic);
+        // THE FOLD. The sliders are back at rest — the move has become
+        // part of what they are now relative to — and the advanced page
+        // still has the cut.
+        assert_eq!(s.tone, TONE_REST, "the fold left BASIC's sliders off rest");
+        assert_eq!(
+            s.current_corner.as_deref(),
+            Some("CHAMFER"),
+            "the trip through BASIC threw the cut away"
+        );
+        // The severity roles the turn moved are handed over as TOUCHED,
+        // or ADVANCED — which writes only touched roles — would put the
+        // theme's own words back and the rotation would vanish.
+        assert_eq!(
+            s.severity_touched,
+            [true; 7],
+            "the fold did not hand the rotated severity authors over"
+        );
+        let folded = s.editor_edits();
+        assert_eq!(
+            folded.iter().filter(|e| e.token.starts_with("severity.")).count(),
+            7,
+            "ADVANCED dropped the roles BASIC had turned"
+        );
+        // THE LOOK SURVIVED. What ADVANCED writes for the accent after
+        // the fold is the colour BASIC was writing before it — compared
+        // as a COLOUR and not as a string, because the fold lands on the
+        // editor's whole-number HSV tracks and takes the same rounding
+        // every seeded colour on that page takes.
+        //
+        // Hue and lightness are held exactly. CHROMA is held only as far
+        // as sRGB reaches, and that is not slack in the test: BASIC is
+        // held to no gamut (the owner's "BEZ OGRANICZEŃ zakresu") while
+        // the ADVANCED page has edited colours on sRGB HSV tracks since
+        // it was built, so a move that lands outside sRGB — this one
+        // does, a light violet — arrives at a page with no way to write
+        // it. It may be mapped IN; it may never be pushed out.
+        let oklch_of = |v: &Vec<nacelle::theme::edit::Edit>| {
+            let text = v.iter().find(|e| e.token == "palette.accent")?.value.clone();
+            // `oklch(L, C, H)` as the model writes it.
+            let inside = text.trim().strip_prefix("oklch(")?.strip_suffix(')')?;
+            let n: Vec<f32> =
+                inside.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (n.len() >= 3).then(|| (n[0], n[1], n[2]))
+        };
+        let before = oklch_of(&basic_edit).expect("BASIC wrote no accent to fold");
+        let after = oklch_of(&folded).expect("ADVANCED wrote no accent after the fold");
+        let hue_gap = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        assert!(
+            (before.0 - after.0).abs() < 0.02,
+            "the fold moved the accent's LIGHTNESS: {before:?} became {after:?}"
+        );
+        assert!(
+            hue_gap(before.2, after.2) < 2.0,
+            "the fold turned the accent: {before:?} became {after:?}"
+        );
+        assert!(
+            after.1 <= before.1 + 0.02,
+            "the fold INVENTED chroma: {before:?} became {after:?}"
+        );
+        assert!(
+            accent_after_turn.is_some(),
+            "BASIC never wrote an accent to fold in the first place"
+        );
+        // And where the move stays INSIDE sRGB the fold is exact on all
+        // three — the loss above is the destination page's gamut and
+        // nothing else. A small turn at the theme's own lightness.
+        let mut inside = editor_open();
+        inside.perform(Act::EditorMode, 0.0);
+        inside.tone[0] = 20;
+        let basic_small = oklch_of(&inside.editor_edits()).expect("no accent");
+        inside.perform(Act::EditorMode, 0.0);
+        let folded_small = oklch_of(&inside.editor_edits()).expect("no accent");
+        assert!(
+            (basic_small.0 - folded_small.0).abs() < 0.02
+                && (basic_small.1 - folded_small.1).abs() < 0.02
+                && hue_gap(basic_small.2, folded_small.2) < 2.0,
+            "a fold well inside sRGB still changed the colour: \
+             {basic_small:?} became {folded_small:?}"
+        );
+        // A hue move re-welds the beds to the accent, so ADVANCED goes on
+        // writing the reference and a later accent drag still moves them.
+        assert!(!s.surface_own_hue, "the fold cut the surfaces loose from the accent");
+
+        // A fold with NO move made leaves the severity marks alone: an
+        // untouched role must keep the theme's own words, references
+        // included.
+        let mut quiet = editor_open();
+        quiet.perform(Act::EditorMode, 0.0);
+        quiet.perform(Act::EditorMode, 0.0);
+        assert_eq!(
+            quiet.severity_touched,
+            [false; 7],
+            "a trip through BASIC that moved nothing still claimed every role"
+        );
+    }
+
+    /// ŻYCZENIE 2b, END TO END AND ON THE REAL PIPELINE: a drag of
+    /// BASIC's HUE slider turns what this window actually paints, and
+    /// leaves the interface ONE HUE in DIFFERENT SHADES.
+    ///
+    /// libnacelle measures the same claim over the master's cascade;
+    /// this measures the WINDOW's chain — slider, `editor_edits`,
+    /// `set_preview`, the bake, and the colour that comes back out of a
+    /// token the settings columns are painted with. Between them there
+    /// is no step where a hue could be lost and nobody notice.
+    ///
+    /// The owner's own pair: a column's CONTAINER and a control's PLATE.
+    #[test]
+    fn a_basic_hue_drag_turns_the_window_and_keeps_one_hue_in_three_shades() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0);
+
+        let lch = |c: nacelle::theme::Color| c.to_oklch();
+        let hue_gap = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        /// The colour a token resolves to in the theme as it stands
+        /// RIGHT NOW — preview included, which is the whole point.
+        fn live(name: &str) -> nacelle::theme::Color {
+            let t = theme::resolved();
+            col(t.color(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}"))))
+        }
+
+        let before = lch(live("component.settings.sub_fill"));
+        // FOUR positions of the slider, not one: a claim that only holds
+        // where the numbers happen to land is not the claim.
+        for turn in [37u32, 90, 180, 251] {
+            s.tone = TONE_REST;
+            s.tone[0] = turn;
+            s.apply_editor_preview();
+
+            let rail = lch(live("component.settings.rail_fill"));
+            let sub = lch(live("component.settings.sub_fill"));
+            let page = lch(live("component.settings.page_fill"));
+            // The window really turned, by the slider's own degrees.
+            assert!(
+                hue_gap(sub.h, before.h + turn as f32) < 6.0,
+                "at {turn} deg the columns did not follow the slider: {} -> {}",
+                before.h,
+                sub.h
+            );
+            // ONE HUE for the whole interface — the columns and the
+            // plate a button stands on, which is the owner's own pair.
+            let plate = lch(col(theme::resolved()
+                .class_state(theme::class_id("button").expect("no button class"), State::Idle)
+                .fill));
+            assert!(
+                hue_gap(sub.h, plate.h) < 6.0,
+                "at {turn} deg a column and a button plate are two COLOURS: {} vs {}",
+                sub.h,
+                plate.h
+            );
+            // DIFFERENT SHADES — the container is a bed and the plate is
+            // a control, and no reader may have to guess which is which.
+            assert!(
+                (plate.l - sub.l).abs() > 0.20,
+                "at {turn} deg a column and a button plate share a lightness: {} vs {}",
+                sub.l,
+                plate.l
+            );
+            // And the three columns are still three shades of it.
+            assert!(
+                rail.l < sub.l && sub.l < page.l,
+                "at {turn} deg the three columns stopped being a ladder: {} {} {}",
+                rail.l,
+                sub.l,
+                page.l
+            );
+            // THE EXCEPTION the owner carved out: severity carries
+            // MEANING, so the roles stay different COLOURS.
+            let ok = lch(live("severity.ok.text"));
+            let crit = lch(live("severity.critical.text"));
+            assert!(
+                hue_gap(ok.h, crit.h) > 15.0,
+                "at {turn} deg `ok` and `critical` collapsed onto one hue: {} vs {}",
+                ok.h,
+                crit.h
+            );
+        }
+        // The preview is this test's, and it does not leave the room in
+        // it: every other test that reads the theme would be reading
+        // this one's drag.
+        nacelle::theme::clear_preview();
+        viewport_home();
+    }
+
+    /// The BASIC sliders notch by what the PIPELINE can show, and the
+    /// depth that says so comes off SETTINGS -> COLOR.
+    ///
+    /// Coarse at eight bits, one track unit — the finest a whole-number
+    /// track has — once the depth is fine enough that a notch is smaller
+    /// than a unit. Never zero, or a press would move nothing.
+    #[test]
+    fn the_basic_notch_comes_from_the_colour_depth() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0);
+        let seeds = s.tone_seeds.expect("no seeds");
+        assert!(seeds.accent.c > 0.0, "the master's accent is grey — the test is blind");
+
+        let mut last = [0u32; 3];
+        for (i, bits) in [8u32, 10, 12, 16].iter().enumerate() {
+            s.color_depth = *bits;
+            let step = s.tone_step();
+            for k in 0..3 {
+                assert!(step[k] >= 1, "a slider at {bits} bits steps by nothing");
+                if i > 0 {
+                    assert!(
+                        step[k] <= last[k],
+                        "{bits} bits gave a COARSER notch than {} did on track {k}",
+                        [8, 10, 12, 16][i - 1]
+                    );
+                }
+            }
+            last = step;
+        }
+        // The two ends really are different: eight bits is coarser than
+        // sixteen somewhere, or the depth is not reaching the sliders.
+        s.color_depth = 8;
+        let coarse = s.tone_step();
+        s.color_depth = 16;
+        let fine = s.tone_step();
+        assert!(
+            (0..3).any(|k| coarse[k] > fine[k]),
+            "the notch is the same at 8 bits as at 16 — the depth is not wired in"
+        );
+        // Nobody has said: the model's own floor, and the same number
+        // this program's config carries as its default.
+        assert_eq!(
+            nacelle::theme::edit::DEFAULT_DEPTH_BITS,
+            crate::config::model::ColorConf::DEPTH,
+            "the toolkit and the config disagree about the depth nobody set"
+        );
+    }
+
     /// The slider unit maps, both directions — a value must survive
     /// seed -> slider -> file, or a theme saved and reopened creeps a
     /// notch per sitting. The walls are the MODEL's clamps.
@@ -8692,7 +9610,7 @@ mod tests {
         act: Act::BlurRadiusTrack,
         unit: Unit::Percent,
         range: (0, 100),
-        step: 5,
+        step: step_5,
         get: |s| s.blur_radius,
         set: |s, v| s.blur_radius = v,
         save: |_| {},
@@ -8703,7 +9621,7 @@ mod tests {
         act: Act::BlurOpacityTrack,
         unit: Unit::Percent,
         range: (0, 100),
-        step: 5,
+        step: step_5,
         get: |s| s.blur_opacity,
         set: |s, v| s.blur_opacity = v,
         save: |_| {},
@@ -9703,11 +10621,17 @@ mod tests {
         for h in [HEIGHTS[0], HEIGHTS[4]] {
             theme::resolved();
             theme::set_viewport(h, 1.0);
-            for p in PAGES.iter() {
+            // BOTH of the editor's modes. The BASIC page and the
+            // ADVANCED page are two bands with two conditions, and a
+            // sweep that only ever saw the default one would leave the
+            // other's controls — the switch's own neighbours — never
+            // asked about. Every other page ignores the flag.
+            for (p, basic) in PAGES.iter().flat_map(|p| [(p, false), (p, true)]) {
                 let mut hit: Vec<Act> = Vec::new();
                 let mut reference = furnished();
                 reference.view = p.view;
                 editor_ajar(&mut reference);
+                reference.editor_basic = basic;
                 let described = window_acts(&reference, p);
                 // The five hand-written stops died with the whole-theme
                 // sections: the editor page is many viewports long now, and a
@@ -9740,6 +10664,7 @@ mod tests {
                     // Every condition set at once, so the reachability sweep
                     // covers the conditional rows as well.
                     editor_ajar(&mut s);
+                    s.editor_basic = basic;
                     if stop > 0.0 {
                         s.scroll.set_offset(stop);
                     }
@@ -9907,7 +10832,7 @@ mod tests {
             Chrome::Close => Act::Close,
             Chrome::Back => Act::Back,
         }];
-        out.extend(page_rows(page).flat_map(|row| row_acts(s, row)));
+        out.extend(page_rows(page, s).flat_map(|row| row_acts(s, row)));
         out
     }
 
@@ -9931,7 +10856,7 @@ mod tests {
             out.extend(sub_acts(s, page.view));
         }
         for zone in page.zones {
-            if matches!(zone, Zone::Pinned { .. }) {
+            if matches!(zone, Zone::Pinned { .. }) || !zone_shown(zone, s) {
                 continue;
             }
             out.extend(zone_rows(zone).flat_map(|row| row_acts(s, row)));
