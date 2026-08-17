@@ -968,6 +968,9 @@ static LABEL_PAD: OnceLock<TokenId> = OnceLock::new();
 static VALUE_GUTTER: OnceLock<TokenId> = OnceLock::new();
 static LIST_W_FRAC: OnceLock<TokenId> = OnceLock::new();
 static LABEL_COL: OnceLock<TokenId> = OnceLock::new();
+static LABEL_MIN: OnceLock<TokenId> = OnceLock::new();
+static LABEL_MAX: OnceLock<TokenId> = OnceLock::new();
+static VALUE_COL: OnceLock<TokenId> = OnceLock::new();
 static MODAL_PAD: OnceLock<TokenId> = OnceLock::new();
 
 /// One type role, resolved for the frame being drawn: the size its runs
@@ -1097,6 +1100,49 @@ fn center_y(ctx: &mut Ctx, band: Rect, t: Type) -> f32 {
     )
 }
 
+/// Which digit the face sets widest, at this size.
+///
+/// A face sets `1` narrower than `0`, so a column measured against the
+/// number a track happens to carry is a column the next number overflows:
+/// HUE reads 359 at the end of its range and 300 in the middle of it, and
+/// the wider of the two is the one nobody measured.
+///
+/// The face's own digits, never a table of numbers here: `type.data` is
+/// declared `tabular` in the master and the roles this window writes in
+/// are not, so which digit is widest is the FONT's answer to give.
+///
+/// The answer depends on the face and the size and on nothing else, so
+/// it is asked ONCE PER BAND and carried into [`widest_run`] from there
+/// ([`Settings::columns`]). Asked per row it would rasterise the same
+/// ten glyphs once for every track on the page, and the editor's
+/// ADVANCED page is eighty-six rows drawn sixty times a second.
+fn widest_digit(ctx: &mut Ctx, t: &Type) -> char {
+    let mut buf = [0u8; 4];
+    let mut widest = ('0', 0.0f32);
+    for d in '0'..='9' {
+        let seen = ctx.fonts.measure(t.face, t.px, d.encode_utf8(&mut buf), 0.0);
+        if seen > widest.1 {
+            widest = (d, seen);
+        }
+    }
+    widest.0
+}
+
+/// How wide `text` can get once its DIGITS are allowed to be any digit —
+/// the width to reserve for a number that has not been written yet.
+///
+/// Every value a track can reach has at most the digit count of its top
+/// of range, and no digit is wider than `widest` ([`widest_digit`]), so
+/// the substitution is an upper bound that no position of the slider can
+/// beat. What that bound is worth is measured against the values
+/// themselves, not against this arithmetic
+/// (`a_row_does_not_write_its_label_its_control_and_its_value_over_one_another`).
+fn widest_run(ctx: &mut Ctx, t: &Type, text: &str, widest: char) -> f32 {
+    let worst: String =
+        text.chars().map(|c| if c.is_ascii_digit() { widest } else { c }).collect();
+    ctx.fonts.measure(t.face, t.px, &worst, t.track)
+}
+
 // ------------------------------------------------------------- description
 
 /// A piece of text a row shows: fixed, or read from the window (the
@@ -1124,20 +1170,6 @@ enum Gap {
     Section,
     /// None: the FONT view's section header, whose slider sits directly
     /// under it.
-    None,
-}
-
-/// How a page splits its rows into a label column and a value column.
-/// Two rules where there should be one — the fraction is COLOR's alone
-/// and `rhythm.label_col = auto` is what retires it.
-#[derive(Clone, Copy)]
-enum Cols {
-    /// Measured against the page's widest label and widest value, so
-    /// every track on the page starts and ends on the same pixel.
-    Measured { label: &'static str, value: &'static str },
-    /// `rhythm.label_col_frac` of the content width, no value column.
-    Frac,
-    /// The page has no label/value rows.
     None,
 }
 
@@ -1196,7 +1228,8 @@ enum ListId {
     /// The severity role the three sliders under it pin — §5.10's closed
     /// set, offered whole because each role is its own author token.
     Severities,
-    /// The one corner cut the whole interface wears (`corner.mode`).
+    /// The one corner shape the whole interface wears (`corner.mode`) —
+    /// a right angle, a radius or a chamfer.
     Corners,
     /// How the focus ring is stroked (`focus.ring.style`).
     RingStyles,
@@ -1237,7 +1270,13 @@ impl ListId {
             ListId::Borders => "BORDER",
             ListId::Backgrounds => "BACKGROUND",
             ListId::Severities => "SEVERITY ROLE",
-            ListId::Corners => "CORNER CUT",
+            // NOT "corner cut". The set it offers is SQUARE, ROUND and
+            // CHAMFER — three SHAPES, of which a cut is one — and the
+            // owner looked straight past this row for exactly that
+            // reason: a word that names one member cannot name the
+            // question. `corner.mode` is still what it writes; only the
+            // word the eye reads changed.
+            ListId::Corners => "CORNER SHAPE",
             ListId::RingStyles => "RING STYLE",
             ListId::ScrollModes => "SCROLLBAR MODE",
             ListId::ScrollEdges => "SCROLLBAR EDGE",
@@ -1255,7 +1294,7 @@ impl ListId {
             ListId::Borders => "NO BORDER KINDS",
             ListId::Backgrounds => "NO BACKGROUND KINDS",
             ListId::Severities => "NO SEVERITY ROLES",
-            ListId::Corners => "NO CORNER CUTS",
+            ListId::Corners => "NO CORNER SHAPES",
             ListId::RingStyles => "NO RING STYLES",
             ListId::ScrollModes => "NO SCROLLBAR MODES",
             ListId::ScrollEdges => "NO SCROLLBAR EDGES",
@@ -1344,6 +1383,50 @@ enum Ctrl {
     /// else: `h` is the vertical reserve it takes out of the content
     /// box, `draw` fills it.
     Custom { h: fn(Metrics, Rect) -> f32, draw: fn(&mut Settings, &mut Ctx, Rect) },
+}
+
+impl Ctrl {
+    /// The word this row writes IN THE LABEL COLUMN, if it writes one
+    /// there at all — the THREE kinds [`Settings::row_label`] serves, and
+    /// exactly those three.
+    ///
+    /// A checkbox's word is inside its own band and a button's is inside
+    /// its plate, so neither of them stands in the column and neither may
+    /// widen it: a column measured against SNAP TO GRID would push three
+    /// tracks aside for a word that is nowhere near them.
+    ///
+    /// A kind that falls out of this list keeps drawing its word at the
+    /// content's left edge and loses the column that was holding the
+    /// control off it, which is the plate-on-its-own-label fault. Nothing
+    /// that reads this list can notice that, so the test that watches for
+    /// it matches on the KIND instead
+    /// (`a_row_does_not_write_its_label_its_control_and_its_value_over_one_another`).
+    fn column_label(&self) -> Option<&'static str> {
+        match self {
+            Ctrl::Slider { label, .. }
+            | Ctrl::Chips { label, .. }
+            | Ctrl::Cycle { label, .. } => Some(label),
+            _ => None,
+        }
+    }
+
+    /// The WIDEST this row's value can ever be written, as the string to
+    /// measure — not the value it happens to carry.
+    ///
+    /// A column measured against the number on screen would move while
+    /// the hand drags the track it stands beside, so the reserve is taken
+    /// against the range's own top: `hi` has at least as many digits as
+    /// anything the track can reach, `Unit` says what stands after them,
+    /// and [`widest_run`] answers for the digits themselves.
+    ///
+    /// Only a slider writes here. A cycler's value is inside its plate
+    /// and a segment's inside its segment, exactly as their labels are.
+    fn column_value(&self) -> Option<String> {
+        match self {
+            Ctrl::Slider { unit, range: (_, hi), .. } => Some(unit.text(*hi)),
+            _ => None,
+        }
+    }
 }
 
 /// A control plus the two things the page says ABOUT it rather than
@@ -1489,7 +1572,7 @@ enum Zone {
     /// rows that are all there together or not at all, and writing the
     /// same condition on every one of them would be one decision spelt
     /// eighty-six times, with eighty-six chances to spell it wrong.
-    Flow { when: fn(&Settings) -> bool, cols: Cols, rows: &'static [Row] },
+    Flow { when: fn(&Settings) -> bool, rows: &'static [Row] },
     /// Columns of EQUAL width beside one another, `settings.col_gap`
     /// between them. Registration and drawing run COLUMN BY COLUMN —
     /// the whole of the first, then the whole of the second — so the
@@ -1506,7 +1589,7 @@ enum Zone {
     /// `Ctrl::pinned()` went: standing still is a property of the BAND
     /// and not of the control, so the same button can flow on one page
     /// and stand under another without a kind of its own.
-    Pinned { cols: Cols, rows: &'static [Row] },
+    Pinned { rows: &'static [Row] },
 }
 
 /// One column of a columned band, with its OWN label/value measurement:
@@ -1514,7 +1597,6 @@ enum Zone {
 /// the right ("the widest label IN THE BLOCK", `rhythm.label_col`).
 #[derive(Clone, Copy)]
 struct ZCol {
-    cols: Cols,
     rows: &'static [Row],
 }
 
@@ -1626,14 +1708,12 @@ fn zone_folded(zone: &'static Zone, box_: Rect) -> bool {
 ///
 /// The walker, the height and the tests all ask this one function, so
 /// the split is stated once and cannot drift.
-fn zone_regions(zone: &'static Zone, box_: Rect) -> Vec<(Rect, Cols, &'static [Row])> {
+fn zone_regions(zone: &'static Zone, box_: Rect) -> Vec<(Rect, &'static [Row])> {
     match zone {
-        Zone::Flow { cols, rows, .. } | Zone::Pinned { cols, rows } => {
-            vec![(box_, *cols, *rows)]
-        }
+        Zone::Flow { rows, .. } | Zone::Pinned { rows } => vec![(box_, *rows)],
         Zone::Cols { columns } => {
             if zone_folded(zone, box_) {
-                return columns.iter().map(|c| (box_, c.cols, c.rows)).collect();
+                return columns.iter().map(|c| (box_, c.rows)).collect();
             }
             let gap = col_gap();
             let n = columns.len().max(1) as f32;
@@ -1643,7 +1723,7 @@ fn zone_regions(zone: &'static Zone, box_: Rect) -> Vec<(Rect, Cols, &'static [R
                 .enumerate()
                 .map(|(i, c)| {
                     let x = box_.x + i as f32 * (w + gap);
-                    (Rect::new(x, box_.y, w, box_.h), c.cols, c.rows)
+                    (Rect::new(x, box_.y, w, box_.h), c.rows)
                 })
                 .collect()
         }
@@ -1766,9 +1846,9 @@ static LOOKFEEL_SUBRAIL_ROWS: [Row; 3] = [
 /// The navigation as BANDS, for the folded window: the same two tables,
 /// laid down the one list instead of beside it. Statics because a band
 /// is `&'static` everywhere else in this file.
-static RAIL_ZONE: Zone = Zone::Flow { when: always, cols: Cols::None, rows: &RAIL_ROWS };
+static RAIL_ZONE: Zone = Zone::Flow { when: always, rows: &RAIL_ROWS };
 static LOOKFEEL_SUBRAIL_ZONE: Zone =
-    Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_SUBRAIL_ROWS };
+    Zone::Flow { when: always, rows: &LOOKFEEL_SUBRAIL_ROWS };
 
 /// The second column of a section: its entries, and the BAND those same
 /// entries stand in once the window has folded. One table for both,
@@ -1964,7 +2044,23 @@ static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
 /// The three tracks step by what the pipeline can SHOW
 /// ([`Settings::tone_step`]), which is why `step` is a question and not
 /// a literal here.
-static EDITOR_BASIC_ROWS: [Row; 4] = [
+///
+/// AND THREE KINDS UNDER THEM (owner, 2026-08-17). A kind is a choice
+/// between shapes, not a number to nudge, so asking it costs the page
+/// one row and no arithmetic — which is why the page that asks the
+/// fewest questions can afford all three. They are the SAME control over
+/// the SAME list as ADVANCED's, writing the same field: `editor_edits`
+/// reads `current_border`, `current_background` and `current_corner`
+/// whichever band drew them, so a kind chosen here shows in the preview
+/// and lands in the file with nothing added to the builder.
+///
+/// What does NOT follow them here are the knobs that hang off a kind on
+/// ADVANCED. The owner asked for the KIND of the background and not for
+/// its colour, and BASIC has a second reason besides: its move already
+/// carries the window body's bed, which the theme writes as an absolute
+/// colour ([`Settings::editor_edits`], `carry`) — a TINT or WASH slider
+/// on this page would land that shift on top of itself.
+static EDITOR_BASIC_ROWS: [Row; 10] = [
     row_after(Ctrl::Section { title: "THE WHOLE THEME" }, Gap::None),
     row(Ctrl::Slider {
         label: "HUE",
@@ -1996,6 +2092,12 @@ static EDITOR_BASIC_ROWS: [Row; 4] = [
         set: |s, v| s.tone[2] = v,
         save: |s| s.apply_editor_preview(),
     }),
+    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Borders }),
+    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Backgrounds }),
+    row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
+    row(Ctrl::Drop { list: ListId::Corners }),
 ];
 
 /// The editor's first section. The border is one kind and one colour, and
@@ -3164,12 +3266,12 @@ fn addon_report(installed: bool, problems: &[nacelle::settings::Problem]) -> Vec
 // side by side and fold back to the one list where the width runs out.
 
 static LOOKFEEL_ZONES: [Zone; 2] = [
-    Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_ROWS },
-    Zone::Pinned { cols: Cols::None, rows: &LOOKFEEL_FOOTER },
+    Zone::Flow { when: always, rows: &LOOKFEEL_ROWS },
+    Zone::Pinned { rows: &LOOKFEEL_FOOTER },
 ];
 
 static LOOKFEEL_RESET_ZONES: [Zone; 1] =
-    [Zone::Flow { when: always, cols: Cols::None, rows: &LOOKFEEL_RESET_ROWS }];
+    [Zone::Flow { when: always, rows: &LOOKFEEL_RESET_ROWS }];
 
 /// The editor is a switch, ONE of two pages, and a pinned bar.
 ///
@@ -3193,61 +3295,37 @@ static LOOKFEEL_RESET_ZONES: [Zone; 1] =
 /// negation), so the flow can never carry both and can never carry
 /// neither.
 static EDITOR_ZONES: [Zone; 4] = [
-    Zone::Flow { when: always, cols: Cols::None, rows: &EDITOR_MODE_ROWS },
-    Zone::Flow { when: editor_basic, cols: Cols::None, rows: &EDITOR_BASIC_ROWS },
-    Zone::Flow { when: editor_advanced, cols: Cols::None, rows: &EDITOR_ROWS },
-    Zone::Pinned { cols: Cols::None, rows: &EDITOR_BAR },
+    Zone::Flow { when: always, rows: &EDITOR_MODE_ROWS },
+    Zone::Flow { when: editor_basic, rows: &EDITOR_BASIC_ROWS },
+    Zone::Flow { when: editor_advanced, rows: &EDITOR_ROWS },
+    Zone::Pinned { rows: &EDITOR_BAR },
 ];
 
-/// Two symmetrical columns, each measuring its OWN "SIZE" against its
-/// own "200%": the two tracks are the same length because the two
-/// columns are, not because one inherited the other's label width.
-static FONT_COLUMNS: [ZCol; 2] = [
-    ZCol {
-        cols: Cols::Measured { label: "SIZE", value: "200%" },
-        rows: &FONT_TERM_ROWS,
-    },
-    ZCol {
-        cols: Cols::Measured { label: "SIZE", value: "200%" },
-        rows: &FONT_UI_ROWS,
-    },
-];
+/// Two symmetrical columns, each measuring its OWN rows: the two tracks
+/// are the same length because the two columns carry the same word
+/// (SIZE) and not because one inherited the other's label width.
+static FONT_COLUMNS: [ZCol; 2] =
+    [ZCol { rows: &FONT_TERM_ROWS }, ZCol { rows: &FONT_UI_ROWS }];
 
 static FONT_ZONES: [Zone; 1] = [Zone::Cols { columns: &FONT_COLUMNS }];
 
-static GRID_ZONES: [Zone; 1] = [Zone::Flow {
-    when: always,
-    // Measured against the widest of the three labels rather than each
-    // one's own, so all three tracks line up.
-    cols: Cols::Measured { label: "COLUMNS", value: "100 PX" },
-    rows: &GRID_ROWS,
-}];
+static GRID_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &GRID_ROWS }];
 
-static SOUND_ZONES: [Zone; 1] = [Zone::Flow {
-    when: always,
-    cols: Cols::Measured { label: "VOLUME", value: "100 %" },
-    rows: &SOUND_ROWS,
-}];
+static SOUND_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &SOUND_ROWS }];
 
 static BOARDS_ZONES: [Zone; 2] = [
-    Zone::Flow { when: always, cols: Cols::None, rows: &BOARDS_ROWS },
-    Zone::Pinned { cols: Cols::None, rows: &BOARDS_HINT },
+    Zone::Flow { when: always, rows: &BOARDS_ROWS },
+    Zone::Pinned { rows: &BOARDS_HINT },
 ];
 
-static COLOR_COLUMNS: [ZCol; 2] = [
-    ZCol { cols: Cols::Frac, rows: &COLOR_SWAPCHAIN_ROWS },
-    ZCol { cols: Cols::Frac, rows: &COLOR_FILE_ROWS },
-];
+static COLOR_COLUMNS: [ZCol; 2] =
+    [ZCol { rows: &COLOR_SWAPCHAIN_ROWS }, ZCol { rows: &COLOR_FILE_ROWS }];
 
 static COLOR_ZONES: [Zone; 1] = [Zone::Cols { columns: &COLOR_COLUMNS }];
 
-static BLUR_ZONES: [Zone; 1] = [Zone::Flow {
-    when: always,
-    cols: Cols::Measured { label: "OPACITY", value: "100 %" },
-    rows: &BLUR_ROWS,
-}];
+static BLUR_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &BLUR_ROWS }];
 
-static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, cols: Cols::None, rows: &ADDONS_ROWS }];
+static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &ADDONS_ROWS }];
 
 /// The whole window. Indexed by [`View`], which `pages_are_in_view_order`
 /// keeps true.
@@ -3604,6 +3682,25 @@ fn rows_box(page_box: Rect) -> Rect {
     }
 }
 
+/// The lane a bar answers the pointer in: the band it could occupy AT
+/// ITS WIDEST, its margin included.
+///
+/// A bar grows under the pointer (`scrollbar.w_hover`), so a lane
+/// measured at the resting width would let go of the very thumb the
+/// hover had just widened. Asked by the drawing and by the press, of
+/// the page's bar and of the open list's alike — one sentence about
+/// where a bar lives, so the hand and the eye cannot be told two
+/// different things.
+fn bar_band(area: Rect, look: &ScrollbarLook) -> Rect {
+    let reach = look.w_hover.max(look.w) + look.margin;
+    match look.edge {
+        scroll::ScrollbarEdge::Left => Rect::new(area.x, area.y, reach, area.h),
+        scroll::ScrollbarEdge::Right => {
+            Rect::new(area.right() - reach, area.y, reach, area.h)
+        }
+    }
+}
+
 /// What the last frame made of the flow: the box the flowed bands stood
 /// in, how long they were together, and the offset they were drawn at.
 ///
@@ -3675,6 +3772,30 @@ pub struct Settings {
     /// until it has been — an unseeded BASIC writes nothing, the same
     /// neutrality `current_border`'s `None` earned.
     tone_seeds: Option<nacelle::theme::edit::ToneSeeds>,
+    /// WHAT THE THEME ITSELF DRESSES, read ONCE off the file's own state
+    /// and never off the screen: the two `halo_dressed` answers
+    /// `theme::edit` asks its caller for (the panel edge's glow, and the
+    /// focus ring's).
+    ///
+    /// A flag and not a reading, because the reading was a LOOP. The edit
+    /// set is rebuilt ten times a second while a track is dragged, and
+    /// `set_preview` REPLACES the set rather than merging it, so a token
+    /// left out of one pulse is a token switched off. Asking the live
+    /// bake "does the theme already dress its halo" asked about the
+    /// PREVIOUS PULSE'S OWN ANSWER: pulse one saw the master's zero, wrote
+    /// the radius; pulse two saw the radius it had just written, called
+    /// the theme dressed and wrote nothing; the halo went out; pulse three
+    /// saw zero again. Two pulses to a cycle is the ~5 Hz flicker the
+    /// owner reported — and, far worse than the flicker, a SAVE landing on
+    /// the wrong side of it wrote a NEON theme with no radius and no
+    /// alpha at all, a glow permanently invisible in the file.
+    ///
+    /// Seeded where every other opening value is ([`Settings::seed_editor_from_theme`]),
+    /// which runs on the way in and on CANCEL, with no preview standing in
+    /// either case. The intent `halo_dressed` was written for is untouched:
+    /// a theme that dressed its own halo still keeps its own numbers.
+    edge_halo_dressed: bool,
+    ring_halo_dressed: bool,
     /// The border colour the editor is showing, as OKLCh in whole units:
     /// lightness 0..100, chroma 0..40, hue 0..359. A slider moves whole
     /// numbers, and the theme's own colours are written to four decimal
@@ -3919,6 +4040,11 @@ impl Settings {
             editor_basic: false,
             tone: TONE_REST,
             tone_seeds: None,
+            // Nothing dressed until the seeding says so — the same
+            // opening neutrality the seeds themselves keep, and the
+            // answer the master's own zeroes give.
+            edge_halo_dressed: false,
+            ring_halo_dressed: false,
             edge: [70, 12, 200],
             // The whole-theme sections. OPENING VALUES ONLY, and never a
             // frame's: the one road onto the editor page
@@ -4374,11 +4500,6 @@ impl Settings {
         // [`hsv_to_rgb`] for why HSV at all: brightness 100 % must be the
         // hue's own full brightness, never white.
         let of = oklch_of_track;
-        // What the LIVE theme already dresses — the two `halo_dressed`
-        // answers the model asks its caller for, read off the bake here so
-        // the model itself stays pure.
-        let t = nacelle::theme::resolved();
-        let live = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
         let colour = of(&self.edge, 1.0);
         let mut edits = match self.current_border.as_deref() {
             // No kind chosen: the colour moves ALONE. Mapping "no choice"
@@ -4390,9 +4511,10 @@ impl Settings {
                 // Whether the THEME already dresses a visible halo — if it
                 // does, NEON keeps the theme's radius and alpha instead of
                 // flattening five themes' dress to one theme's numbers.
-                let dressed = live("glow.panel_edge.radius") > 0.0
-                    && live("glow.panel_edge.alpha") > 0.0;
-                border_edits(Scope::Theme, kind, colour, dressed)
+                // The answer is the SEEDING's ([`Settings::edge_halo_dressed`]):
+                // asked of the live bake it would be asking about the
+                // preview this set is about to become.
+                border_edits(Scope::Theme, kind, colour, self.edge_halo_dressed)
             }
         };
         // The background joins the same set. `None` means the list was
@@ -4494,10 +4616,11 @@ impl Settings {
                 gap_u: scale_of(self.ring_gap, 4.0),
                 halo: self.ring_halo,
                 halo_alpha: self.ring_halo_alpha.min(100) as f32 / 100.0,
-                // The same live-dress contract as the border's NEON: a
-                // theme that has dressed its halo keeps its radius.
-                halo_dressed: live("glow.focus_ring.radius") > 0.0
-                    && live("glow.focus_ring.alpha") > 0.0,
+                // The same dress contract as the border's NEON, off the
+                // same seeding and for the same reason: a theme that has
+                // dressed its halo keeps its radius, and the question is
+                // about the FILE, never about the picture on screen.
+                halo_dressed: self.ring_halo_dressed,
             };
             edits.extend(focus_ring_edits(Scope::Theme, self.ring_on, &ring));
         }
@@ -4570,11 +4693,23 @@ impl Settings {
     /// Shows what the editor is set to, without writing anything.
     ///
     /// Called when a value SETTLES — a slider released, an arrow pressed, a
-    /// kind chosen — and never while a slider is being dragged. Each call
-    /// re-bakes the theme, and a bake is 76 031 bytes that is never freed,
-    /// so one per gesture is affordable and one per frame is not. The
-    /// slider itself moves at whatever rate the hand does; only the picture
-    /// behind it waits for the hand to stop.
+    /// kind chosen — and, since the owner asked for the picture to follow
+    /// the hand, TEN TIMES A SECOND WHILE A TRACK IS DRAGGED
+    /// ([`Settings::drag`]). Each call re-bakes the theme, and a bake is
+    /// 76 031 bytes that is never freed, which is what the pulse is for:
+    /// ten a second is affordable where sixty is not. The slider itself
+    /// still moves every frame; only the picture behind it waits.
+    ///
+    /// The line that used to stand here said "never while a slider is
+    /// being dragged", and the invariant that sentence guarded — one
+    /// preview per gesture, built from the theme AS IT IS IN THE FILE —
+    /// was what let [`Settings::editor_edits`] read the live bake for its
+    /// two dress questions. The pulse broke it and nobody looked at what
+    /// had been standing on it; the halo blinked at ~5 Hz for a day. The
+    /// set is a pure function of the controls now
+    /// ([`Settings::edge_halo_dressed`]), so a set laid over the theme and
+    /// then rebuilt is the same set, and calling this at any rate at all
+    /// is a question about cost and nothing else.
     ///
     /// Nothing here touches the file. `theme::clear_preview` puts the
     /// screen back, which is what CANCEL will be made of.
@@ -4615,6 +4750,21 @@ impl Settings {
         }
         self.current_border =
             Some(if flag("glow.panel_edge.enabled") { "NEON" } else { "LINE" }.to_string());
+        // THE TWO DRESS QUESTIONS, ASKED HERE AND NOWHERE ELSE. Both
+        // roads onto this line run with no preview standing: CANCEL
+        // clears it a statement earlier, and the door is reached from
+        // another page, which means [`Settings::go`] has already dropped
+        // whatever the last visit laid. So the bake being read is the
+        // THEME's, which is the only state the question means anything
+        // about. `editor_edits` reads these two fields, which is what
+        // keeps it a pure function of the controls: build a set, lay it
+        // over the theme, build it again, and the two sets agree. Asked
+        // of the live bake instead, the second answer was the first
+        // set's own output and the halo blinked at ~5 Hz.
+        self.edge_halo_dressed =
+            px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
+        self.ring_halo_dressed =
+            px("glow.focus_ring.radius") > 0.0 && px("glow.focus_ring.alpha") > 0.0;
 
         // The background: kind from the rank and the wash, colours from
         // whichever quads are live. A solid seeds the WASH group from the
@@ -4788,8 +4938,8 @@ impl Settings {
         }
     }
 
-    /// Mouse move while a track is held — a slider's, or the open
-    /// list's thumb.
+    /// Mouse move while a track is held — a slider's, the open list's
+    /// thumb, or the page's.
     pub fn drag(&mut self, x: f32, y: f32) {
         // The held thumb first: it owns the pointer absolutely (the
         // thumb goes where the hand is), and while it is held no slider
@@ -4808,6 +4958,22 @@ impl Settings {
                 ) {
                     self.list_scroll.drag(y, viewport, content, geom.track);
                 }
+            }
+            return;
+        }
+        // The page's thumb, on the same terms: only the y matters, and a
+        // hand that wandered off the lane sideways is still holding it.
+        // Asked for at the HOVER width, because that is the width it was
+        // grabbed at — the track's length is all `drag` reads of it, so
+        // the two agree wherever the pointer has got to.
+        if self.scroll.dragging() {
+            let look = ScrollbarLook::from_theme();
+            let (area, viewport, content) =
+                (self.flow.view, self.flow.view.h, self.flow.length);
+            if let Some(geom) =
+                scroll::scrollbar(area, &look, self.scroll.offset(), viewport, content, true)
+            {
+                self.scroll.drag(y, viewport, content, geom.track);
             }
             return;
         }
@@ -4873,9 +5039,13 @@ impl Settings {
     /// re-apply. The rest write themselves and are pushed on by their
     /// dirty flags.
     pub fn release(&mut self) -> bool {
-        // The list's thumb, symmetric with its grab: nothing about the
-        // configuration changes when a scrollbar is let go.
+        // The two thumbs, symmetric with their grabs: nothing about the
+        // configuration changes when a scrollbar is let go. Both are
+        // released unconditionally — a `release` with no grab behind it
+        // is a no-op in the model, and asking which one was held would
+        // be a third copy of a state the model already keeps.
         self.list_scroll.release();
+        self.scroll.release();
         let Some(act) = self.dragging.take() else { return false };
         if let Some(&Ctrl::Slider { save, .. }) = slider_of(act) {
             save(self);
@@ -4962,14 +5132,7 @@ impl Settings {
         if self.dropdown.is_some() {
             if let Some((area, viewport, content)) = self.list_bar {
                 let look = ScrollbarLook::from_theme();
-                let reach = look.w_hover.max(look.w) + look.margin;
-                let band = match look.edge {
-                    scroll::ScrollbarEdge::Left => Rect::new(area.x, area.y, reach, area.h),
-                    scroll::ScrollbarEdge::Right => {
-                        Rect::new(area.right() - reach, area.y, reach, area.h)
-                    }
-                };
-                if band.contains(x, y) {
+                if bar_band(area, &look).contains(x, y) {
                     if let Some(geom) = scroll::scrollbar(
                         area,
                         &look,
@@ -4981,6 +5144,55 @@ impl Settings {
                         if !self.list_scroll.press_thumb(y, geom.thumb) {
                             self.list_scroll.page(y > geom.thumb.y, viewport, self.now);
                         }
+                    }
+                    return false;
+                }
+            }
+        }
+        // THE PAGE'S OWN BAR, on the list bar's terms exactly. It was
+        // drawn and never asked: `draw_scrollbar` built a geometry, put
+        // it on screen and threw it away, so a thumb the eye reads as
+        // draggable took no hand at all and the whole bar was an
+        // indicator. The frame the bar was drawn against is the one the
+        // flow already keeps for the page keys ([`Flow`]), so the press
+        // aims with that and no second copy of the geometry is kept.
+        //
+        // Only while no list is unfolded, which is the rule the rest of
+        // the window already answers by ([`Settings::button_state`]: with
+        // an open dropdown only its items react to the mouse). The list
+        // is drawn OVER the page, its own bar included, so a press in
+        // this lane while it stands belongs to whatever the list put
+        // there — the branch above, or one of its rows.
+        //
+        // NOTHING IS TAKEN FROM A LANE THAT HAS NO BAR IN IT, and the two
+        // ways that could happen are both already answered. A page that
+        // fits gets no geometry at all (`scroll::scrollbar` answers None
+        // on `content <= viewport` and on `mode = none`), so the press
+        // falls straight through to the rows. And a bar hidden by
+        // `scrollbar.auto_hide` is a bar AT REST — `draw_scrollbar` reads
+        // its hover off `bar_band` OF THIS SAME `self.flow.view` and
+        // draws at full alpha whenever the pointer stands in it, so the
+        // pointer cannot be in this lane and the lane be empty at once.
+        if self.dropdown.is_none() {
+            let look = ScrollbarLook::from_theme();
+            let (area, viewport, content) =
+                (self.flow.view, self.flow.view.h, self.flow.length);
+            if bar_band(area, &look).contains(x, y) {
+                if let Some(geom) = scroll::scrollbar(
+                    area,
+                    &look,
+                    self.scroll.offset(),
+                    viewport,
+                    content,
+                    true,
+                ) {
+                    // Beside the thumb: one viewport toward the click,
+                    // the toolkit's own word on a track press. The press
+                    // is taken either way — an overlay bar lies ON TOP of
+                    // the rows, and letting it through would move a
+                    // slider the hand never aimed at.
+                    if !self.scroll.press_thumb(y, geom.thumb) {
+                        self.scroll.page(y >= geom.thumb.bottom(), viewport, self.now);
                     }
                     return false;
                 }
@@ -5928,7 +6140,7 @@ impl Settings {
         }
         let mut out = Vec::with_capacity(regions.len());
         let mut y = 0.0;
-        for (region, _, rows) in &regions {
+        for (region, rows) in &regions {
             out.push(y);
             y += self.rows_h(rows, m, *region) + m.gap;
         }
@@ -5965,7 +6177,7 @@ impl Settings {
         zone_regions(zone, box_)
             .into_iter()
             .zip(self.zone_offsets(zone, m, box_))
-            .map(|((region, _, rows), dy)| dy + self.rows_h(rows, m, region))
+            .map(|((region, rows), dy)| dy + self.rows_h(rows, m, region))
             .fold(0.0, f32::max)
     }
 
@@ -6167,7 +6379,7 @@ impl Settings {
             self.clip = Some(box_);
             // Not the flow's: a column stands where it stands, and the
             // page's scroll is no use to it ([`Settings::chase_focus`]).
-            self.draw_rows(ctx, Cols::None, rows, m, box_, box_.y, Some(box_), false);
+            self.draw_rows(ctx, rows, m, box_, box_.y, Some(box_), false);
             self.clip = None;
             ctx.dl.pop_clip();
         }
@@ -6194,9 +6406,8 @@ impl Settings {
         flowed: bool,
     ) {
         let offsets = self.zone_offsets(zone, m, box_);
-        for ((region, cols, rows), dy) in zone_regions(zone, box_).into_iter().zip(offsets)
-        {
-            self.draw_rows(ctx, cols, rows, m, region, top + dy, cull, flowed);
+        for ((region, rows), dy) in zone_regions(zone, box_).into_iter().zip(offsets) {
+            self.draw_rows(ctx, rows, m, region, top + dy, cull, flowed);
         }
     }
 
@@ -6209,7 +6420,6 @@ impl Settings {
     fn draw_rows(
         &mut self,
         ctx: &mut Ctx,
-        cols: Cols,
         rows: &'static [Row],
         m: Metrics,
         region: Rect,
@@ -6217,9 +6427,9 @@ impl Settings {
         cull: Option<Rect>,
         flowed: bool,
     ) {
-        // Measured for THIS region: the sliders of one column do not
-        // inherit the label width of the next (M3).
-        let (label_w, value_w) = self.columns(ctx, cols, region.w);
+        // Measured for THIS region, and from THESE rows: the sliders of
+        // one column do not inherit the label width of the next (M3).
+        let (label_w, value_w) = self.columns(ctx, rows, region.w);
         let mut y = top;
         for row in rows {
             if !(row.when)(self) {
@@ -6340,21 +6550,18 @@ impl Settings {
     }
 
     /// Where the page is, when there is more of it than fits. Drawn
-    /// after the body so it sits over it, and only ever an indicator:
+    /// after the body so it sits over it.
+    ///
     /// `scrollbar.auto_hide` is on in the master, so a page at rest
-    /// shows nothing and looks exactly as it did.
+    /// shows nothing. A HELD thumb is not at rest: it counts as hover
+    /// for the width, for the fade and for the class ladder, because a
+    /// hand that wandered off the lane sideways is still holding the
+    /// thumb — and a thumb that thinned and faded mid-travel would say
+    /// it had been let go when it had not.
     fn draw_scrollbar(&mut self, ctx: &mut Ctx, view: Rect, length: f32) {
         let look = ScrollbarLook::from_theme();
-        // The band the bar could occupy at its WIDEST: a bar that grows
-        // under the pointer must not shrink out from under it.
-        let reach = look.w_hover.max(look.w) + look.margin;
-        let band = match look.edge {
-            scroll::ScrollbarEdge::Left => Rect::new(view.x, view.y, reach, view.h),
-            scroll::ScrollbarEdge::Right => {
-                Rect::new(view.right() - reach, view.y, reach, view.h)
-            }
-        };
-        let hovered = ctx.mouse.over(band);
+        let dragging = self.scroll.dragging();
+        let hovered = dragging || ctx.mouse.over(bar_band(view, &look));
         let Some(geom) = scroll::scrollbar(
             view,
             &look,
@@ -6370,36 +6577,99 @@ impl Settings {
         } else {
             self.scroll.fade_alpha(ctx.t, look.auto_hide, look.fade_ms)
         };
-        nacelle::view::paint::scrollbar(&mut CtxSurface::new(ctx), &geom, alpha, hovered, false);
+        nacelle::view::paint::scrollbar(
+            &mut CtxSurface::new(ctx),
+            &geom,
+            alpha,
+            hovered,
+            dragging,
+        );
     }
 
-    /// A REGION's label and value columns, in px.
+    /// A REGION's label and value columns, in px — THE MEASURING COLUMN,
+    /// `rhythm.label_col = auto`.
     ///
-    /// Asked once per band, and once per column of a columned band: the
-    /// widest label in the BLOCK, not on the page (`rhythm.label_col`).
-    /// `w` is the region's width, so a fraction is a fraction of the
-    /// column and not of the whole content box.
-    fn columns(&self, ctx: &mut Ctx, cols: Cols, w: f32) -> (f32, f32) {
+    /// Asked once per band, and once per column of a columned band, OF
+    /// THE BAND'S OWN ROWS: the widest label in the BLOCK, which is what
+    /// the master's word means and what it could not have until a caller
+    /// handed the rows over. A band that carries no label writes no
+    /// column at all, so the rail's buttons and the boards' hint reserve
+    /// nothing, exactly as they did.
+    ///
+    /// This retires the two rules that stood here — a fraction of the
+    /// width, and a WORD WRITTEN OUT BY HAND for each page to measure
+    /// against. The hand-written word is what the theme editor's page
+    /// went without: it declared no columns at all, so its tracks began
+    /// under their own labels and ended under their own numbers. A word
+    /// beside a table is a second statement of what the table says, and
+    /// the eighty-six rows of the editor's ADVANCED page are eighty-six
+    /// chances for the two to disagree in silence.
+    ///
+    /// EVERY ROW THE BAND DECLARES is measured, standing or not
+    /// ([`Row::when`]): a column that grew and shrank as a conditional
+    /// row came and went would move every track beside it, which is the
+    /// jump this measurement exists to prevent.
+    ///
+    /// `w` is the region's width, so a share is a share of the column and
+    /// not of the whole content box.
+    fn columns(&self, ctx: &mut Ctx, rows: &[Row], w: f32) -> (f32, f32) {
         let th = theme::resolved();
-        match cols {
-            Cols::None => (0.0, 0.0),
-            // rhythm.label_col = auto needs a measuring column primitive
-            // before this fraction can go.
-            Cols::Frac => (
-                w * th.px(tok(&LABEL_COL, "rhythm.label_col_frac")).clamp(0.0, 1.0),
-                0.0,
-            ),
-            Cols::Measured { label, value } => {
-                let f = role_label(ctx);
-                let v = role_value(ctx);
-                (
-                    ctx.fonts.measure(f.face, f.px, label, f.track)
-                        + th.px(tok(&LABEL_PAD, "rhythm.label_pad")),
-                    ctx.fonts.measure(v.face, v.px, value, v.track)
-                        + th.px(tok(&VALUE_GUTTER, "rhythm.value_gutter")),
-                )
+        let f = role_label(ctx);
+        let v = role_value(ctx);
+        // The widest word each column has to hold. `None` — nothing in
+        // the band writes there — is the empty column, and it must stay
+        // empty: a floor applied to nothing would indent a page of
+        // buttons by a label that does not exist.
+        let mut label = None::<f32>;
+        let mut value = None::<f32>;
+        // The face's widest digit, once for the band: it is an answer
+        // about the face and the size, and both are fixed for the whole
+        // of this loop ([`widest_digit`]). Asked lazily, so a band with
+        // no number in it rasterises nothing at all.
+        let mut widest = None::<char>;
+        for row in rows {
+            if let Some(text) = row.ctrl.column_label() {
+                let seen = ctx.fonts.measure(f.face, f.px, text, f.track);
+                label = Some(label.map_or(seen, |had: f32| had.max(seen)));
+            }
+            if let Some(text) = row.ctrl.column_value() {
+                let d = *widest.get_or_insert_with(|| widest_digit(ctx, &v));
+                let seen = widest_run(ctx, &v, &text, d);
+                value = Some(value.map_or(seen, |had: f32| had.max(seen)));
             }
         }
+        // What the theme asks for, where it asks for something else. The
+        // sentinel is negative (§5.0's table, `auto` -> -1.0); a share
+        // bakes to a fraction and a length to device px, and under one
+        // device pixel a number can only be the share.
+        let want = |cell: &'static OnceLock<TokenId>, name: &'static str, measured: f32| {
+            let asked = th.px(tok(cell, name));
+            if asked < 0.0 {
+                measured
+            } else if asked < 1.0 {
+                w * asked
+            } else {
+                asked
+            }
+        };
+        let label_w = label.map_or(0.0, |measured| {
+            let col = want(&LABEL_COL, "rhythm.label_col", measured);
+            // The floor first and the ceiling second, so a region too
+            // narrow for the minimum gives the label the share it is
+            // allowed and not the whole of itself.
+            (col.max(th.px(tok(&LABEL_MIN, "rhythm.label_min")))
+                .min(w * th.px(tok(&LABEL_MAX, "rhythm.label_max")))
+                + th.px(tok(&LABEL_PAD, "rhythm.label_pad")))
+            .max(0.0)
+        });
+        let value_w = value.map_or(0.0, |measured| {
+            want(&VALUE_COL, "rhythm.value_col", measured)
+                + th.px(tok(&VALUE_GUTTER, "rhythm.value_gutter"))
+        });
+        // Whatever the two of them asked for, a track keeps a width: the
+        // value gives way, because the label is the row's subject and the
+        // number is a reading of it.
+        (label_w, value_w.min((w - label_w).max(0.0)))
     }
 
     /// How tall a row is. Everything is a theme length except the one
@@ -6574,8 +6844,12 @@ impl Settings {
         }
     }
 
-    /// A row's label in the label column, written once for the four
-    /// kinds of row that have one (settings.row_label_role).
+    /// A row's label in the label column, written once for the three
+    /// kinds of row that have one — a track, a set of segments and a
+    /// cycler (settings.row_label_role). The same three
+    /// [`Ctrl::column_label`] names, because the word is written HERE at
+    /// `rc.content.x` and the column that keeps the control off it is
+    /// reserved THERE.
     fn row_label(&self, ctx: &mut Ctx, label: &str, rc: RowCtx) {
         let th = theme::resolved();
         let f = role_label(ctx);
@@ -8854,6 +9128,11 @@ mod tests {
         let mut fonts = nacelle::font::FontSystem::new();
         let mut s = furnished();
         s.view = View::ThemeEditor;
+        // ADVANCED, said out loud. Since 2026-08-17 BOTH pages carry a
+        // BORDER list, so the page this gesture is made on is a choice
+        // and not a leftover — BASIC's leg is
+        // [`a_kind_picked_on_basic_does_not_reload_the_theme`].
+        s.editor_basic = false;
         let mut dl = nacelle::draw::DrawList::recording();
         let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         s.draw(&mut ctx);
@@ -8880,6 +9159,120 @@ mod tests {
             Some("NEON"),
             "the pick did not set the border kind"
         );
+    }
+
+    /// The three lists BASIC grew on 2026-08-17: each anchor is drawn,
+    /// and each one already stands on the member THE THEME is wearing.
+    ///
+    /// A page whose job is to change a kind has to say which kind is in
+    /// force before it is touched, and the state it says it from is the
+    /// one the door leaves behind — `seed_editor_from_theme`, which
+    /// `Act::ThemesEditor` runs on the way in. Nothing here invents a
+    /// selection; the corner's is read back out of the theme by name,
+    /// because that one is a single word the file states outright.
+    #[test]
+    fn the_basic_page_carries_three_kinds_and_each_stands_on_the_themes_own() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.editor_basic = true;
+        s.seed_editor_from_theme();
+        s.view = View::ThemeEditor;
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        for list in [ListId::Borders, ListId::Backgrounds, ListId::Corners] {
+            assert!(
+                s.hits.iter().any(|&(_, a)| a == Act::ListBtn(list)),
+                "the BASIC page drew no {} anchor",
+                list.label()
+            );
+            assert!(
+                s.current_row(list).is_some(),
+                "the {} list opened on {:?}, which is not one of {:?}",
+                list.label(),
+                s.current_of(list),
+                s.names(list)
+            );
+        }
+        let mode = nacelle::theme::id("corner.mode")
+            .and_then(nacelle::theme::enum_word_of)
+            .expect("the master states a corner mode")
+            .to_uppercase();
+        assert_eq!(
+            s.current_of(ListId::Corners),
+            Some(&mode),
+            "the corner list stands on a shape the theme is not wearing"
+        );
+    }
+
+    /// The border pick's trap, re-set on the page that now carries three
+    /// of these lists.
+    ///
+    /// A kind is laid OVER the theme until SAVE and writes no config
+    /// line, so a pick must answer FALSE. `true` tells main the
+    /// configuration changed; main re-resolves it, the theme reloads,
+    /// and the fresh engine carries an EMPTY preview — the click would
+    /// erase the very picture it had just asked for. Made once per list,
+    /// because the fix is per-arm in `Act::Pick` and one arm answering
+    /// right says nothing about the next.
+    #[test]
+    fn a_kind_picked_on_basic_does_not_reload_the_theme() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let (w, h) = (1080.0 * 16.0 / 9.0, 1080.0);
+        for list in [ListId::Borders, ListId::Backgrounds, ListId::Corners] {
+            let mut s = furnished();
+            s.editor_basic = true;
+            s.seed_editor_from_theme();
+            s.view = View::ThemeEditor;
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            s.draw(&mut ctx);
+            let anchor = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == Act::ListBtn(list))
+                .map(|&(r, _)| r)
+                .unwrap_or_else(|| panic!("the BASIC page drew no {} anchor", list.label()));
+            s.click(anchor.cx(), anchor.y + anchor.h / 2.0, w, h, None);
+            assert!(
+                matches!(s.dropdown, Some(Dropdown::List(l)) if l == list),
+                "the {} anchor did not open its list",
+                list.label()
+            );
+            // A second frame: the list is drawn and its rows registered.
+            let mut dl2 = nacelle::draw::DrawList::new();
+            let mut ctx2 = probe(&mut dl2, &mut fonts, h, 1.0);
+            s.dropdown_since = None; // fully unfolded, no animation
+            s.draw(&mut ctx2);
+            // The LAST member, so the pick is a real change whatever the
+            // theme happened to be wearing at the head of the list.
+            let i = s.names(list).len() - 1;
+            let want = s.names(list)[i].clone();
+            let row = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == Act::Pick(list, i))
+                .map(|&(r, _)| r)
+                .unwrap_or_else(|| {
+                    panic!("the open {} list registered no row {i}", list.label())
+                });
+            assert!(
+                !s.click(row.cx(), row.y + row.h / 2.0, w, h, None),
+                "a {} pick reported a configuration change — main will reload \
+                 the theme and erase the preview the pick just set",
+                list.label()
+            );
+            assert_eq!(
+                s.current_of(list),
+                Some(&want),
+                "the {} pick did not set the kind",
+                list.label()
+            );
+        }
     }
 
     /// The whole-theme sections feed the ONE builder — with the page in
@@ -9399,6 +9792,148 @@ mod tests {
         viewport_home();
     }
 
+    /// THE OWNER'S SECOND SIGHTING, 2026-08-17: the glow BLINKED, about
+    /// five times a second, while a slider was dragged.
+    ///
+    /// The set the editor lays over the theme has to be a function of the
+    /// CONTROLS and of nothing else. `set_preview` REPLACES the set it is
+    /// given, so a token left out of a pulse is a token switched off, and
+    /// the pulse runs ten times a second — a set that reads the live bake
+    /// reads its own previous output and can oscillate. It did: the halo's
+    /// radius was written only where the theme had not dressed one, the
+    /// theme was asked WITH THE PREVIEW STANDING, and so every second
+    /// pulse found the radius it had written a tenth of a second earlier,
+    /// called the theme dressed, and dropped it.
+    ///
+    /// The measurement is the loop itself — build, lay, build — and it is
+    /// taken FOUR times over, because the fault has a period of two and a
+    /// single repeat could agree by parity. What made this worth a test
+    /// rather than a patch is where else that set goes: SAVE writes it,
+    /// so a click on the wrong side of the cycle saved a NEON theme with
+    /// no radius and no alpha — a glow invisible for good, in a file.
+    #[test]
+    fn the_editors_edit_set_does_not_read_its_own_preview() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let mut s = editor_open();
+        // The two sets that carry a dress question, both switched on:
+        // NEON for the panel edge, and a haloed focus ring.
+        s.current_border = Some("NEON".to_string());
+        s.ring_on = true;
+        s.current_ring_style = Some("SOLID".to_string());
+        s.ring_halo = true;
+        s.ring_halo_alpha = 30;
+
+        /// One pulse of the editor's own loop: the set it would show, and
+        /// the showing. Returns the set, so the caller can compare pulses.
+        fn pulse(s: &Settings) -> Vec<(&'static str, String)> {
+            let edits = s.editor_edits();
+            let pairs: Vec<(&str, &str)> =
+                edits.iter().map(|e| (e.token, e.value.as_str())).collect();
+            let refused = nacelle::theme::set_preview(&pairs);
+            assert!(
+                refused.is_empty(),
+                "the engine refused {refused:?} — a set this build cannot lay is a set \
+                 this test is not measuring"
+            );
+            edits.into_iter().map(|e| (e.token, e.value)).collect()
+        }
+
+        let first = pulse(&s);
+        // The set really does dress both halos on the master, or the
+        // repetition below would be agreeing about nothing.
+        for token in ["glow.panel_edge.radius", "glow.focus_ring.radius"] {
+            assert!(
+                first.iter().any(|(t, _)| *t == token),
+                "the master's own halo is undressed and the editor did not write {token}"
+            );
+        }
+        let repeats = |s: &Settings, first: &[(&'static str, String)], page: &str| {
+            for n in 1..=4 {
+                let again = pulse(s);
+                let (lost, gained) = (
+                    first.iter().find(|e| !again.contains(e)),
+                    again.iter().find(|e| !first.contains(e)),
+                );
+                assert!(
+                    again == first,
+                    "{page}: pulse {n} laid a different set over the same controls — \
+                     dropped {lost:?}, added {gained:?}"
+                );
+            }
+        };
+        repeats(&s, &first, "ADVANCED");
+
+        // And BASIC, which is the page the owner was dragging on. Its ten
+        // authors are a move measured from seeds taken off the live bake,
+        // so a set that moved by its own last move would climb instead of
+        // blinking — the same fault wearing another face.
+        s.perform(Act::EditorMode, 0.0);
+        assert!(s.editor_basic, "the switch did not reach BASIC");
+        s.tone[0] = 40;
+        let first = pulse(&s);
+        repeats(&s, &first, "BASIC");
+        nacelle::theme::clear_preview();
+    }
+
+    /// And the reason the dress question is asked at all is intact: a
+    /// theme that has dressed its own halo KEEPS ITS OWN NUMBERS.
+    ///
+    /// That was `theme::edit`'s own finding — writing this window's seeds
+    /// over five themes' dress flattened all five — and the fix for the
+    /// blink must not become a quiet undoing of it. A dressed theme is
+    /// staged here with the preview, because the editor reads its opening
+    /// state off the live bake and this is the one way to give it a bake
+    /// that is not the master's without a file on disk.
+    ///
+    /// WHAT THIS PINS IS THE OVERLAY, AND ONLY THE OVERLAY. An edit set
+    /// laid over a bake keeps whatever it does not mention, so saying
+    /// nothing about a radius is how a dress survives. A FILE keeps
+    /// nothing it does not mention — `nacelle::theme::save_theme` writes
+    /// the whole file out of this same set — so a dressed theme saved
+    /// under a new name loses its radius and alpha to the same silence
+    /// that protects it here. That is a hole at the seam between this
+    /// window's set and what `libnacelle`'s `theme::edit` puts in it, it
+    /// is NOT a thing this test is content with, and closing it belongs
+    /// on the other side of the boundary: `edit.rs` has to hand the
+    /// dressed numbers back for a save the way it withholds them for an
+    /// overlay. Whichever way that lands, the assertions below change
+    /// with it — they are the overlay's contract, not the file's.
+    #[test]
+    fn a_theme_that_dressed_its_own_halo_keeps_its_numbers() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let dress = [
+            ("glow.panel_edge.radius", "2.40u"),
+            ("glow.panel_edge.alpha", "0.500"),
+            ("glow.focus_ring.radius", "2.40u"),
+            ("glow.focus_ring.alpha", "0.500"),
+        ];
+        assert!(nacelle::theme::set_preview(&dress).is_empty(), "the dress was refused");
+        let mut s = editor_open();
+        nacelle::theme::clear_preview();
+        s.current_border = Some("NEON".to_string());
+        s.ring_on = true;
+        s.current_ring_style = Some("SOLID".to_string());
+        s.ring_halo = true;
+        s.ring_halo_alpha = 30;
+        let edits = s.editor_edits();
+        for token in ["glow.panel_edge.radius", "glow.focus_ring.radius"] {
+            assert!(
+                !edits.iter().any(|e| e.token == token),
+                "the editor wrote its own {token} over a theme that had dressed one"
+            );
+        }
+        // The switch itself still lands — keeping a dress is not the same
+        // as leaving the theme alone.
+        assert!(
+            edits.iter().any(|e| e.token == "glow.panel_edge.enabled" && e.value == "true"),
+            "NEON did not switch the halo on"
+        );
+    }
+
     /// The two crossings between the editor's sRGB tracks and the file's
     /// OKLCh are INVERSES, measured on the master's own accent.
     ///
@@ -9808,7 +10343,7 @@ mod tests {
                     }
                     started = true;
                     let band = Rect::new(box_.x, y, box_.w, box_.h);
-                    for ((region, _, rows), dy) in zone_regions(zone, band)
+                    for ((region, rows), dy) in zone_regions(zone, band)
                         .into_iter()
                         .zip(s.zone_offsets(zone, m, band))
                     {
@@ -10016,13 +10551,239 @@ mod tests {
         viewport_home();
     }
 
+    // --------------------------------------------------- the page's bar
+
+    /// The FONT page drawn at 500 px, once — a page that does not fit,
+    /// which is the only state a scrollbar exists in — with the pointer
+    /// nowhere near it.
+    fn long_page(fonts: &mut nacelle::font::FontSystem) -> Settings {
+        let mut s = furnished();
+        s.view = View::Font;
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, fonts, PAGE_H, 1.0);
+        s.draw(&mut ctx);
+        assert!(
+            s.flow.length > s.flow.view.h,
+            "the FONT page ought not to fit at {PAGE_H} px — there would be no bar to press"
+        );
+        s
+    }
+
+    /// The bar AS THE PRESS AIMS WITH IT: `hovered = true`, the widest
+    /// the lane can be, which is what a hand reaching for the thumb has
+    /// under it. Off the flow the last frame left behind, which is the
+    /// one thing the press has to go on.
+    fn bar_geom(s: &Settings) -> scroll::ScrollbarGeom {
+        scroll::scrollbar(
+            s.flow.view,
+            &ScrollbarLook::from_theme(),
+            s.scroll.offset(),
+            s.flow.view.h,
+            s.flow.length,
+            true,
+        )
+        .expect("a page longer than its box has a bar")
+    }
+
+    /// The window height every test of the page's bar is taken at, and
+    /// the width a frame gives it ([`probe`]).
+    const PAGE_H: f32 = 500.0;
+    const PAGE_W: f32 = PAGE_H * 16.0 / 9.0;
+
+    /// The owner's report, in one gesture: press the thumb, move, let go.
+    ///
+    /// The bar was drawn and never asked — `draw_scrollbar` worked out a
+    /// geometry, painted it and threw it away, so nothing on screen
+    /// carried the press. The model has had the whole gesture since
+    /// F2 (`view::scroll`), and the open list's thumb was already using
+    /// it in this very file; only the page's bar was left an indicator.
+    #[test]
+    fn the_pages_thumb_takes_the_hand_and_the_page_follows() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = long_page(&mut fonts);
+        let geom = bar_geom(&s);
+        let grab = geom.thumb.y + geom.thumb.h / 2.0;
+        assert!(
+            !s.click(geom.thumb.cx(), grab, PAGE_W, PAGE_H, None),
+            "a press on a scrollbar reported a configuration change"
+        );
+        assert!(s.scroll.dragging(), "the press on the thumb took no hold");
+        let before = s.scroll.offset();
+        // A quarter of the track down, and sideways off the lane on the
+        // way: a hand that wanders out of the bar is still holding it.
+        s.drag(0.0, grab + geom.track.h / 4.0);
+        let after = s.scroll.offset();
+        assert!(
+            after > before,
+            "the held thumb moved a quarter of its track and the page stayed at {before}"
+        );
+        assert!(!s.release(), "letting a scrollbar go changed the configuration");
+        assert!(!s.scroll.dragging(), "the thumb was never let go");
+        // And nothing follows the pointer once it holds nothing.
+        let parked = s.scroll.offset();
+        s.drag(0.0, grab + geom.track.h / 2.0);
+        assert_eq!(
+            s.scroll.offset(),
+            parked,
+            "the page followed a pointer that was holding nothing"
+        );
+        viewport_home();
+    }
+
+    /// A press on the TRACK beside the thumb pages one viewport toward
+    /// it — the toolkit's own word on a track click
+    /// ([`nacelle::view::scroll::ScrollView::page`]), and the same
+    /// answer the open list's bar and the filesystem's overlay give.
+    #[test]
+    fn a_press_on_the_track_beside_the_thumb_pages_toward_it() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = long_page(&mut fonts);
+        let geom = bar_geom(&s);
+        let below = geom.track.bottom() - 1.0;
+        assert!(
+            below > geom.thumb.bottom(),
+            "the thumb fills its track; there is no track left to press"
+        );
+        let (before, viewport) = (s.scroll.offset(), s.flow.view.h);
+        assert!(!s.click(geom.thumb.cx(), below, PAGE_W, PAGE_H, None));
+        assert!(
+            !s.scroll.dragging(),
+            "a press BESIDE the thumb took hold of the thumb"
+        );
+        let after = s.scroll.offset();
+        assert!(
+            (after - before - viewport).abs() < 0.5,
+            "a press below the thumb moved the page from {before} to {after}, \
+             and one viewport is {viewport}"
+        );
+        viewport_home();
+    }
+
+    /// The bar says the thumb is HELD — told apart from resting and from
+    /// merely pointed at, with the pointer nowhere near it.
+    ///
+    /// Three frames and two witnesses, and every number compared against
+    /// is the theme's own rather than one written here. The width comes
+    /// from `scrollbar.w` against `scrollbar.w_hover`: a thumb that
+    /// thinned out from under the hand would be a defect the eye could
+    /// see. The fill comes from the `scrollbar.thumb` class's ladder,
+    /// where the master writes `state.idle.fill`, `state.hover.fill` and
+    /// `state.dragging.fill` as three different alphas over one base —
+    /// so a held thumb drawn in the HOVER ink fails here just as loudly
+    /// as one drawn in the resting ink, and only the drag rung passes.
+    ///
+    /// The rung changes land at once because every frame is taken at the
+    /// same instant: `motion::state_mix` fades between rungs across a
+    /// frame BOUNDARY and jumps when there is none.
+    #[test]
+    fn the_bar_says_a_held_thumb_is_held() {
+        let _g = crate::widgets::theme_test_lock();
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let look = ScrollbarLook::from_theme();
+        assert!(
+            look.w_hover > look.w,
+            "this theme draws one width for both rungs; the measurement means nothing"
+        );
+        let mut s = long_page(&mut fonts);
+        // An auto-hiding bar starts HIDDEN and is painted only once the
+        // page has moved (`ScrollView::last_move_t`) — which is how a
+        // person meets it in any case: the wheel first, the hand second.
+        s.wheel(-1.0);
+        let (rest_w, rest_fill) = drawn_thumb(&mut s, &mut fonts, None);
+        assert!(
+            (rest_w - look.w).abs() < 0.5,
+            "the resting bar is {rest_w} px wide, and scrollbar.w is {}",
+            look.w
+        );
+        let geom = bar_geom(&s);
+        let on_thumb = (geom.thumb.cx(), geom.thumb.y + geom.thumb.h / 2.0);
+        // Pointed at and not held: the rung the drag rung has to be told
+        // apart from, and the one a bar that merely widened would sit on.
+        let (hover_w, hover_fill) = drawn_thumb(&mut s, &mut fonts, Some(on_thumb));
+        assert!(
+            (hover_w - look.w_hover).abs() < 0.5,
+            "the hovered bar is {hover_w} px wide, and scrollbar.w_hover is {}",
+            look.w_hover
+        );
+        s.click(on_thumb.0, on_thumb.1, PAGE_W, PAGE_H, None);
+        assert!(s.scroll.dragging(), "the press on the thumb took no hold");
+        let (held_w, held_fill) = drawn_thumb(&mut s, &mut fonts, None);
+        assert!(
+            (held_w - look.w_hover).abs() < 0.5,
+            "the held bar is {held_w} px wide, and scrollbar.w_hover is {}",
+            look.w_hover
+        );
+        let differs = |a: nacelle::theme::Color, b: nacelle::theme::Color| {
+            (a.a - b.a).abs() > 0.001
+                || (a.r - b.r).abs() > 0.001
+                || (a.g - b.g).abs() > 0.001
+                || (a.b - b.b).abs() > 0.001
+        };
+        assert!(
+            differs(held_fill, rest_fill),
+            "the held thumb is drawn in its RESTING ink; the class ladder was \
+             never told the thumb is being dragged"
+        );
+        assert!(
+            differs(held_fill, hover_fill),
+            "the held thumb is drawn in its HOVER ink; the bar was told the \
+             pointer is over it, which it is not, and nothing about the grab"
+        );
+        viewport_home();
+    }
+
+    /// One frame of the window with the pointer where `mouse` says (away
+    /// altogether when `None`), and the thumb AS IT WAS PAINTED: its
+    /// width and its fill.
+    ///
+    /// Read out of the command register rather than recomputed, because
+    /// what is in question is what the frame DID. The thumb is the one
+    /// filled ring standing in the bar's lane and taller than it is wide;
+    /// the rows never reach there — `scrollbar.mode = inset` keeps the
+    /// lane out of their box ([`rows_box`]).
+    fn drawn_thumb(
+        s: &mut Settings,
+        fonts: &mut nacelle::font::FontSystem,
+        mouse: Option<(f32, f32)>,
+    ) -> (f32, nacelle::theme::Color) {
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, fonts, PAGE_H, 1.0);
+        if let Some((x, y)) = mouse {
+            ctx.mouse = nacelle::pointer::Pointer::new(x, y);
+        }
+        s.draw(&mut ctx);
+        let band = bar_band(s.flow.view, &ScrollbarLook::from_theme());
+        dl.cmds()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                nacelle::draw::DrawCmd::RingFill { r, color, .. }
+                    if r[0] >= band.x - 0.5
+                        && r[0] + r[2] <= band.right() + 0.5
+                        && r[3] > r[2] =>
+                {
+                    Some((r[2], *color))
+                }
+                _ => None,
+            })
+            .expect("the frame painted no thumb in the bar's lane")
+    }
+
     // ------------------------------------------------------- the bands
 
     /// A two-column band, made only here: the pages are all one flow in
     /// this step, and a mechanism nothing builds is a mechanism nobody
     /// has measured.
     static PROBE_LEFT: [Row; 1] = [row(Ctrl::Slider {
-        label: "RADIUS",
+        // Two DIFFERENT labels on purpose, and the widths they measure
+        // to are what the columns are: if the label column were still
+        // the page's, both tracks would start on one pixel.
+        label: "A",
         act: Act::BlurRadiusTrack,
         unit: Unit::Percent,
         range: (0, 100),
@@ -10033,7 +10794,7 @@ mod tests {
     })];
 
     static PROBE_RIGHT: [Row; 1] = [row(Ctrl::Slider {
-        label: "OPACITY",
+        label: "A MUCH LONGER LABEL",
         act: Act::BlurOpacityTrack,
         unit: Unit::Percent,
         range: (0, 100),
@@ -10043,18 +10804,8 @@ mod tests {
         save: |_| {},
     })];
 
-    static PROBE_COLUMNS: [ZCol; 2] = [
-        // Two DIFFERENT measuring words on purpose: if the label column
-        // were still the page's, both tracks would start on one pixel.
-        ZCol {
-            cols: Cols::Measured { label: "A", value: "100 %" },
-            rows: &PROBE_LEFT,
-        },
-        ZCol {
-            cols: Cols::Measured { label: "A MUCH LONGER LABEL", value: "100 %" },
-            rows: &PROBE_RIGHT,
-        },
-    ];
+    static PROBE_COLUMNS: [ZCol; 2] =
+        [ZCol { rows: &PROBE_LEFT }, ZCol { rows: &PROBE_RIGHT }];
 
     static PROBE_ZONES: [Zone; 1] = [Zone::Cols { columns: &PROBE_COLUMNS }];
 
@@ -10088,7 +10839,7 @@ mod tests {
         );
         // The y and the height stay the page's, so a row that reserves
         // part of the CONTENT box measures the same box in a column.
-        for (region, _, _) in &regions {
+        for (region, _) in &regions {
             assert!((region.y - box_.y).abs() < 0.01 && (region.h - box_.h).abs() < 0.01);
         }
         viewport_home();
@@ -10143,7 +10894,7 @@ mod tests {
         // Folded: the whole width each, one under the other.
         let (regions, offsets) =
             (zone_regions(band, narrow), s.zone_offsets(band, m, narrow));
-        for (region, _, _) in &regions {
+        for (region, _) in &regions {
             assert!(
                 (region.x - narrow.x).abs() < 0.01 && (region.w - narrow.w).abs() < 0.01,
                 "a folded column did not take the whole width"
@@ -10169,11 +10920,14 @@ mod tests {
     }
 
     /// M3, the measurement — a label column is measured against the
-    /// REGION's own words and sized from the REGION's width.
+    /// REGION's OWN ROWS and held to the theme's walls.
     ///
     /// This is the whole reason `columns` stopped being the page's: two
     /// columns of one band ask it separately, so the sliders on the left
-    /// do not inherit the width of the labels on the right.
+    /// do not inherit the width of the labels on the right. What it asks
+    /// WITH is the band's own rows now (`rhythm.label_col = auto`), so
+    /// the words a page measures against cannot fall out of step with the
+    /// words it draws — there is only the one set of words.
     #[test]
     fn a_column_measures_its_own_labels() {
         let _g = crate::widgets::theme_test_lock();
@@ -10183,21 +10937,259 @@ mod tests {
         let mut dl = nacelle::draw::DrawList::new();
         let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         let s = furnished();
-        let (short, _) = s.columns(&mut ctx, PROBE_COLUMNS[0].cols, 600.0);
-        let (long, _) = s.columns(&mut ctx, PROBE_COLUMNS[1].cols, 600.0);
+        let (short, _) = s.columns(&mut ctx, PROBE_COLUMNS[0].rows, 600.0);
+        let (long, _) = s.columns(&mut ctx, PROBE_COLUMNS[1].rows, 600.0);
         assert!(
             long > short + 0.01,
-            "two different measuring words gave one label column ({short} px and {long} px)"
+            "two different labels gave one label column ({short} px and {long} px)"
         );
-        // A fraction is a fraction of the REGION, not of the page.
-        let (half, _) = s.columns(&mut ctx, Cols::Frac, 600.0);
-        let (whole, _) = s.columns(&mut ctx, Cols::Frac, 1200.0);
+        // A band that writes in neither column reserves neither: the
+        // rail is buttons, and a floor applied to a column nothing
+        // stands in would indent a page by a label it does not have.
+        let (none_l, none_v) = s.columns(&mut ctx, &RAIL_ROWS, 600.0);
         assert!(
-            half > 0.0 && (whole - half * 2.0).abs() < 0.01,
-            "Cols::Frac did not follow the region's width"
+            none_l == 0.0 && none_v == 0.0,
+            "a band of buttons reserved {none_l} px of label and {none_v} px of value"
+        );
+        // The ceiling is a share of the REGION, not of the page: the same
+        // words in a narrow column are held to `rhythm.label_max`.
+        let th = theme::resolved();
+        let max = th.px(theme::id("rhythm.label_max").expect("the master declares it"));
+        let pad = th.px(theme::id("rhythm.label_pad").expect("the master declares it"));
+        let (held, _) = s.columns(&mut ctx, PROBE_COLUMNS[1].rows, 120.0);
+        assert!(
+            (held - (120.0 * max + pad)).abs() < 0.01,
+            "a label column of {held} px ignored the {} px ceiling its region allows",
+            120.0 * max
         );
         viewport_home();
     }
+
+    /// THE OWNER'S OWN SIGHTING, 2026-08-17: on the theme editor's page
+    /// the track ran THROUGH the letters of its label and the number sat
+    /// on the knob. Not a drawing fault — the page declared no columns,
+    /// so its rows reserved nothing and the track took the whole width,
+    /// label to number, with the label written over the left end of it
+    /// and the number over the right.
+    ///
+    /// Asked of EVERY PAGE and every row of it, at three window heights
+    /// and with the editor's conditional rows standing, because the page
+    /// that had it was the page nobody had measured. A row's three parts
+    /// stand in this order and never overlap: the label in its column,
+    /// the control after it, the number in the gutter at the far edge.
+    ///
+    /// The number is measured at its WIDEST, not at the value the window
+    /// happens to carry — a column that only holds for the number on
+    /// screen is a column the next number overflows.
+    ///
+    /// NOTHING BELOW ASKS THE CODE UNDER TEST WHAT THE ANSWER IS. There
+    /// are two ways this could have agreed with itself instead of
+    /// checking anything, and it is written against both:
+    ///
+    /// * Which rows write in the label column is matched ON THE KIND and
+    ///   never read out of [`Ctrl::column_label`]. That list is what
+    ///   reserves the column, so a walk through it cannot see a kind fall
+    ///   OUT of it — and a kind that falls out goes on writing its word
+    ///   at the content's left edge with nothing holding its control off
+    ///   it. The editor's mode switch is a band of ONE cycler, so a
+    ///   cycler dropped from that list puts its plate on its own label,
+    ///   which is the owner's sighting again. The arms below are spelled
+    ///   out with no wildcard, so a new kind of row cannot join a page
+    ///   without an answer here.
+    ///
+    /// * The widest number a track can write is found by WRITING OUT
+    ///   every value in its range and measuring them, never by asking
+    ///   [`widest_run`] for its own upper bound. HUE reads 359 at the top
+    ///   of its range and 300 in the middle of it, and in the master's
+    ///   value face 300 is the wider of the two — a reserve taken against
+    ///   the top of range alone is a reserve the middle of the range
+    ///   overflows.
+    #[test]
+    fn a_row_does_not_write_its_label_its_control_and_its_value_over_one_another() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        // What the walk actually reached, by kind. A page that stopped
+        // offering one of the three would leave this test passing and
+        // saying nothing about it.
+        let (mut tracks, mut segments, mut cyclers) = (0u32, 0u32, 0u32);
+        // And how many tracks the digit substitution EARNS ITS KEEP on:
+        // rows whose widest reachable number is wider than the number at
+        // the top of their range. None of them and the reserve is not
+        // being measured here at all, whatever else passes.
+        let mut earned = 0u32;
+        for h in [720.0f32, 1080.0, 1440.0] {
+            theme::set_viewport(h, 1.0);
+            let mut fonts = nacelle::font::FontSystem::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let (f, v) = (role_label(&ctx), role_value(&ctx));
+            let digit = widest_digit(&mut ctx, &v);
+            // The widest a range can be written, kept per range: three
+            // hundred and sixty strings measured once and not once per
+            // row, per band and per page. Dropped at every height,
+            // because a role's size follows the viewport.
+            let mut span = std::collections::HashMap::<(String, u32), f32>::new();
+            let mut s = furnished();
+            // Every `Row::when` on the editor's page satisfied at once:
+            // the rows that come and go are rows too, and a column that
+            // only fits the ones standing today is the same fault later.
+            editor_ajar(&mut s);
+            // BOTH of the editor's pages: a band that is not standing is
+            // a band the walk does not reach, and the page the owner was
+            // looking at when he reported this is BASIC.
+            for basic in [false, true] {
+                s.editor_basic = basic;
+                for page in PAGES.iter() {
+                    let nav = Panes::of(page.view, m, content);
+                    let box_ = rows_box(nav.page);
+                    for zone in s.frame_zones(page, &nav) {
+                        for (region, rows) in zone_regions(zone, box_) {
+                            let (label_w, value_w) = s.columns(&mut ctx, rows, region.w);
+                            for row in rows.iter().filter(|r| (r.when)(&s)) {
+                                let band = Rect::new(
+                                    region.x,
+                                    region.y,
+                                    region.w,
+                                    s.row_h(&row.ctrl, m, region),
+                                );
+                                let rc =
+                                    RowCtx { content: region, band, label_w, value_w, m };
+                                let seen = (page.title, row.ctrl.column_label());
+                                // The word this kind writes in the label
+                                // column, and where its control's left
+                                // edge lands — both off the KIND.
+                                let placed: Option<(&'static str, f32)> = match row.ctrl {
+                                    Ctrl::Slider { label, .. } => {
+                                        tracks += 1;
+                                        Some((label, track_rect(rc).x))
+                                    }
+                                    Ctrl::Chips { label, values, .. } => {
+                                        segments += 1;
+                                        let first = chip_rects(values.len(), rc);
+                                        let first =
+                                            first.first().expect("a row of no segments");
+                                        Some((label, first.x))
+                                    }
+                                    Ctrl::Cycle { label, .. } => {
+                                        cyclers += 1;
+                                        Some((label, cycle_rect(rc).x))
+                                    }
+                                    Ctrl::Toggle { .. }
+                                    | Ctrl::Drop { .. }
+                                    | Ctrl::Button { .. }
+                                    | Ctrl::Bar { .. }
+                                    | Ctrl::Section { .. }
+                                    | Ctrl::Note { .. }
+                                    | Ctrl::Hint { .. }
+                                    | Ctrl::Custom { .. } => None,
+                                };
+                                if let Some((label, ctrl_x)) = placed {
+                                    // The word starts at the content's
+                                    // left edge ([`Settings::row_label`]),
+                                    // so where it ENDS is where the
+                                    // control may begin and no sooner.
+                                    let ink =
+                                        ctx.fonts.measure(f.face, f.px, label, f.track);
+                                    assert!(
+                                        region.x + ink <= ctrl_x + 0.01,
+                                        "{seen:?}: the label {label:?} runs to {} and \
+                                         the control begins at {ctrl_x}, so one is \
+                                         drawn over the other",
+                                        region.x + ink
+                                    );
+                                    // And the column is THIS row's own,
+                                    // not the one its neighbour paid
+                                    // for. The whole program has ONE
+                                    // segmented row, COLOR's DEPTH, and
+                                    // it stands beside SPACE: drop the
+                                    // segments from
+                                    // [`Ctrl::column_label`] and DEPTH
+                                    // would keep standing in a column
+                                    // SPACE had bought, with nothing
+                                    // above this line able to tell. A
+                                    // band of exactly this row asks for
+                                    // exactly what this row is owed.
+                                    let alone = [*row];
+                                    let (own, _) = s.columns(&mut ctx, &alone, region.w);
+                                    assert!(
+                                        ink <= own + 0.01,
+                                        "{seen:?}: {label:?} alone in a band reserves \
+                                         {own} px for a word {ink} px wide, so it only \
+                                         fits where a neighbour widens the column"
+                                    );
+                                }
+                                let Ctrl::Slider { unit, range: (lo, hi), .. } = row.ctrl
+                                else {
+                                    continue;
+                                };
+                                let track = track_rect(rc);
+                                assert!(
+                                    track.w > 0.0,
+                                    "{seen:?}: the track has {} px to stand in",
+                                    track.w
+                                );
+                                // Every number this track can reach,
+                                // written out and measured.
+                                let key = (unit.text(hi), lo);
+                                let widest = match span.get(&key) {
+                                    Some(&had) => had,
+                                    None => {
+                                        let had = (lo..=hi).fold(0.0f32, |wide, n| {
+                                            let written = unit.text(n);
+                                            wide.max(ctx.fonts.measure(
+                                                v.face, v.px, &written, v.track,
+                                            ))
+                                        });
+                                        span.insert(key, had);
+                                        had
+                                    }
+                                };
+                                let top =
+                                    ctx.fonts.measure(v.face, v.px, &unit.text(hi), v.track);
+                                if widest > top + 0.01 {
+                                    earned += 1;
+                                }
+                                // The reserve the row asks for holds
+                                // every one of them — this is the whole
+                                // of what the substitution is for.
+                                let asked = widest_run(&mut ctx, &v, &unit.text(hi), digit);
+                                assert!(
+                                    widest <= asked + 0.01,
+                                    "{seen:?}: the widest number this track can write \
+                                     is {widest} px and the row reserves {asked} px \
+                                     for it"
+                                );
+                                // And the track, as it is laid out,
+                                // stops short of where that number
+                                // begins.
+                                assert!(
+                                    track.right() <= region.right() - widest + 0.01,
+                                    "{seen:?}: the track ends at {} and the widest \
+                                     number this row can write begins at {}",
+                                    track.right(),
+                                    region.right() - widest
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tracks > 0 && segments > 0 && cyclers > 0,
+            "the walk reached {tracks} tracks, {segments} segmented rows and {cyclers} \
+             cyclers — a kind it never reaches is a kind it never checks"
+        );
+        assert!(
+            earned > 0,
+            "no track on any page can write a number wider than the one at the top of \
+             its range, so nothing above measured the reserve itself"
+        );
+        viewport_home();
+    }
+
 
     /// M2/M3, the walk — a columned band registers COLUMN BY COLUMN,
     /// and each column's rows are laid inside that column.
