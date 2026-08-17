@@ -560,7 +560,13 @@ impl Layered for ColorConf {
 impl ColorConf {
     /// What every machine can show, so it is what the program asks for
     /// until somebody asks for more.
-    pub const DEPTH: u32 = 8;
+    ///
+    /// TAKEN FROM THE TOOLKIT, not written out again: the theme editor's
+    /// BASIC sliders notch by this depth, and libnacelle states it as the
+    /// depth to assume when nobody has said. Two copies of an eight would
+    /// let the sliders and the swapchain disagree about what "nobody has
+    /// said" means.
+    pub const DEPTH: u32 = nacelle::theme::edit::DEFAULT_DEPTH_BITS;
     /// Leave the compositor's own choice in place.
     pub const SPACE: &'static str = "auto";
 

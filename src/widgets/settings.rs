@@ -89,6 +89,12 @@ use std::borrow::Cow;
 use crate::config::{self, GRID_MAX, GRID_MIN};
 use nacelle::focus::{Caps, FocusCtl, FocusId, Key as FKey, KeyEv, Mods, Nav};
 use nacelle::theme::bake::StateStyle;
+// The two ladders' walls and ceilings, TAKEN from the stage that applies
+// them (`theme/bake.rs`) instead of written out beside every slider that
+// runs to them. Six call sites here used to carry the same four numbers.
+use nacelle::theme::bake::{
+    SURFACE_CHROMA_CEILING, SURFACE_LIFT_WALL, TEXT_CHROMA_CEILING, TEXT_LIFT_WALL,
+};
 use nacelle::theme::parse::State;
 use nacelle::theme::{self, TokenId};
 use nacelle::view::scroll::{self, ScrollPhysics, ScrollView, ScrollbarLook};
@@ -192,13 +198,15 @@ enum Knob {
     /// The surface ladder's own hue, degrees — only while OWN HUE is on;
     /// off, the set writes the reference `@hue.accent` back instead.
     SurfHue,
-    /// `surface.lift`, the bake's -0.09..0.09 on a 0..100 track.
+    /// `surface.lift`, the bake's own wall either way on a 0..100 track
+    /// ([`nacelle::theme::bake::SURFACE_LIFT_WALL`]).
     SurfLift,
-    /// `surface.chroma`, the bake's 0..4 scale on a 0..100 track.
+    /// `surface.chroma`, the bake's own ceiling on a 0..100 track
+    /// ([`nacelle::theme::bake::SURFACE_CHROMA_CEILING`]).
     SurfChroma,
-    /// `text.lift`, -0.10..0.10 likewise.
+    /// `text.lift`, the text ladder's wall likewise.
     TextLift,
-    /// `text.chroma`, 0..3 likewise.
+    /// `text.chroma`, the text ladder's ceiling likewise.
     TextChroma,
     /// The chosen severity role's author colour (`severity.<role>.text`).
     SevB,
@@ -697,6 +705,19 @@ fn hit_into(hits: &mut Vec<(Rect, Act)>, clip: Option<Rect>, ctx: &mut Ctx, r: R
 /// which read as a broken slider. The theme file still receives `oklch`:
 /// the conversion runs at the seam, so the editor speaks HSV and the file
 /// keeps its native space.
+///
+/// **The RGB on this side of the pair is sRGB-ENCODED**, which is what
+/// makes "#FF0000 at brightness 100" the sentence above and not a claim
+/// about photons — and it is the space the bake hands colours back in
+/// (`theme/bake.rs`, `Color::to_srgb` on the Unorm path). Every crossing
+/// to OKLCh therefore decodes first ([`Color::to_linear`]) and every
+/// crossing back encodes ([`Color::to_srgb`]): OKLCh is defined over
+/// LINEAR light, and feeding it encoded values reads a colour lighter
+/// than it is. Measured before this note existed: the master's accent
+/// answered L 0.8904 instead of 0.8200, and six trips through the
+/// editor's BASIC page walked it 0.8200 -> 0.8904 -> 0.9413 -> 0.9715
+/// with every slider at rest, because the page seeded itself from what
+/// it had just written.
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     let h = h.rem_euclid(360.0) / 60.0;
     let c = v * s;
@@ -774,10 +795,13 @@ fn band_back(x: f32, lo: f32, hi: f32) -> u32 {
 const TONE_HUE_MAX: u32 = 359;
 /// Up to twice the theme's own chroma; 100 leaves it alone, 0 greys it.
 const TONE_SAT_MAX: u32 = 200;
-/// The lightness offset's half-span. The bake clamps `surface.lift` to
-/// 0.09 and `text.lift` to 0.10 (`bake.rs:519`, `:525`), so a track that
-/// went further would have ends that do nothing.
-const TONE_LIGHT_SPAN: f32 = 0.10;
+/// The lightness offset's half-span: the WIDER of the bake's two ladder
+/// walls, TAKEN from the toolkit and not written out again here. The
+/// bake holds `surface.lift` to one and `text.lift` to the other, so a
+/// track that went past the wider of the two would have ends that do
+/// nothing. Which of them is wider is pinned by
+/// `the_editor_slider_maps_survive_the_round_trip`.
+const TONE_LIGHT_SPAN: f32 = nacelle::theme::bake::TEXT_LIFT_WALL;
 /// One whole unit of the LIGHTNESS track, in OKLab L: the 0..100 track
 /// covers -span..+span, so a unit is a fiftieth of the span.
 const TONE_LIGHT_UNIT: f32 = TONE_LIGHT_SPAN / 50.0;
@@ -794,6 +818,12 @@ const TONE_REST: [u32; 3] = [0, 100, 50];
 /// the theme's own colours onto the tracks, and BASIC's fold, which
 /// brings a moved author onto the same tracks. Two copies of it would
 /// be two chances for the two to round a colour differently.
+///
+/// `c` is **sRGB-ENCODED** — the space [`hsv_to_rgb`] is the inverse of
+/// and the space the bake answers in. A caller holding a colour that
+/// came out of OKLCh holds LINEAR light and encodes it first
+/// ([`Color::to_srgb`]); the fold did not, and handed the page a colour
+/// four track units too bright.
 fn hsv_track_of(c: nacelle::theme::Color) -> [u32; 3] {
     let (h, sat, v) = rgb_to_hsv(c.r, c.g, c.b);
     [
@@ -4125,23 +4155,32 @@ impl Settings {
     /// argument, from the copy this window took on the way into the
     /// editor.
     ///
-    /// EIGHT BITS WHEN NOBODY HAS SAID — the model's own
-    /// `DEFAULT_DEPTH_BITS` and this program's `ColorConf::DEPTH`, the
-    /// same number in both places because it is the floor every
-    /// swapchain supports. A notch coarser than the pipeline is honest;
-    /// a notch finer is a slider that does nothing for several presses
-    /// and reads as broken.
+    /// EIGHT BITS WHEN NOBODY HAS SAID, and the config is where that is
+    /// answered: `ColorConf::depth()` falls back to the toolkit's own
+    /// `DEFAULT_DEPTH_BITS`, which is the floor every swapchain
+    /// supports, so what arrives here has already been decided. A notch
+    /// coarser than the pipeline is honest; a notch finer is a slider
+    /// that does nothing for several presses and reads as broken.
     ///
-    /// NEVER BELOW ONE. These tracks carry whole numbers, so one unit is
-    /// the finest move that exists here whatever the depth says — at ten
-    /// bits and up the notch is already smaller than a unit, and the
-    /// answer is simply the track's own resolution.
+    /// NEVER BELOW ONE, AND PAST TEN BITS THE TRACK IS THE LIMIT — not
+    /// the depth. These tracks carry whole numbers: one degree of HUE,
+    /// one percent of SATURATION, a fiftieth of the lightness span. On
+    /// the master's mint seed (C 0.1531) the pipeline's own notch is
+    /// 1.47 deg / 0.0256 / 0.0039 at eight bits, which is 1, 3 and 2
+    /// track units; at ten it is 0.37 deg / 0.0064 / 0.00098, already
+    /// finer than a unit, and at twelve and sixteen finer still — so all
+    /// three answers are 1 from ten bits up. That is the FLOOR doing its
+    /// job and not a slider that stopped listening: a whole-number track
+    /// has nothing between 1 and 0, and 0 would be a press that moves
+    /// nothing. Reaching every code a twelve-bit swapchain can show
+    /// would take a finer TRACK, which is a change to the control and
+    /// the owner's to make — and coarse is the side he chose.
     fn tone_step(&self) -> [u32; 3] {
         // The seed's own chroma, which is what a rotation and a scaling
         // move along: a grey theme gets coarse notches, and that is
         // right — turning a grey moves nothing however far it goes.
         let seed_chroma = self.tone_seeds.map_or(0.0, |s| s.accent.c);
-        let st = nacelle::theme::edit::tone_step(Some(self.color_depth), seed_chroma);
+        let st = nacelle::theme::edit::tone_step(self.color_depth, seed_chroma);
         let unit = |x: f32, per_unit: f32| {
             let n = (x / per_unit).round();
             if n.is_finite() { (n as u32).max(1) } else { 1 }
@@ -4194,17 +4233,23 @@ impl Settings {
             return;
         }
         let moved = seeds.shifted(tone);
-        self.accent = hsv_track_of(nacelle::theme::Color::from_oklch(moved.accent));
+        // `from_oklch` answers in LINEAR light; the tracks are sRGB-encoded
+        // ([`hsv_track_of`]), so the colour is encoded on the way over.
+        // Without the encode the fold handed ADVANCED a lighter colour than
+        // BASIC was showing, and the page then wrote that lighter colour
+        // back to the theme.
+        let onto_tracks =
+            |p| hsv_track_of(nacelle::theme::Color::from_oklch(p).to_srgb());
+        self.accent = onto_tracks(moved.accent);
         for i in 0..SEVERITY_ROLES.len() {
-            self.severity[i] =
-                hsv_track_of(nacelle::theme::Color::from_oklch(moved.severity[i]));
+            self.severity[i] = onto_tracks(moved.severity[i]);
             // ADVANCED writes only the roles a slider TOUCHED, and the
             // rotation moved all seven — so all seven are now the page's
             // own words, or the next preview would put the theme's back.
             self.severity_touched[i] = true;
         }
-        self.surface_lift = span_back(moved.surface_lift, 0.09);
-        self.text_lift = span_back(moved.text_lift, 0.10);
+        self.surface_lift = span_back(moved.surface_lift, SURFACE_LIFT_WALL);
+        self.text_lift = span_back(moved.text_lift, TEXT_LIFT_WALL);
         // A hue move re-welds the beds to the accent — BASIC's promise of
         // one hue for the whole interface — so ADVANCED carries on
         // writing the reference rather than a number of its own.
@@ -4227,9 +4272,21 @@ impl Settings {
     /// leaves the seeds unset altogether and BASIC writes nothing, which
     /// is the same neutrality every other unseeded set in this editor
     /// keeps: better a page that does nothing than one that guesses.
+    ///
+    /// THE BAKE ANSWERS IN sRGB, so every reading here is decoded before
+    /// it is asked for its OKLCh — the space OKLCh is defined over is
+    /// linear light (`theme/color.rs`), and libnacelle's own tests take
+    /// the same step (`to_linear().to_oklch()`). Reading encoded values
+    /// as if they were linear does not merely mis-report: BASIC WRITES
+    /// WHAT IT READS, so the page seeded itself from the colour it had
+    /// just written and the theme climbed on its own. Measured over the
+    /// master with all three sliders AT REST: the accent's L went
+    /// 0.8200 -> 0.8904 -> 0.9413 -> 0.9715 on successive visits, and
+    /// the gap between `ok` and `critical` opened from 121.0 deg to
+    /// 126.8 deg on the first visit alone.
     fn seed_tone_from_theme(&mut self) {
         let t = nacelle::theme::resolved();
-        let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i));
+        let col_of = |n: &str| nacelle::theme::id(n).map(|i| t.color(i).to_linear());
         let px = |n: &str| nacelle::theme::id(n).map(|i| t.px(i)).unwrap_or(0.0);
         self.tone = TONE_REST;
         let Some(accent) = col_of("palette.accent") else {
@@ -4272,18 +4329,26 @@ impl Settings {
             Glass, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
         // The sliders are HSV — brightness, saturation, hue — and the file
-        // wants OKLCh, so the value crosses HSV -> RGB -> OKLCh here. See
-        // `hsv_to_rgb` for why HSV: brightness 100 % must be the hue's own
-        // full brightness, never white. The alpha is the CALLER's: 1.0
-        // where the model forces opacity anyway, the seed's own where the
-        // model passes a colour's channel through (menu, tooltip, track).
+        // wants OKLCh, so the value crosses HSV -> sRGB -> LINEAR -> OKLCh
+        // here. See `hsv_to_rgb` for why HSV: brightness 100 % must be the
+        // hue's own full brightness, never white. The alpha is the
+        // CALLER's: 1.0 where the model forces opacity anyway, the seed's
+        // own where the model passes a colour's channel through (menu,
+        // tooltip, track).
+        //
+        // THE DECODE IS THE INVERSE OF THE SEEDING, and the pair has to
+        // stay a pair: `seed_editor_from_theme` puts the bake's ENCODED
+        // colour on the tracks, so the way back decodes before it asks for
+        // an OKLCh. Skipping it wrote a lighter colour than the slider
+        // showed, and — since the next visit seeds off what was written —
+        // every visit wrote a lighter one still.
         let of = |hsv: &[u32; 3], a: f32| {
             let (r, g, b) = hsv_to_rgb(
                 hsv[2] as f32,
                 hsv[1] as f32 / 100.0,
                 hsv[0] as f32 / 100.0,
             );
-            nacelle::theme::Color { r, g, b, a }.to_oklch()
+            nacelle::theme::Color { r, g, b, a }.to_linear().to_oklch()
         };
         // What the LIVE theme already dresses — the two `halo_dressed`
         // answers the model asks its caller for, read off the bake here so
@@ -4343,13 +4408,13 @@ impl Settings {
         edits.extend(surface_edits(
             Scope::Theme,
             hue,
-            span_of(self.surface_lift, 0.09),
-            scale_of(self.surface_chroma, 4.0),
+            span_of(self.surface_lift, SURFACE_LIFT_WALL),
+            scale_of(self.surface_chroma, SURFACE_CHROMA_CEILING),
         ));
         edits.extend(text_edits(
             Scope::Theme,
-            span_of(self.text_lift, 0.10),
-            scale_of(self.text_chroma, 3.0),
+            span_of(self.text_lift, TEXT_LIFT_WALL),
+            scale_of(self.text_chroma, TEXT_CHROMA_CEILING),
         ));
         // Only the roles a slider actually moved: six untouched authors
         // keep the theme's own words, references included.
@@ -4548,11 +4613,11 @@ impl Settings {
         let a_hue = px("hue.accent").rem_euclid(360.0);
         self.surface_own_hue = (s_hue - a_hue).abs() > 0.5;
         self.surface_hue = s_hue.round().clamp(0.0, 359.0) as u32;
-        self.surface_lift = span_back(px("surface.lift"), 0.09);
-        self.surface_chroma = scale_back(px("surface.chroma"), 4.0);
+        self.surface_lift = span_back(px("surface.lift"), SURFACE_LIFT_WALL);
+        self.surface_chroma = scale_back(px("surface.chroma"), SURFACE_CHROMA_CEILING);
         // TEXT.
-        self.text_lift = span_back(px("text.lift"), 0.10);
-        self.text_chroma = scale_back(px("text.chroma"), 3.0);
+        self.text_lift = span_back(px("text.lift"), TEXT_LIFT_WALL);
+        self.text_chroma = scale_back(px("text.chroma"), TEXT_CHROMA_CEILING);
         // SEVERITY: all seven authors seeded, NONE touched — the marks
         // are what keeps an untouched role out of the file.
         for (i, (_, token, _)) in SEVERITY_ROLES.iter().enumerate() {
@@ -5987,17 +6052,45 @@ impl Settings {
     /// FOLDED, this is one band and not three. There are no columns
     /// below `settings.col_min_w` — the rail's rows become the first
     /// bands of one vertical flow — so `page` is the whole interior and
-    /// `rail`/`sub` are nothing at all. `settings.page_fill` is the rung
-    /// the window BODY already stands on, so the folded window looks
-    /// exactly as it did before this existed: no stripes, and no case in
-    /// Rust to keep them away.
+    /// `rail`/`sub` are nothing at all.
+    ///
+    /// AND THE PAGE HAS NO BED OF ITS OWN: the WINDOW BODY is it. The
+    /// two columns are the DEVIATIONS from the rung the window already
+    /// stands on, and a deviation is the only thing there is to paint.
+    ///
+    /// WHY, MEASURED. `component.panel.fill` — what `window::frame`
+    /// lays — and `component.settings.page_fill` are the same rung of
+    /// the same ladder in the master, and that rung is TRANSLUCENT
+    /// (`@surface.panel`, alpha 0.82). A rectangle of it over the body
+    /// composes the alpha a second time and the page stops matching the
+    /// window it is in: over the field the window stands on, the body's
+    /// own pixel is #131E19 and the doubled one #15201B, an OKLab dE of
+    /// 0.0078 — small, plainly visible as a lighter panel, and larger
+    /// on a theme whose backdrop is further from the rung.
+    ///
+    /// AND THE TWO WORSE CASES, which is why this is not a comparison
+    /// of the two colours with a paint when they differ:
+    ///
+    /// * GLASS. Where `elev.panel.glass.rank` lifts the body off its
+    ///   fill altogether the body is a blur, and ANY bed over it — the
+    ///   same rung or another — is the end of the blur the BACKGROUND
+    ///   section just put there.
+    /// * A MOVED BODY. The editor's SOLID writes `component.panel.fill`
+    ///   (`edit::glass_edits`) and does not touch the settings tokens,
+    ///   so the two stop being equal the moment somebody picks a
+    ///   background — and a rule that paints when they differ would put
+    ///   the OLD rung back over the colour just chosen.
+    ///
+    /// The body is the page's bed under every one of those, because it
+    /// is the same surface and not a copy of it. The master's
+    /// `settings.page_fill` therefore says which rung the body stands
+    /// on and nothing else reads it; that is a note for the master's
+    /// next pass, not a look this window may take into its own hands.
     fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
         static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
         static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
-        static PAGE_FILL: OnceLock<TokenId> = OnceLock::new();
         let th = theme::resolved();
         let bands = [
-            (Some(nav.page), &PAGE_FILL, "component.settings.page_fill"),
             (nav.rail, &RAIL_FILL, "component.settings.rail_fill"),
             (nav.sub, &SUB_FILL, "component.settings.sub_fill"),
         ];
@@ -8878,6 +8971,10 @@ mod tests {
         // And back, on the same one control.
         s.perform(Act::EditorMode, 0.0);
         assert!(!s.editor_basic, "the switch is one-way");
+        // The preview these presses pushed is this test's, and it does
+        // not leave the room in it: another test reading the theme
+        // would be reading this one's editor session.
+        nacelle::theme::clear_preview();
     }
 
     /// BASIC's three sliders write the theme's AUTHORS, and nothing that
@@ -8978,6 +9075,10 @@ mod tests {
             value(&rest, "text.lift"),
             "the LIGHTNESS slider left the text ladder where it was"
         );
+        // The preview these presses pushed is this test's, and it does
+        // not leave the room in it: another test reading the theme
+        // would be reading this one's editor session.
+        nacelle::theme::clear_preview();
     }
 
     /// NEITHER MODE EATS THE OTHER'S WORK — the owner's condition on the
@@ -9111,6 +9212,194 @@ mod tests {
             [false; 7],
             "a trip through BASIC that moved nothing still claimed every role"
         );
+        // The preview these presses pushed is this test's, and it does
+        // not leave the room in it: another test reading the theme
+        // would be reading this one's editor session.
+        nacelle::theme::clear_preview();
+    }
+
+    /// THE CASCADE. Opening BASIC and touching nothing must leave the
+    /// theme exactly where it was found — however many times it is done.
+    ///
+    /// This is one bug measured from two ends, and both ends are here
+    /// because either one alone would have let it back in. BASIC SEEDS
+    /// ITSELF FROM THE LIVE BAKE and WRITES A PREVIEW BACK INTO IT, so
+    /// any error in the crossing between the bake's sRGB and the model's
+    /// OKLCh does not merely mis-read once: the next visit reads what
+    /// the last one wrote, and the theme walks. It did. With all three
+    /// sliders at rest the accent's OKLab L went
+    ///
+    /// ```text
+    ///   0.8200 -> 0.8904 -> 0.9413 -> 0.9715 -> 0.9869 -> ...
+    /// ```
+    ///
+    /// one step per visit, and the gap between `ok` and `critical` — the
+    /// severity pair the whole palette is told apart by — opened from
+    /// 121.0 deg to 126.8 deg on the FIRST visit alone. Nobody had
+    /// dragged anything.
+    ///
+    /// Every reading below is taken in LINEAR light, which is the space
+    /// OKLCh is defined over and the space libnacelle's own tests take
+    /// (`to_linear().to_oklch()`); the bake answers sRGB-encoded.
+    #[test]
+    fn a_quiet_trip_through_basic_leaves_the_theme_where_it_found_it() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        nacelle::theme::clear_preview();
+        fn live(name: &str) -> nacelle::theme::Color {
+            let t = theme::resolved();
+            col(t.color(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}"))))
+        }
+        let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
+        let hue_gap = |a: f32, b: f32| {
+            let d: f32 = (a - b).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        let sev_gap = || {
+            hue_gap(lch(live("severity.ok.text")).h, lch(live("severity.critical.text")).h)
+        };
+
+        let mut s = editor_open();
+        let start = lch(live("palette.accent"));
+        let start_gap = sev_gap();
+        // The theme the master ships, so a failure names both numbers.
+        assert!(
+            (start.l - 0.8200).abs() < 0.001 && (start_gap - 121.0).abs() < 0.5,
+            "the master moved under this test: accent L {} and ok/critical {start_gap}",
+            start.l
+        );
+
+        for trip in 1..=6 {
+            // In: the seeds come off the live bake and a preview goes
+            // back. Out: the fold hands the move to ADVANCED, which
+            // previews the same ten authors through its own tracks. Both
+            // directions are on this path, and both used to move it.
+            s.perform(Act::EditorMode, 0.0);
+            let inside = lch(live("palette.accent"));
+            assert!(
+                (inside.l - start.l).abs() < 0.004,
+                "visit {trip} lifted the accent on the way IN: {} -> {}",
+                start.l,
+                inside.l
+            );
+            assert!(
+                hue_gap(inside.h, start.h) < 1.0,
+                "visit {trip} turned the accent on the way in: {} -> {}",
+                start.h,
+                inside.h
+            );
+            assert!(
+                (sev_gap() - start_gap).abs() < 1.0,
+                "visit {trip} moved `ok` and `critical` apart: {start_gap} -> {}",
+                sev_gap()
+            );
+            s.perform(Act::EditorMode, 0.0);
+            let outside = lch(live("palette.accent"));
+            // Four thousandths of L is what the ADVANCED page's
+            // whole-number HSV tracks cost a colour on the way through
+            // (one percent of brightness); the defect this pins was
+            // seventy times that on the first visit alone.
+            assert!(
+                (outside.l - start.l).abs() < 0.004,
+                "visit {trip} lifted the accent on the way OUT: {} -> {}",
+                start.l,
+                outside.l
+            );
+            assert!(
+                (sev_gap() - start_gap).abs() < 1.0,
+                "visit {trip} left the severity pair moved: {start_gap} -> {}",
+                sev_gap()
+            );
+        }
+        // And the SLIDERS never moved: this is what "touched nothing"
+        // means, so a fold that quietly wrote a move would not pass here
+        // by moving the sliders to match it.
+        assert_eq!(s.tone, TONE_REST, "a quiet trip left BASIC's sliders off rest");
+
+        // THE SAME CLAIM WITH THE FOLD DOING WORK. A quiet trip never
+        // reaches `fold_tone_into_advanced` — a NEUTRAL move returns
+        // early — and the fold is the OTHER crossing between the tracks
+        // and OKLCh, so it gets its own six visits with a real move in
+        // each. A rotation moves hue and nothing else, so the lightness
+        // is what must stand still while the hue walks.
+        let mut turned = editor_open();
+        let base = lch(live("palette.accent"));
+        for step in 1..=6u32 {
+            turned.perform(Act::EditorMode, 0.0);
+            turned.tone[0] = 20;
+            turned.perform(Act::EditorMode, 0.0);
+            let now = lch(live("palette.accent"));
+            // Two hundredths, and the number is the ADVANCED page's own
+            // rounding: the fold lands on whole-number HSV tracks, so a
+            // hundredth of BRIGHTNESS is the finest thing it can hold and
+            // six landings in a row wander inside that. The defect this
+            // guards is an order larger — the crossing it pins moves a
+            // colour by the whole sRGB transfer curve.
+            assert!(
+                (now.l - base.l).abs() < 0.02,
+                "fold {step} moved the accent's LIGHTNESS: {} -> {}",
+                base.l,
+                now.l
+            );
+            assert!(
+                hue_gap(now.h, base.h + 20.0 * step as f32) < 4.0,
+                "fold {step} did not carry the rotation: {} is not {} + {} deg",
+                now.h,
+                base.h,
+                20 * step
+            );
+        }
+        nacelle::theme::clear_preview();
+        viewport_home();
+    }
+
+    /// The two crossings between the editor's sRGB tracks and the file's
+    /// OKLCh are INVERSES, measured on the master's own accent.
+    ///
+    /// The pair is `seed_editor_from_theme` -> `hsv_track_of` on the way
+    /// in and `editor_edits`' `of` on the way out. A theme opened and
+    /// saved with nothing touched must write the colour it opened on;
+    /// what it wrote instead was a colour lighter by the sRGB transfer
+    /// curve, which is the whole of the cascade above in one hop.
+    #[test]
+    fn the_editors_colour_tracks_and_the_file_are_inverses() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let t = theme::resolved();
+        let accent =
+            col(t.color(nacelle::theme::id("palette.accent").expect("no accent")));
+        let s = editor_open();
+        // What the page would write for the accent, with no slider moved.
+        let written = s
+            .editor_edits()
+            .iter()
+            .find(|e| e.token == "palette.accent")
+            .map(|e| e.value.clone())
+            .expect("the editor wrote no accent");
+        let inside = written
+            .trim()
+            .strip_prefix("oklch(")
+            .and_then(|v| v.strip_suffix(')'))
+            .expect("the accent is not an oklch literal");
+        let n: Vec<f32> =
+            inside.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let want = accent.to_linear().to_oklch();
+        // A track carries whole numbers, so the trip costs a percent of
+        // brightness and half a degree of hue and nothing else.
+        assert!(
+            (n[0] - want.l).abs() < 0.004,
+            "the page would save the accent at L {} instead of {}",
+            n[0],
+            want.l
+        );
+        assert!(
+            (n[2] - want.h).abs().min(360.0 - (n[2] - want.h).abs()) < 1.0,
+            "the page would save the accent at hue {} instead of {}",
+            n[2],
+            want.h
+        );
     }
 
     /// ŻYCZENIE 2b, END TO END AND ON THE REAL PIPELINE: a drag of
@@ -9124,6 +9413,16 @@ mod tests {
     /// is no step where a hue could be lost and nobody notice.
     ///
     /// The owner's own pair: a column's CONTAINER and a control's PLATE.
+    ///
+    /// EVERY READING IS DECODED FIRST. "One hue at three lightnesses" is
+    /// a claim about OKLCh, OKLCh is defined over LINEAR light, and the
+    /// bake answers sRGB-encoded — so a reading taken without
+    /// `to_linear` measures a different quantity and the sentence stops
+    /// meaning what it says. On the master's own bands it is not a
+    /// rounding either: the three lightnesses read 0.2698 / 0.4036 /
+    /// 0.4840 encoded against 0.1150 / 0.1780 / 0.2320 decoded, and the
+    /// hue the three are supposed to SHARE spread 166.46 / 169.28 /
+    /// 169.04 instead of standing on one number.
     #[test]
     fn a_basic_hue_drag_turns_the_window_and_keeps_one_hue_in_three_shades() {
         let _g = crate::widgets::theme_test_lock();
@@ -9132,7 +9431,7 @@ mod tests {
         let mut s = editor_open();
         s.perform(Act::EditorMode, 0.0);
 
-        let lch = |c: nacelle::theme::Color| c.to_oklch();
+        let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
         let hue_gap = |a: f32, b: f32| {
             let d = (a - b).rem_euclid(360.0);
             d.min(360.0 - d)
@@ -9175,8 +9474,9 @@ mod tests {
             );
             // DIFFERENT SHADES — the container is a bed and the plate is
             // a control, and no reader may have to guess which is which.
+            // Measured on the master, decoded: 0.1780 against 0.8200.
             assert!(
-                (plate.l - sub.l).abs() > 0.20,
+                (plate.l - sub.l).abs() > 0.40,
                 "at {turn} deg a column and a button plate share a lightness: {} vs {}",
                 sub.l,
                 plate.l
@@ -9188,6 +9488,20 @@ mod tests {
                 rail.l,
                 sub.l,
                 page.l
+            );
+            // ONE hue between themselves, and this is the assertion the
+            // SPACE is load-bearing for: the three bands take their h
+            // from one token (`@surface.hue`), so decoded they stand on
+            // ONE number — a half-degree is float noise and nothing
+            // else. Read encoded they spread nearly three degrees, and
+            // a reader could not tell that apart from a real drift.
+            let spread = hue_gap(rail.h, sub.h).max(hue_gap(sub.h, page.h));
+            assert!(
+                spread < 0.5,
+                "at {turn} deg the three bands are on three hues: {} {} {}",
+                rail.h,
+                sub.h,
+                page.h
             );
             // THE EXCEPTION the owner carved out: severity carries
             // MEANING, so the roles stay different COLOURS.
@@ -9210,9 +9524,24 @@ mod tests {
     /// The BASIC sliders notch by what the PIPELINE can show, and the
     /// depth that says so comes off SETTINGS -> COLOR.
     ///
-    /// Coarse at eight bits, one track unit — the finest a whole-number
-    /// track has — once the depth is fine enough that a notch is smaller
-    /// than a unit. Never zero, or a press would move nothing.
+    /// AND PAST TEN BITS THE TRACK IS THE LIMIT, WHICH IS NOT A DEFECT.
+    /// On the master's seed (chroma 0.1531) the pipeline's own notch is
+    ///
+    /// ```text
+    ///    8 bits   1.467 deg   0.02561   0.003922   ->  1, 3, 2 units
+    ///   10 bits   0.366 deg   0.00638   0.000978   ->  1, 1, 1
+    ///   12 bits   0.091 deg   0.00159   0.000244   ->  1, 1, 1
+    ///   16 bits   0.006 deg   0.00010   0.000015   ->  1, 1, 1
+    /// ```
+    ///
+    /// — a degree of hue, a percent of saturation and a fiftieth of the
+    /// lightness span are what these tracks HAVE, so from ten bits up
+    /// the answer is the track's own resolution and the floor is what
+    /// keeps a press from moving nothing at all. The alternative to a
+    /// coarse notch here is not a finer one, it is a finer TRACK — a
+    /// change to the control, and the owner picked the coarse side of
+    /// this exact trade ("a notch coarser than the pipeline is honest").
+    /// So the numbers above are pinned rather than left to drift.
     #[test]
     fn the_basic_notch_comes_from_the_colour_depth() {
         let _g = crate::widgets::theme_test_lock();
@@ -9220,11 +9549,23 @@ mod tests {
         s.perform(Act::EditorMode, 0.0);
         let seeds = s.tone_seeds.expect("no seeds");
         assert!(seeds.accent.c > 0.0, "the master's accent is grey — the test is blind");
+        // The seed's chroma is what the two derived notches divide by, so
+        // it is named here: the master's mint, read in linear light.
+        assert!(
+            (seeds.accent.c - 0.1531).abs() < 0.001,
+            "the seed's chroma moved to {} and the notches below with it",
+            seeds.accent.c
+        );
 
         let mut last = [0u32; 3];
-        for (i, bits) in [8u32, 10, 12, 16].iter().enumerate() {
+        for (i, (bits, want)) in
+            [(8u32, [1u32, 3, 2]), (10, [1, 1, 1]), (12, [1, 1, 1]), (16, [1, 1, 1])]
+                .iter()
+                .enumerate()
+        {
             s.color_depth = *bits;
             let step = s.tone_step();
+            assert_eq!(step, *want, "the notch at {bits} bits moved");
             for k in 0..3 {
                 assert!(step[k] >= 1, "a slider at {bits} bits steps by nothing");
                 if i > 0 {
@@ -9247,22 +9588,40 @@ mod tests {
             (0..3).any(|k| coarse[k] > fine[k]),
             "the notch is the same at 8 bits as at 16 — the depth is not wired in"
         );
-        // Nobody has said: the model's own floor, and the same number
-        // this program's config carries as its default.
+        // Nobody has said: the config answers with the toolkit's own
+        // number, which it TAKES rather than repeats — so this is a
+        // statement about where the answer lives, not two constants
+        // being compared and hoped about.
         assert_eq!(
-            nacelle::theme::edit::DEFAULT_DEPTH_BITS,
             crate::config::model::ColorConf::DEPTH,
-            "the toolkit and the config disagree about the depth nobody set"
+            nacelle::theme::edit::DEFAULT_DEPTH_BITS
         );
+        s.color_depth = crate::config::model::ColorConf::DEPTH;
+        assert_eq!(s.tone_step(), coarse, "the depth nobody set is not the coarse one");
+        // The preview these presses pushed is this test's, and it does
+        // not leave the room in it: another test reading the theme
+        // would be reading this one's editor session.
+        nacelle::theme::clear_preview();
     }
 
     /// The slider unit maps, both directions — a value must survive
     /// seed -> slider -> file, or a theme saved and reopened creeps a
-    /// notch per sitting. The walls are the MODEL's clamps.
+    /// notch per sitting. The walls are the BAKE's own, taken from it.
     #[test]
     fn the_editor_slider_maps_survive_the_round_trip() {
+        // The LIGHTNESS track runs to the wider of the two ladder walls,
+        // and `TONE_LIGHT_SPAN` names which of them that is.
+        assert!(
+            TEXT_LIFT_WALL >= SURFACE_LIFT_WALL
+                && (TONE_LIGHT_SPAN - TEXT_LIFT_WALL).abs() < f32::EPSILON,
+            "the wider ladder wall changed sides: surface {SURFACE_LIFT_WALL}, \
+             text {TEXT_LIFT_WALL}"
+        );
         // The symmetric spans: 50 is exactly zero, the ends the walls.
-        for (span, wall) in [(0.09f32, 0.09f32), (0.10, 0.10)] {
+        for (span, wall) in [
+            (SURFACE_LIFT_WALL, SURFACE_LIFT_WALL),
+            (TEXT_LIFT_WALL, TEXT_LIFT_WALL),
+        ] {
             assert_eq!(span_back(0.0, span), 50);
             assert!((span_of(50, span)).abs() < 1e-6);
             assert!((span_of(0, span) + wall).abs() < 1e-6);
@@ -10122,23 +10481,38 @@ mod tests {
         viewport_home();
     }
 
-    /// ŻYCZENIE 1, MEASURED HERE. The three columns are painted in three
-    /// DIFFERENT colours of ONE hue, and every one of the three comes
-    /// out of the theme.
+    /// ŻYCZENIE 1, MEASURED HERE. The three columns are three DIFFERENT
+    /// colours of ONE hue, and every one of the three comes out of the
+    /// theme.
     ///
-    /// The window's half of the claim is what this can check: that the
-    /// three bands are drawn, that each is the box [`Panes`] cut, and
-    /// that each carries the colour ITS OWN TOKEN resolves to — no
-    /// fourth colour mixed in Rust, and no two bands sharing a token.
-    /// That the three tokens are three rungs of one ladder is the
-    /// MASTER's claim and is measured over the master, in libnacelle
-    /// (`the_three_settings_bands_are_three_shades_of_one_hue`).
+    /// The window's half of the claim is what this can check: that each
+    /// bed is the box [`Panes`] cut and carries the colour ITS OWN TOKEN
+    /// resolves to — no fourth colour mixed in Rust, and no two beds
+    /// sharing a token. That the three tokens are three rungs of one
+    /// ladder is the MASTER's claim and is measured over the master, in
+    /// libnacelle (`the_three_settings_bands_are_three_shades_of_one_hue`).
     ///
-    /// The folded window is the other half: one band and not three, so
-    /// the vertical list cannot come out striped.
+    /// TWO OF THE THREE ARE PAINTED HERE. The page's bed is the WINDOW
+    /// BODY — `component.settings.page_fill` points at the same rung
+    /// `component.panel.fill` does — and that rung is translucent, so
+    /// laying it again over the body composes its alpha twice. Measured
+    /// on the master, over the field the window stands on: the body's
+    /// own pixel is #131E19 and the doubled one #15201B, an OKLab dE of
+    /// 0.0078. It is the same for the FOLDED window, where the page is
+    /// the whole interior.
+    ///
+    /// Every lightness and hue below is read in LINEAR light: OKLCh is
+    /// defined over it, the bake answers sRGB-encoded, and the two are
+    /// far apart — the rungs read 0.2698 / 0.4036 / 0.4840 encoded
+    /// against 0.1150 / 0.1780 / 0.2320 decoded.
     #[test]
     fn the_three_columns_are_three_shades_the_theme_chose() {
         let _g = crate::widgets::theme_test_lock();
+        // The MASTER's own bands, so a theme-editor preview left standing
+        // by another test is not what this measures — a preview moves
+        // `component.panel.fill` (`edit::glass_edits`) and would answer
+        // for the body with a colour nobody in this test chose.
+        nacelle::theme::clear_preview();
         let s = furnished();
         let mut fonts = nacelle::font::FontSystem::new();
         /// Every rect one call to [`Settings::draw_bands`] laid down.
@@ -10166,7 +10540,7 @@ mod tests {
                 .collect();
             (out, nav, content)
         }
-        let lch = |c: nacelle::theme::Color| c.to_oklch();
+        let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
         let hue_gap = |a: f32, b: f32| {
             let d = (a - b).rem_euclid(360.0);
             d.min(360.0 - d)
@@ -10176,22 +10550,21 @@ mod tests {
         theme::set_viewport(1080.0, 1.0);
         let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
         assert!(!nav.folded, "the window folded at a width it fits in");
-        assert_eq!(drawn.len(), 3, "three columns, three beds");
+        assert_eq!(drawn.len(), 2, "two columns to bed; the page's bed is the body");
         // Each band is its column's own rectangle — the same cut the
         // rows are laid in, or the bed and what stands on it would
         // disagree about where the column is.
         let boxes: Vec<[f32; 4]> = drawn.iter().map(|(r, _)| *r).collect();
+        let same = |b: &[f32; 4], r: Rect| {
+            let want = [r.x, r.y, r.w, r.h];
+            b.iter().zip(want.iter()).all(|(a, w)| (a - w).abs() < 0.01)
+        };
         for (name, r) in [
-            ("page", nav.page),
             ("rail", nav.rail.expect("no rail")),
             ("sub", nav.sub.expect("no column of pages")),
         ] {
-            let want = [r.x, r.y, r.w, r.h];
             assert!(
-                boxes.iter().any(|b| b
-                    .iter()
-                    .zip(want.iter())
-                    .all(|(a, w)| (a - w).abs() < 0.01)),
+                boxes.iter().any(|b| same(b, r)),
                 "the {name} column has no bed of its own"
             );
         }
@@ -10207,7 +10580,7 @@ mod tests {
             of("component.settings.sub_fill"),
         ];
         for (i, (_, got)) in drawn.iter().enumerate() {
-            let w = want[i];
+            let w = want[i + 1];
             assert!(
                 (got.r - w.r).abs() < 1e-6
                     && (got.g - w.g).abs() < 1e-6
@@ -10215,59 +10588,112 @@ mod tests {
                 "band #{i} was not painted in the colour its token names"
             );
         }
+        // AND THE PAGE KEEPS THE BODY'S OWN PIXEL. Nothing is laid over
+        // it, so what stands there is what `window::frame` laid.
+        let body = col(th.bed(nacelle::theme::id("component.panel.fill").expect("no body")));
+        assert!(
+            !boxes.iter().any(|b| same(b, nav.page)),
+            "the page was bedded a second time over the window body"
+        );
+        // The measurement that says the defect was real and that this
+        // test can still see it: the rung is translucent, and laying it
+        // twice does NOT come out where laying it once does. Over the
+        // field the window stands on, #131E19 against #15201B.
+        assert!(body.a < 1.0, "the body's rung went opaque — this test is measuring nothing");
+        let field = of("surface.base");
+        let once = nacelle::theme::Color::composite_as_rendered(body, field);
+        let twice = nacelle::theme::Color::composite_as_rendered(want[0], once);
+        let doubled = nacelle::theme::Color::delta_e_ok(once.to_linear(), twice.to_linear());
+        assert!(
+            doubled > 0.005,
+            "the page's rung and the body's no longer compose to two different \
+             pixels ({} vs {}) — either the master parted them or the alpha went, \
+             and this test can no longer see the defect it guards",
+            once.to_hex(),
+            twice.to_hex()
+        );
         // THREE COLOURS, ONE HUE — the owner's "hue ten sam, odcień
-        // koloru inny", read off the pixels the window actually laid.
-        let (page, rail, sub) = (lch(want[0]), lch(want[1]), lch(want[2]));
+        // koloru inny", read off what the window really shows: the two
+        // beds it laid, and the BODY standing where the page is.
+        let (page, rail, sub) = (lch(body), lch(want[1]), lch(want[2]));
+        // The page's shade is the rung its token names, which is the
+        // master's way of saying "the body is the page's bed".
+        assert!(
+            (page.l - lch(want[0]).l).abs() < 1e-4,
+            "the body is no longer standing on the rung `settings.page_fill` names"
+        );
         for (a, b, n) in [(page, rail, "page/rail"), (page, sub, "page/sub"), (rail, sub, "rail/sub")]
         {
-            // Six degrees, and the number has a reason. libnacelle holds
-            // each rung to 2 deg of the SEED over the master; this pair
-            // is two ends of that ladder, each of them rounded into sRGB
-            // on the way to the screen, and the rounding turns a hue by a
-            // degree or so more at the dark end than at the light one. So
-            // the pair's tolerance is the rung's, doubled and rounded up.
-            // It is nowhere near a colour DIFFERENCE: the severity roles,
-            // which are meant to be told apart by hue, sit more than 15
-            // deg from one another.
+            // Two degrees, which is what libnacelle holds each rung to
+            // against the SEED over the master — read in linear light
+            // the three sit on ONE number (166.46 deg on the master's
+            // mint) because they take their hue from ONE token, and the
+            // tolerance is float noise and the sRGB rounding. Read
+            // encoded they spread nearly three degrees and this
+            // assertion would fail, which is the point of the space.
             assert!(
-                hue_gap(a.h, b.h) < 6.0,
-                "{n}: two settings columns are two COLOURS ({} vs {} deg), not two shades",
+                hue_gap(a.h, b.h) < 2.0,
+                "{n}: two settings beds are two COLOURS ({} vs {} deg), not two shades",
                 a.h,
                 b.h
             );
+            // The master's rungs, decoded: 0.1150 / 0.1780 / 0.2320, so
+            // the smaller of the two steps is 0.054.
             assert!(
                 (a.l - b.l).abs() > 0.03,
-                "{n}: two settings columns are the same shade ({} vs {})",
+                "{n}: two settings beds are the same shade ({} vs {})",
                 a.l,
                 b.l
             );
         }
 
-        // FOLDED: one bed over the whole interior. There are no columns
-        // to shade differently, so there is nothing to stripe.
+        // FOLDED: NO bed at all. There are no columns to shade
+        // differently — the page is the whole interior and the body is
+        // already standing on the page's own rung — so the folded window
+        // looks exactly as it did before any of this existed.
         let mut folded_seen = false;
         for h in HEIGHTS {
             theme::set_viewport(h, 1.0);
-            let (drawn, nav, content) = bands(&s, &mut fonts, h);
+            let (drawn, nav, _) = bands(&s, &mut fonts, h);
             if !nav.folded {
                 continue;
             }
             folded_seen = true;
-            assert_eq!(drawn.len(), 1, "a folded window painted more than one bed");
-            let r = drawn[0].0;
-            assert!(
-                (r[0] - content.x).abs() < 0.01
-                    && (r[2] - content.w).abs() < 0.01
-                    && (r[3] - content.h).abs() < 0.01,
-                "the folded window's one bed is not its whole interior"
-            );
+            assert!(drawn.is_empty(), "a folded window bedded its interior twice");
         }
         assert!(
             folded_seen,
             "no window height in HEIGHTS folds — the folded band was never measured"
         );
+
+        // AND A THEME STILL MOVES THE PAGE'S BED — through the token
+        // that IS the page's bed. The body's own fill is what stands
+        // under the page, so re-pointing it moves the page and nothing
+        // in this window has to be told: the two columns keep their own
+        // tokens and stay where the theme put them.
+        {
+            let _t = crate::widgets::Themed::new(
+                "page-bed",
+                "[component]\npanel.fill = @surface.void\n",
+            );
+            theme::set_viewport(1080.0, 1.0);
+            let th = theme::resolved();
+            let moved = col(th.bed(
+                nacelle::theme::id("component.panel.fill").expect("no body"),
+            ));
+            let void =
+                col(th.color(nacelle::theme::id("surface.void").expect("no void")));
+            assert!(
+                (moved.r - void.r).abs() < 1e-6 && (moved.a - void.a).abs() < 1e-6,
+                "the fixture did not move the body's bed"
+            );
+            let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
+            assert!(!nav.folded);
+            assert_eq!(drawn.len(), 2, "a moved body grew the window a third bed");
+        }
         viewport_home();
     }
+
 
     /// The rail shows every section it has, at every window height the
     /// program is built for.
@@ -10893,6 +11319,7 @@ mod tests {
             | Ctrl::Custom { .. } => Vec::new(),
         }
     }
+
 }
 
 /// Steps a picker through None -> first -> ... -> last -> None.
@@ -10908,5 +11335,3 @@ fn next_of(list: &[String], current: Option<String>) -> Option<String> {
         },
     }
 }
-
-
