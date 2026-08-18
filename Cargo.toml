@@ -104,3 +104,14 @@ opt-level = 3
 # ------------------------------------------------------------------------
 
 
+
+# TEMPORARY, FOR THE feat/single-rail WORKTREE ONLY. The one navigation
+# column needs three tokens the toolkit does not ship yet
+# (settings.rail_indent, settings.rail_guide_w, settings.rail_guide_x and
+# component.settings.rail_guide) and no longer reads two the toolkit was
+# still declaring (settings.subrail_w_frac, component.settings.sub_fill).
+# Both halves live in libnacelle/src/theme/default.theme, so this build
+# has to see the sibling worktree rather than the pinned commit. REMOVE
+# THIS BLOCK once libnacelle's branch is merged and Cargo.lock re-pinned.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }

@@ -15,24 +15,47 @@
 //! that does not fit is a scroll away rather than a row drawn on the
 //! desktop behind the window, and a list is as long as it likes.
 //!
-//! THREE PANELS, NOT A STACK OF PAGES (owner, 2026-08-16, the
-//! specification's annex). The window carries a permanent navigation
-//! RAIL down its left edge — every section of the window under the
-//! headings its group stands for — and, for a section that has pages of
-//! its own, a second column of those pages beside it. What is left is
-//! the page. There is no MENU page any more: the window opens on LOOK
-//! AND FEEL, the rail is how a section is reached, and Escape from a
-//! section is the window's own last layer rather than a step back to a
-//! menu that no longer exists. Both navigation columns are the same
-//! width by the theme's own word (`settings.subrail_w_frac =
-//! @settings.rail_w_frac`) and the page takes the whole of the rest.
+//! TWO PANELS, NOT A STACK OF PAGES (owner, 2026-08-16, the
+//! specification's annex; one column instead of two by his mock-up of
+//! 2026-08-18). The window carries a permanent navigation RAIL down its
+//! left edge — every section of the window under the headings its group
+//! stands for — and what is left is the page. There is no MENU page any
+//! more: the window opens on LOOK AND FEEL, the rail is how a section is
+//! reached, and Escape from a section is the window's own last layer
+//! rather than a step back to a menu that no longer exists.
 //!
-//! The layout is FLEX: where the three panels cannot all have their
-//! width — `settings.col_min_w` for the page, with the usual device-px
-//! floor — the whole window folds into ONE vertical list, the rail's
-//! entries first, then the section's pages, then the page itself, all
-//! inside the one scroll. The Tab order is the same in both shapes,
-//! because registration follows the DESCRIPTION and never the geometry.
+//! A SECTION THAT HAS PAGES OF ITS OWN UNFOLDS THEM UNDER ITSELF
+//! ([`Ctrl::Expander`]), indented by `settings.rail_indent` and propped
+//! against the hairline `settings.rail_guide_*` describes — the shape
+//! GNOME calls an expander row. They used to stand in a SECOND column
+//! beside the rail, and the column is gone with the token that sized it:
+//! two columns of navigation spent a fifth of the window saying what one
+//! indent says, and the deeper the sections go the worse that trade
+//! gets.
+//!
+//! The layout is FLEX, and on TWO measurements since the columns became
+//! one. Where the two panels cannot both have their width —
+//! `settings.col_min_w` for the page, with the usual device-px floor —
+//! OR where the rail cannot show what it holds in the height it has
+//! ([`Settings::panes`]), the whole window folds into ONE vertical list:
+//! the rail's entries first, a section's pages still under it, then the
+//! page itself, all inside the one scroll. The Tab order is the same in
+//! both shapes, because registration follows the DESCRIPTION and never
+//! the geometry.
+//!
+//! THE HEIGHT HALF IS NEW AND IT COSTS SOMETHING, which is worth saying
+//! plainly. The rail has no scroll of its own, so an entry past its
+//! bottom edge is a section nothing can reach; a section's pages now
+//! live in the rail, and on the master a window under about 1080 px
+//! tall cannot seat every entry AND the deepest section's pages. Such a
+//! window folds — on every page, not only inside that section, because
+//! the fold is the WINDOW's shape ([`Settings::rail_reach`]). Before
+//! this change those windows folded too, on WIDTH, because they could
+//! not seat two navigation columns; what is left is a band of heights
+//! that used to stand in columns and now does not. The way to buy it
+//! back is the toolkit's own answer to content that does not fit — a
+//! bar and a wheel on the rail (`nacelle::view::scroll`) — and that is
+//! a piece of work, not a line.
 //! It follows it off the frame as well: a row the scroll has carried
 //! out of sight is not drawn and is not a target, but it keeps its
 //! place in the route out of the rect the layout gave it, and the
@@ -137,7 +160,7 @@ enum View {
 ///
 /// The ladder is TWO rungs shorter than it was (owner, 2026-08-16): a
 /// page the navigation reaches in one press has nothing to go back TO,
-/// so every section of the rail and every page of the second column
+/// so every section of the rail and every page a section unfolds
 /// answers `None` here and wears CLOSE. What is left is what the
 /// navigation does not list — the theme editor, which stands at the head
 /// of the THEMES list, and the reset confirmation, which is what the
@@ -466,8 +489,7 @@ fn focus_id(act: Act) -> FocusId {
         OpenColor => FocusId::of("settings.rail.color"),
         OpenBlur => FocusId::of("settings.rail.blur"),
         OpenAddons => FocusId::of("settings.rail.addons"),
-        // The second column: the pages of the section the rail is
-        // standing on.
+        // The pages a section unfolds under itself on the rail.
         OpenSets => FocusId::of("settings.lookfeel.sets"),
         OpenFont => FocusId::of("settings.lookfeel.fonts"),
         OpenSoundLevels => FocusId::of("settings.lookfeel.sound_levels"),
@@ -1402,6 +1424,25 @@ enum Ctrl {
     /// `selected` rung.
     Drop { list: ListId },
     Button { label: Text, kind: BtnKind, act: Act },
+    /// A rail entry that HAS PAGES OF ITS OWN: the section's button,
+    /// the disclosure triangle that promises them, and the entries
+    /// themselves, which stand under it — one `settings.rail_indent`
+    /// in, propped against `settings.rail_guide_*` — while the section
+    /// is the one in force.
+    ///
+    /// THE PAGES ARE A FIELD OF THE ROW AND NOT A SECOND TABLE. A
+    /// lookup keyed by the act (which is what the second column was)
+    /// can disagree with the row that owns it — a triangle on an entry
+    /// with nothing behind it, or pages under an entry that does not
+    /// draw one — and neither half can notice. Here the arrow, the
+    /// indent, the guide, the hit map and the focus chain are all read
+    /// off the same `kids`, so "this entry has pages" is one fact.
+    ///
+    /// WHICH MEANS THE ARROW IS ALWAYS A PROMISE (the owner's mock-up,
+    /// §3: an arrow on every entry would be half the entries lying).
+    /// A section that IS its page stays a plain [`Ctrl::Button`] and
+    /// cannot grow one: there is no field to put it in.
+    Expander { label: Text, kind: BtnKind, act: Act, kids: &'static [Row] },
     /// Several buttons in ONE row, centred together, `settings.bar_gap`
     /// apart: the editor's SAVE · SAVE AS · CANCEL. Each plate is as
     /// wide as its own label plus the theme's `button.pad_x`, never
@@ -1711,7 +1752,7 @@ fn zone_gap() -> f32 {
 /// `settings.col_min_w` with its device-px floor, the pair every other
 /// minimum in this theme is written as.
 ///
-/// One reader for the bands and one for the window's own three panels:
+/// One reader for the bands and one for the window's own two panels:
 /// the page and the columns inside it fold on the same word, which is
 /// why "there is no room" means one thing in this window and not two.
 ///
@@ -1810,10 +1851,13 @@ struct Page {
 /// exactly as the FONT page writes its two.
 static RAIL_ROWS: [Row; 10] = [
     row_after(Ctrl::Section { title: "APPEARANCE" }, Gap::None),
-    row(Ctrl::Button {
+    // The one section with pages of its own, and therefore the one
+    // entry that carries a triangle ([`Ctrl::Expander`]).
+    row(Ctrl::Expander {
         label: Text::Fixed("LOOK AND FEEL"),
         kind: BtnKind::Wide,
         act: Act::OpenLookFeel,
+        kids: &LOOKFEEL_PAGES,
     }),
     // Colour is a conversation with a Wayland compositor; where there
     // is none, the entry is painted shut — visible, not clickable.
@@ -1871,7 +1915,8 @@ static RAIL_ROWS: [Row; 10] = [
     }),
 ];
 
-/// The second column of LOOK AND FEEL: its pages, in reading order.
+/// The pages of LOOK AND FEEL, in reading order — the rows that unfold
+/// UNDER it on the rail ([`Ctrl::Expander`]).
 ///
 /// SETS is the section's own page — the three lists that say which
 /// installed theme, layout and sound set are in force — and it stands
@@ -1885,7 +1930,7 @@ static RAIL_ROWS: [Row; 10] = [
 /// theme it edits is chosen, and the confirmation is what the pinned
 /// footer opens — a destructive control one press from every page of
 /// the window is exactly the friction decision §2a exists to keep.
-static LOOKFEEL_SUBRAIL_ROWS: [Row; 3] = [
+static LOOKFEEL_PAGES: [Row; 3] = [
     row(Ctrl::Button {
         label: Text::Fixed("SETS"),
         kind: BtnKind::Wide,
@@ -1903,37 +1948,15 @@ static LOOKFEEL_SUBRAIL_ROWS: [Row; 3] = [
     }),
 ];
 
-/// The navigation as BANDS, for the folded window: the same two tables,
-/// laid down the one list instead of beside it. Statics because a band
-/// is `&'static` everywhere else in this file.
-static RAIL_ZONE: Zone = Zone::Flow { when: always, rows: &RAIL_ROWS };
-static LOOKFEEL_SUBRAIL_ZONE: Zone =
-    Zone::Flow { when: always, rows: &LOOKFEEL_SUBRAIL_ROWS };
-
-/// The second column of a section: its entries, and the BAND those same
-/// entries stand in once the window has folded. One table for both,
-/// because the two are one column drawn two ways.
+/// The navigation as a BAND, for the folded window: the same table,
+/// laid down the one list instead of beside the page. A static because
+/// a band is `&'static` everywhere else in this file.
 ///
-/// A section with no answer here has no second column at all and its
-/// page starts straight after the rail (owner: "sekcje-formularze idą
-/// wprost do treści").
-fn subrail(view: View) -> Option<(&'static [Row], &'static Zone)> {
-    match rail_act(view) {
-        Act::OpenLookFeel => Some((&LOOKFEEL_SUBRAIL_ROWS, &LOOKFEEL_SUBRAIL_ZONE)),
-        _ => None,
-    }
-}
-
-/// The pages of a section, or `None` where the section IS its page.
-fn subrail_rows(view: View) -> Option<&'static [Row]> {
-    subrail(view).map(|(rows, _)| rows)
-}
-
-/// The band a section's second column stands in when the window has
-/// folded — the same rows, laid down the one list instead of beside it.
-fn subrail_zone(view: View) -> Option<&'static Zone> {
-    subrail(view).map(|(_, zone)| zone)
-}
+/// ONE TABLE AND NOT TWO SINCE THE COLUMNS BECAME ONE. A section's
+/// pages are rows of this table now ([`Ctrl::Expander`]), so the folded
+/// window inherits the unfolding for nothing — the same entry, the same
+/// triangle, the same indent, one walker.
+static RAIL_ZONE: Zone = Zone::Flow { when: always, rows: &RAIL_ROWS };
 
 /// The rail entry a view stands under — its SECTION. Every page of LOOK
 /// AND FEEL, however deep, marks the one entry; the other sections are
@@ -1953,11 +1976,12 @@ fn rail_act(view: View) -> Act {
     }
 }
 
-/// The second column's entry for a view, where the column lists it.
-/// The two pages the column does not list ([`LOOKFEEL_SUBRAIL_ROWS`])
-/// answer `None`, and nothing in that column is marked while they
-/// stand — which is true: neither of them is one of its entries.
-fn sub_act(view: View) -> Option<Act> {
+/// The entry UNDER a section that stands for this view, where the
+/// section unfolds one for it. The two pages [`LOOKFEEL_PAGES`] does
+/// not list answer `None`, and nothing under the section is marked
+/// while they stand — which is true: neither of them is one of its
+/// entries.
+fn kid_act(view: View) -> Option<Act> {
     match view {
         View::LookFeel => Some(Act::OpenSets),
         View::Font => Some(Act::OpenFont),
@@ -1976,7 +2000,7 @@ fn sub_act(view: View) -> Option<Act> {
 ///
 /// The two doors that used to stand under them — SOUND LEVELS and
 /// FONTS — are entries of the section's own column now
-/// ([`LOOKFEEL_SUBRAIL_ROWS`]). They are the same two pages, reached in
+/// ([`LOOKFEEL_PAGES`]). They are the same two pages, reached in
 /// one press from anywhere in the section instead of two from the menu,
 /// and leaving them here as well would be one subject with two doors
 /// standing open beside each other.
@@ -3705,6 +3729,35 @@ impl Metrics {
         }
     }
 
+    /// The same metrics with the RAIL's own vertical rhythm
+    /// (`settings.rail_row_gap`) in place of the form's
+    /// (`modal.row_gap`).
+    ///
+    /// TWO RHYTHMS BECAUSE THERE ARE TWO QUESTIONS. A page's break is
+    /// how far apart two CONTROLS have to stand to be read as two
+    /// things you operate; a rail's is how far apart two NAMES have to
+    /// stand to be read as two places you can go — and a name is the
+    /// smaller claim. It stopped being one question the day a section's
+    /// pages moved into the rail: the column now has to hold every
+    /// section AND the open one's pages, at a height nothing scrolls,
+    /// so the rhythm it can afford is not the rhythm a page can afford.
+    /// The alternative is real and worse — at the form's break the
+    /// unfolded rail outgrows its column at 1080p, and an over-long
+    /// rail folds the whole window ([`Settings::panes`]).
+    ///
+    /// ASKED BY THE DRAWING AND BY THE MEASUREMENT, from the one place,
+    /// so the rail cannot be laid at one rhythm and measured at another.
+    /// FOLDED there is no rail: its entries are rows of the page's one
+    /// list and take that list's rhythm, which is what being part of
+    /// the list means.
+    fn rail(self) -> Metrics {
+        static RAIL_GAP: OnceLock<TokenId> = OnceLock::new();
+        Metrics {
+            gap: theme::resolved().px(tok(&RAIL_GAP, "settings.rail_row_gap")).max(0.0),
+            ..self
+        }
+    }
+
     fn space(&self, g: Gap) -> f32 {
         match g {
             Gap::None => 0.0,
@@ -3765,30 +3818,72 @@ fn content_rect(modal: Rect) -> Rect {
     )
 }
 
-/// One navigation column's width: a fraction of the content box, never
+/// The navigation column's width: a fraction of the content box, never
 /// under the theme's own minimum and never under its device-px floor —
 /// the three-part rule every width in this window is written with.
 ///
-/// The rail and the second column ask two tokens, and the master gives
-/// the second the first's own value (`settings.subrail_w_frac =
-/// @settings.rail_w_frac`), which is the owner's decision that the two
-/// are equal said WHERE such a thing is said. Nothing here knows they
-/// are equal; if a theme parts them, they part.
-fn nav_w(content: Rect, cell: &'static OnceLock<TokenId>, frac: &'static str) -> f32 {
+/// ONE READER SINCE THERE IS ONE COLUMN. `settings.subrail_w_frac` sized
+/// the column of a section's pages, and that column is gone: the pages
+/// stand UNDER their section now, inside this width, one
+/// `settings.rail_indent` in.
+fn nav_w(content: Rect) -> f32 {
+    static FRAC: OnceLock<TokenId> = OnceLock::new();
     static MIN: OnceLock<TokenId> = OnceLock::new();
     static MIN_PX: OnceLock<TokenId> = OnceLock::new();
     let th = theme::resolved();
-    (content.w * th.px(tok(cell, frac)))
+    (content.w * th.px(tok(&FRAC, "settings.rail_w_frac")))
         .max(th.px(tok(&MIN, "settings.rail_w_min")))
         .max(th.px(tok(&MIN_PX, "settings.rail_w_min_min_px")))
 }
 
-/// The air a navigation column's bed keeps around what stands on it:
+/// How far a section's own pages stand in from the section they belong
+/// to (`settings.rail_indent`), and the hairline they are propped
+/// against: its width, and where across that step it stands.
+///
+/// THE STEP IS THE WHOLE OF WHAT THE SECOND COLUMN USED TO SAY by
+/// standing somewhere else, so it is the theme that says it. `x` is a
+/// fraction of the step and not a length, because what it answers is
+/// "which end of the gutter" — 0 flush with the section's own edge, 1
+/// flush against its pages' — and the master's answer (the middle) is
+/// a look decision that would otherwise be a `0.5` in Rust.
+fn rail_indent() -> f32 {
+    static INDENT: OnceLock<TokenId> = OnceLock::new();
+    theme::resolved().px(tok(&INDENT, "settings.rail_indent")).max(0.0)
+}
+
+/// The box a section's own pages are laid in: the section's own, one
+/// `settings.rail_indent` narrower and that much further in.
+///
+/// Answered HERE and not at each of the two places that ask — the
+/// walker that draws the run and the one that measures it — because a
+/// run measured in one box and drawn in another is a run that is one
+/// height for the scroll and another for the eye.
+fn indent_region(region: Rect) -> Rect {
+    let step = rail_indent();
+    Rect::new(region.x + step, region.y, (region.w - step).max(0.0), region.h)
+}
+
+/// The guide's stroke and its place in the indent step, as the rect it
+/// occupies beside a run of indented rows standing in `region`.
+///
+/// The line's LEFT EDGE runs from the section's own edge to its pages'
+/// as `settings.rail_guide_x` goes 0 to 1, so neither end of the range
+/// pushes the stroke out of the step it brackets.
+fn rail_guide_x(region: Rect) -> (f32, f32) {
+    static W: OnceLock<TokenId> = OnceLock::new();
+    static AT: OnceLock<TokenId> = OnceLock::new();
+    let th = theme::resolved();
+    let w = th.px(tok(&W, "settings.rail_guide_w")).max(0.0);
+    let at = th.px(tok(&AT, "settings.rail_guide_x")).clamp(0.0, 1.0);
+    (region.x + (rail_indent() - w).max(0.0) * at, w)
+}
+
+/// The air the navigation's bed keeps around what stands on it:
 /// `settings.band_pad_x` across and `settings.band_pad_y` down.
 ///
 /// TWO NUMBERS AND NOT ONE, because they answer two different questions.
 /// The horizontal one competes with `settings.col_gap` — the gutter to
-/// the next column — and has to stay under it or the two columns fuse;
+/// the page beside it — and has to stay under it or the two columns fuse;
 /// the vertical one competes with `modal.row_gap` between the buttons
 /// themselves. A theme that wants them equal says so by giving them one
 /// value, which is what the master does.
@@ -3802,7 +3897,7 @@ fn band_pad() -> (f32, f32) {
     )
 }
 
-/// One navigation column: the bed that is painted, and the box the rows
+/// The navigation column: the bed that is painted, and the box the rows
 /// that stand on it are laid in.
 ///
 /// TWO RECTANGLES BECAUSE THERE ARE TWO QUESTIONS, and the window used
@@ -3826,35 +3921,49 @@ struct Column {
     rows: Rect,
 }
 
-/// Where the window's three panels stand this frame.
+/// Where the window's two panels stand this frame.
 ///
-/// The rows of both navigation columns hang one ordinary row gap under
-/// the corner button — a FIXED lead, not the page's, so the sections do
-/// not step up and down as the pages behind them change what they lead
-/// with. The second column stands beside the rail when the section has
-/// pages of its own, and what is left over is the page.
+/// The rows of the navigation hang one ordinary row gap under the
+/// corner button — a FIXED lead, not the page's, so the sections do not
+/// step up and down as the pages behind them change what they lead
+/// with. What is left over is the page.
+///
+/// THE SPLIT NO LONGER ASKS WHICH VIEW IS IN FORCE, and that is the
+/// point of the one column. While a section's pages stood in a column of
+/// their own, this had to reserve room for that column on EVERY page
+/// whether it was shown or not, or moving between sections would have
+/// re-shaped the window under the reader's hand. Pages that unfold under
+/// their section take no width at all, so there is nothing left for the
+/// view to decide and the parameter is gone.
 ///
 /// THE BEDS FILL THE CONTENT BOX FROM TOP TO BOTTOM. The corner button
 /// is the head of the rail and stands ON the rail's bed rather than in a
-/// notch cut out of it, so all three columns start on one line and end
-/// on one line. Nothing here reaches past `content_rect`, which keeps
+/// notch cut out of it, so both columns start on one line and end on one
+/// line. Nothing here reaches past `content_rect`, which keeps
 /// `modal.pad` clear of the frame on the sides and the bottom and drops
 /// `modal.body_top` for the title band: the bands fill their AREA, and
 /// the window's own margin is still the window's.
 ///
-/// FOLDED is the whole window's word, not one section's: the room is
-/// measured against BOTH columns whether the section shows the second
-/// one or not, so moving between sections cannot re-shape the window
-/// under the reader's hand. Below the threshold there are no columns at
-/// all — the navigation goes into the flow as bands ahead of the page,
-/// and the window is the one vertical list it has always been able to
-/// fall back to. There is no bed then and no bed's air either, so the
-/// corner button goes back to the head of the content box at its own
-/// width (`settings.back_w_frac`).
+/// FOLDED: below the threshold there is no column at all — the
+/// navigation goes into the flow as a band ahead of the page, and the
+/// window is the one vertical list it has always been able to fall back
+/// to. There is no bed then and no bed's air either, so the corner
+/// button goes back to the head of the content box at its own width
+/// (`settings.back_w_frac`).
+///
+/// THE THRESHOLD HAS TWO HALVES SINCE THE COLUMNS BECAME ONE, and the
+/// second is a HEIGHT. A rail is a column with no scroll of its own, so
+/// a rail taller than its box is a section cut off with no way to reach
+/// it — and the rail grew taller the day a section's pages moved into
+/// it. The width half alone used to cover this by accident: the small
+/// window folded because it could not seat TWO navigation columns, and
+/// the vertical overflow went with them. With one column that accident
+/// is gone, so the rule says out loud what it used to get for free —
+/// [`Settings::panes`] asks whether the rail FITS, and where it does
+/// not the window falls back to the one list, which scrolls.
 #[derive(Clone, Copy)]
 struct Panes {
     rail: Option<Column>,
-    sub: Option<Column>,
     /// What the page has: the whole content box when folded.
     page: Rect,
     /// Where the chrome's own button — BACK or CLOSE — stands. Said
@@ -3867,43 +3976,45 @@ struct Panes {
 }
 
 impl Panes {
-    fn of(view: View, m: Metrics, content: Rect) -> Panes {
-        static RAIL_FRAC: OnceLock<TokenId> = OnceLock::new();
-        static SUB_FRAC: OnceLock<TokenId> = OnceLock::new();
+    /// The one vertical list: no column, no bed, the corner button back
+    /// at the head of the content box at its own width.
+    fn folded(m: Metrics, content: Rect) -> Panes {
+        Panes {
+            rail: None,
+            page: content,
+            corner: Rect::new(content.x, content.y, m.corner_w, m.btn_h),
+            folded: true,
+        }
+    }
+
+    /// The split on WIDTH alone. [`Settings::panes`] is what the window
+    /// asks: it puts the height half of the threshold on top of this,
+    /// and that half needs to know what the rail is showing.
+    fn of(m: Metrics, content: Rect) -> Panes {
         let gap = col_gap();
-        let rail_w = nav_w(content, &RAIL_FRAC, "settings.rail_w_frac");
-        let sub_w = nav_w(content, &SUB_FRAC, "settings.subrail_w_frac");
-        // Both columns, always: the fold is the WINDOW's shape.
-        let folded = content.w - rail_w - sub_w - 2.0 * gap < col_min_w();
-        if folded {
-            return Panes {
-                rail: None,
-                sub: None,
-                page: content,
-                corner: Rect::new(content.x, content.y, m.corner_w, m.btn_h),
-                folded: true,
-            };
+        let rail_w = nav_w(content);
+        if content.w - rail_w - gap < col_min_w() {
+            return Panes::folded(m, content);
         }
         let (pad_x, pad_y) = band_pad();
         // The bed is the whole column; the rows are the bed less its air
-        // and less the corner button's row, which the rail carries and
-        // the column beside it aligns to.
-        let rows_top = content.y + pad_y + m.btn_h + m.gap;
+        // and less the corner button's row, which the rail carries. The
+        // break under that button is the RAIL's ([`Metrics::rail`]) — it
+        // is the first of the rail's own breaks and not the page's.
+        let rows_top = content.y + pad_y + m.btn_h + m.rail().gap;
         let rows_h = (content.bottom() - pad_y - rows_top).max(0.0);
-        let column = |x: f32, w: f32| Column {
-            bed: Rect::new(x, content.y, w, content.h),
-            rows: Rect::new(x + pad_x, rows_top, (w - 2.0 * pad_x).max(0.0), rows_h),
+        let rail = Column {
+            bed: Rect::new(content.x, content.y, rail_w, content.h),
+            rows: Rect::new(
+                content.x + pad_x,
+                rows_top,
+                (rail_w - 2.0 * pad_x).max(0.0),
+                rows_h,
+            ),
         };
-        let rail = column(content.x, rail_w);
-        let mut x = rail.bed.right() + gap;
-        let sub = subrail_rows(view).map(|_| {
-            let c = column(x, sub_w);
-            x = c.bed.right() + gap;
-            c
-        });
+        let x = rail.bed.right() + gap;
         Panes {
             rail: Some(rail),
-            sub,
             page: Rect::new(x, content.y, (content.right() - x).max(0.0), content.h),
             // The head of the rail, at the rail's own width inside its
             // air — not `settings.back_w_frac`, which is the width of a
@@ -4937,10 +5048,9 @@ impl Settings {
             // the window body's bed as an ABSOLUTE colour — `panel.fill`
             // on SOLID, the glass tint and wash otherwise — and BASIC's
             // ten authors do not include it, so a hue drag turned the
-            // rail, the sub-page column and every other bed and left the
-            // BODY on the theme's old hue. Measured on the master at the
-            // first slider position the gate takes: rail 203.46 deg, sub
-            // 203.46 deg, the body still 166.22. It is the same case
+            // rail and every other bed and left the BODY on the theme's
+            // old hue. Measured on the master at the first slider position
+            // the gate takes: rail 203.46 deg, the body still 166.22. It is the same case
             // `tone_edits` answers by re-pointing `surface.hue` at the
             // accent, except a literal cannot be re-pointed — so it is
             // carried, by the model's own arithmetic ([`Tone::shift`]).
@@ -5856,8 +5966,8 @@ impl Settings {
                 // only ever the section the window opens on.
                 self.go(parent_view(self.view).unwrap_or(View::LookFeel))
             }
-            // The rail's section and the second column's first entry:
-            // one page, reached from two places, so one road in.
+            // The section on the rail and the first page under it: one
+            // page, reached from two entries, so one road in.
             Act::OpenLookFeel | Act::OpenSets => self.enter_look_feel(),
             Act::ListBtn(list) => {
                 let d = Dropdown::List(list);
@@ -6540,7 +6650,7 @@ impl Settings {
         // The panels are cut BEFORE the corner button is placed, because
         // the corner button is the head of the rail and stands inside the
         // rail's own air ([`Panes`]).
-        let nav = Panes::of(page.view, m, content);
+        let nav = self.panes(m, content);
         let corner = nav.corner;
         let (chrome_act, chrome_label) = match chrome_of(page.view) {
             Chrome::Close => (Act::Close, "CLOSE"),
@@ -6564,7 +6674,7 @@ impl Settings {
         // navigation columns where the window has them, none where it
         // has folded.
         self.draw_bands(ctx, &nav);
-        self.draw_nav(ctx, page, m, &nav);
+        self.draw_nav(ctx, m, &nav);
         self.draw_body(ctx, page, m, content);
         self.button_drawn(ctx, corner, chrome_label, chrome_act, Some(ring));
         // Last, so it covers what it hangs from and the reverse hit walk
@@ -6673,11 +6783,79 @@ impl Settings {
     /// `content` is the WHOLE content box; the navigation is taken out
     /// of it here, so every caller — the drawing, the scroll, the tests
     /// — asks one question and gets the box the flow really has.
+    /// Where the window's panels stand this frame — the ONE question
+    /// every walker, measurement and test asks, so no two of them can
+    /// answer it differently.
+    ///
+    /// [`Panes::of`] answers it on width. This adds the other half of
+    /// the threshold: A RAIL THAT DOES NOT FIT IS NOT A RAIL. The
+    /// column has no scroll of its own, so an entry past its bottom
+    /// edge is clipped away with nothing to bring it back — and since a
+    /// section's pages moved INTO the rail, how tall the rail wants to
+    /// be is a question about the state of the window and not about the
+    /// theme alone, which is why it is asked here and not there.
+    ///
+    /// The width half used to hide this one. A window too small for two
+    /// navigation columns folded, and the vertical overflow folded with
+    /// it; one column fits at widths where the rail's own height does
+    /// not, so the rule that was an accident is now written down. The
+    /// folded shape is the one that CAN carry an over-long rail — it is
+    /// a band of the page's flow there, and the flow scrolls.
+    fn panes(&self, m: Metrics, content: Rect) -> Panes {
+        let nav = Panes::of(m, content);
+        match nav.rail {
+            Some(c) if self.rail_reach(m.rail(), c.rows) > c.rows.h + 0.01 => {
+                Panes::folded(m, content)
+            }
+            _ => nav,
+        }
+    }
+
+    /// The tallest the rail can EVER stand on this window — every entry,
+    /// plus the pages of the deepest section, whichever section that is.
+    ///
+    /// THE WORST CASE AND NOT THIS FRAME'S, because the fold is the
+    /// WINDOW's shape and not one section's. Measured against the page
+    /// in force, the window would stand in columns on GRID and fold on
+    /// LOOK AND FEEL — re-shaping itself under the reader's hand every
+    /// time they changed section, which is the fault the three-panel
+    /// layout was careful to avoid and which this must go on avoiding
+    /// now that a section's pages cost HEIGHT instead of width.
+    ///
+    /// The DEEPEST section and not the sum of all of them, because
+    /// exactly one is ever unfolded ([`Settings::rail_open`]) — the
+    /// bound single-open buys, written where it is spent.
+    ///
+    /// Conservative by at most one break: the gap between a section and
+    /// its first page is already counted in the entries' own run, and
+    /// this adds another for the one under the last page. A threshold
+    /// that errs toward folding errs toward the shape that can carry an
+    /// over-long rail, which is the safe direction.
+    fn rail_reach(&self, m: Metrics, box_: Rect) -> f32 {
+        let mut entries = 0.0;
+        let mut trailing = 0.0;
+        let mut deepest: f32 = 0.0;
+        for row in RAIL_ROWS.iter() {
+            if !(row.when)(self) {
+                continue;
+            }
+            entries += self.row_h(&row.ctrl, m, box_) + m.space(row.after);
+            trailing = m.space(row.after);
+            if let Ctrl::Expander { kids, .. } = row.ctrl {
+                // The kids carry no expander of their own, so this run
+                // is the same run whatever section is in force.
+                deepest =
+                    deepest.max(self.rows_h(kids, m, indent_region(box_)) + m.gap);
+            }
+        }
+        (entries - trailing).max(0.0) + deepest
+    }
+
     fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
         // The WHOLE split and not the page column alone: the body starts
         // under the chrome button, and where that button stands is the
         // rail's business ([`body_top`]).
-        let nav = Panes::of(page.view, m, content);
+        let nav = self.panes(m, content);
         let box_ = nav.page;
         // The box is the FULL one — the clip and the bar are drawn on it
         // — but what a pinned band COSTS is measured where its rows
@@ -6696,15 +6874,16 @@ impl Settings {
     /// The bands that flow this frame, in registration order.
     ///
     /// Unfolded that is the page's own bands and nothing else — the
-    /// navigation stands in its columns, outside the scroll. Folded, the
-    /// rail and the section's pages come FIRST, as ordinary bands ahead
-    /// of the page: one list, one scroll, and the same order the two
-    /// columns would have registered them in.
+    /// navigation stands in its column, outside the scroll. Folded, the
+    /// rail comes FIRST, as an ordinary band ahead of the page: one
+    /// list, one scroll, and the same order the column registers in. The
+    /// section's pages ride along inside that band, because they are
+    /// rows of the rail's own table ([`Ctrl::Expander`]) and no longer a
+    /// second one to remember here.
     fn frame_zones(&self, page: &'static Page, nav: &Panes) -> Vec<&'static Zone> {
-        let mut out: Vec<&'static Zone> = Vec::with_capacity(page.zones.len() + 2);
+        let mut out: Vec<&'static Zone> = Vec::with_capacity(page.zones.len() + 1);
         if nav.folded {
             out.push(&RAIL_ZONE);
-            out.extend(subrail_zone(page.view));
         }
         // A band whose `when` says no is not in this frame at all — the
         // theme editor's other page. This is the ONE place the flow, the
@@ -6739,6 +6918,20 @@ impl Settings {
     /// since there were pages, asked of a band's rows instead of a
     /// page's. The last row's trailing gap is not content.
     fn rows_h(&self, rows: &'static [Row], m: Metrics, region: Rect) -> f32 {
+        let (h, trailing) = self.rows_span(rows, m, region);
+        (h - trailing).max(0.0)
+    }
+
+    /// [`Settings::rows_h`] before the last gap is taken off: the run's
+    /// whole reach, and how much of it that gap was.
+    ///
+    /// Split out because an unfolded section makes the two answers come
+    /// apart. The gap after the LAST thing in the run is the last PAGE's
+    /// and not the section's, so a reader that only carried a total
+    /// could not know which to subtract — and this walker has to hand
+    /// exactly what [`Settings::draw_rows`] returns, or a section's
+    /// pages would be one gap taller for the scroll than for the eye.
+    fn rows_span(&self, rows: &'static [Row], m: Metrics, region: Rect) -> (f32, f32) {
         let mut h = 0.0;
         let mut trailing = 0.0;
         for row in rows {
@@ -6747,8 +6940,22 @@ impl Settings {
             }
             h += self.row_h(&row.ctrl, m, region) + m.space(row.after);
             trailing = m.space(row.after);
+            // An unfolded section is as tall as itself PLUS its pages,
+            // measured in the box they are drawn in ([`indent_region`]).
+            // A section that is not the one in force costs nothing at
+            // all, which is the same sentence the walker says by not
+            // recursing — one rule, said twice because this file has
+            // always measured and drawn with two readers.
+            if let Ctrl::Expander { act, kids, .. } = row.ctrl {
+                if self.rail_open(act) {
+                    let (kids_h, kids_gap) =
+                        self.rows_span(kids, m, indent_region(region));
+                    h += kids_h;
+                    trailing = kids_gap;
+                }
+            }
         }
-        (h - trailing).max(0.0)
+        (h, trailing)
     }
 
     /// How tall a band stands: its rows, or — where it has columns — the
@@ -6783,7 +6990,7 @@ impl Settings {
     /// rows: a band folds on its width, so a length taken at the full
     /// box would be a length of a page nobody is looking at.
     fn flow_h(&self, page: &'static Page, m: Metrics, content: Rect) -> f32 {
-        let nav = Panes::of(page.view, m, content);
+        let nav = self.panes(m, content);
         let box_ = rows_box(nav.page);
         let mut h = 0.0;
         for zone in self.frame_zones(page, &nav) {
@@ -6820,7 +7027,7 @@ impl Settings {
         // ([`rows_box`]), and the bar is drawn against the original edge
         // — otherwise it would hug the narrowed edge and stand over the
         // rows again, just from the other side of its own lane.
-        let nav = Panes::of(page.view, m, content);
+        let nav = self.panes(m, content);
         let rows_box = rows_box(nav.page);
         // Both of these take the WHOLE content box and split it again —
         // one split, stated in [`Panes::of`], so a test that measures a
@@ -6878,25 +7085,26 @@ impl Settings {
         self.draw_scrollbar(ctx, view, length);
     }
 
-    /// The three columns' beds: ONE COLOUR UNDER BOTH NAVIGATION
-    /// COLUMNS, which is the owner's ask in his own words (2026-08-18) —
-    /// "obie w jednakowym kolorze, tym w środkowej kolumnie".
+    /// The two columns' beds: the navigation's, and the page's.
     ///
-    /// Nothing here decides what that colour is, or that there is one of
-    /// it rather than two. THREE COLUMNS, THREE NAMES:
-    /// `component.settings.rail_fill`, `.sub_fill` and `.page_fill`, all
-    /// three the master's, so a theme re-beds any one of them on its
-    /// own. The master answers the first two with the SAME colour —
-    /// `rail_fill` points at `sub_fill` — and this loop cannot tell,
-    /// which is the point: naming a rung here instead would weld the
-    /// settings columns to the desktop field and no theme could ever
-    /// part them again.
+    /// Nothing here decides what those colours are. TWO COLUMNS, TWO
+    /// NAMES: `component.settings.rail_fill` and `.page_fill`, both the
+    /// master's, so a theme re-beds either on its own. Naming a rung
+    /// here instead would weld the settings columns to the desktop field
+    /// and no theme could ever part them again.
     ///
-    /// The master writes both off ONE ANCHOR — the window body, lifted
-    /// once by `settings.band_lift` — which is what keeps them together
-    /// when a theme, BASIC or the editor's BACKGROUND section moves the
-    /// body. That is the master's arrangement and not this function's:
-    /// what stands here is a name, a box and a paint.
+    /// THERE WAS A THIRD, and it went with the column it bedded
+    /// (2026-08-18). `.sub_fill` was the bed of the second navigation
+    /// column, which the owner had already asked to be one colour with
+    /// the rail — and a section's pages stand UNDER their section now,
+    /// on the rail's own bed, so there is nothing left for a second name
+    /// to paint.
+    ///
+    /// The master writes the rail off ONE ANCHOR — the window body,
+    /// lifted once by `settings.band_lift` — which is what keeps the two
+    /// together when a theme, BASIC or the editor's BACKGROUND section
+    /// moves the body. That is the master's arrangement and not this
+    /// function's: what stands here is a name, a box and a paint.
     ///
     /// Painted BEFORE the navigation and the body, and over each
     /// column's whole rectangle exactly as [`Panes`] cut it — top edge
@@ -6905,8 +7113,8 @@ impl Settings {
     /// The beds are the ground everything else in the window stands on.
     ///
     /// FOLDED, there are no columns at all. Below `settings.col_min_w`
-    /// the rail's rows become the first bands of one vertical flow, so
-    /// `rail`/`sub` are nothing and the page is the whole interior.
+    /// the rail's rows become the first band of one vertical flow, so
+    /// `rail` is nothing and the page is the whole interior.
     ///
     /// A BAND WHOSE COLOUR IS THE SENTINEL IS NOT PAINTED, which is how
     /// the master ships the page's: `none` answers `color()` with alpha
@@ -6942,12 +7150,10 @@ impl Settings {
     /// one case that would change the answer.
     fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
         static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
-        static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
         static PAGE_FILL: OnceLock<TokenId> = OnceLock::new();
         let th = theme::resolved();
         let bands = [
             (nav.rail.map(|c| c.bed), &RAIL_FILL, "component.settings.rail_fill"),
-            (nav.sub.map(|c| c.bed), &SUB_FILL, "component.settings.sub_fill"),
             (Some(nav.page), &PAGE_FILL, "component.settings.page_fill"),
         ];
         let mut sf = CtxSurface::new(ctx);
@@ -6959,43 +7165,38 @@ impl Settings {
                 continue;
             }
             // Asked per band, not once: `pill` and the rest of §5.0's
-            // sentinels are words ABOUT THE BOX, and the three boxes are
-            // three different shapes.
+            // sentinels are words ABOUT THE BOX, and the two boxes are
+            // two different shapes.
             let radius =
                 nacelle::view::paint::corner_radius(&mut sf, "settings.band_corner", r, 1.0);
             sf.ring_fill(r, cut, radius, fill);
         }
     }
 
-    /// The two navigation columns, where the window has not folded.
+    /// The navigation column, where the window has not folded.
     ///
-    /// Each is clipped to its ROWS box and not to its bed — the bed is
-    /// the paint, the rows box is the room, and the difference between
-    /// them is the air `settings.band_pad_*` keeps. A rail longer than
-    /// the room is cut off, not painted over the page, and no entry can
-    /// bleed into the padding it is supposed to stand inside. Each is
+    /// It is clipped to its ROWS box and not to its bed — the bed is the
+    /// paint, the rows box is the room, and the difference between them
+    /// is the air `settings.band_pad_*` keeps. A rail longer than the
+    /// room is cut off, not painted over the page, and no entry can
+    /// bleed into the padding it is supposed to stand inside. It is
     /// walked by the SAME row walker the pages are, so an entry is a
     /// button, a heading is a heading and a disabled section is grey by
-    /// exactly the rules a setting is.
+    /// exactly the rules a setting is — and a section's own pages are
+    /// rows of the same table, one indent in ([`Ctrl::Expander`]).
     ///
-    /// Drawn before the body, so the chain runs corner button, rail,
-    /// section pages, page — reading order, and the same order the
-    /// folded window registers them in.
-    fn draw_nav(&mut self, ctx: &mut Ctx, page: &'static Page, m: Metrics, nav: &Panes) {
-        let columns = [
-            (nav.rail, Some(&RAIL_ROWS[..])),
-            (nav.sub, subrail_rows(page.view)),
-        ];
-        for (col, rows) in columns {
-            let (Some(box_), Some(rows)) = (col.map(|c| c.rows), rows) else { continue };
-            ctx.dl.push_clip(box_.x, box_.y, box_.w, box_.h);
-            self.clip = Some(box_);
-            // Not the flow's: a column stands where it stands, and the
-            // page's scroll is no use to it ([`Settings::chase_focus`]).
-            self.draw_rows(ctx, rows, m, box_, box_.y, Some(box_), false);
-            self.clip = None;
-            ctx.dl.pop_clip();
-        }
+    /// Drawn before the body, so the chain runs corner button, rail
+    /// (a section's pages inside it, where they stand), page — reading
+    /// order, and the same order the folded window registers them in.
+    fn draw_nav(&mut self, ctx: &mut Ctx, m: Metrics, nav: &Panes) {
+        let Some(box_) = nav.rail.map(|c| c.rows) else { return };
+        ctx.dl.push_clip(box_.x, box_.y, box_.w, box_.h);
+        self.clip = Some(box_);
+        // Not the flow's: a column stands where it stands, and the
+        // page's scroll is no use to it ([`Settings::chase_focus`]).
+        self.draw_rows(ctx, &RAIL_ROWS, m.rail(), box_, box_.y, Some(box_), false);
+        self.clip = None;
+        ctx.dl.pop_clip();
     }
 
     /// One band, at the top edge it was given. A flow lays its rows in
@@ -7030,6 +7231,12 @@ impl Settings {
     /// width are the column's, its height the page's — and it is what
     /// each row is handed as its content box, so a slider in the left
     /// column ends at the left column's right edge and not at the page's.
+    /// Returns where the run ended: the next free line, and how much of
+    /// the way there was the last row's own trailing gap. An unfolded
+    /// section needs both — the first to place the entries that follow
+    /// its pages, the second to know where the pages themselves STOP, so
+    /// the guide beside them is drawn from the numbers the rows were
+    /// really laid with and not from a second copy of this arithmetic.
     fn draw_rows(
         &mut self,
         ctx: &mut Ctx,
@@ -7039,11 +7246,12 @@ impl Settings {
         top: f32,
         cull: Option<Rect>,
         flowed: bool,
-    ) {
+    ) -> (f32, f32) {
         // Measured for THIS region, and from THESE rows: the sliders of
         // one column do not inherit the label width of the next (M3).
         let (label_w, value_w) = self.columns(ctx, rows, region.w);
         let mut y = top;
+        let mut trailing = 0.0;
         for row in rows {
             if !(row.when)(self) {
                 continue;
@@ -7079,7 +7287,64 @@ impl Settings {
                 }
             }
             y += h + m.space(row.after);
+            trailing = m.space(row.after);
+            // A SECTION'S OWN PAGES, WHERE THE SECTION IS THE ONE OPEN.
+            // They are laid by this same walker in a region one
+            // `settings.rail_indent` narrower, so the indent is the only
+            // thing that makes them look nested and nothing about them
+            // is a second kind of row.
+            //
+            // FOLDED SHUT THEY ARE NOT HERE AT ALL — not drawn, not
+            // measured, not a target and not a step in the Tab order —
+            // because the recursion simply does not happen. That is the
+            // toolkit's own rule for a list that is not all the way out
+            // (`object::dropdown::accordion`: an element joins the chain
+            // only when the whole of it is standing), said here by the
+            // one thing that can never disagree with the picture: the
+            // walker that draws the picture.
+            if let Ctrl::Expander { act, kids, .. } = row.ctrl {
+                if self.rail_open(act) {
+                    let inner = indent_region(region);
+                    let (end, gap) =
+                        self.draw_rows(ctx, kids, m, inner, y, cull, flowed);
+                    self.draw_rail_guide(ctx, region, y, end - gap);
+                    y = end;
+                    trailing = gap;
+                }
+            }
         }
+        (y, trailing)
+    }
+
+    /// The hairline a section's unfolded pages are propped against, from
+    /// the top of the first to the bottom of the last.
+    ///
+    /// WHY A LINE AT ALL, and why not a bed. The pages used to stand in
+    /// a COLUMN, and a column says "these are a group" by having edges.
+    /// Indent alone does not: four buttons a little further in read as
+    /// four buttons that failed to line up. The line is the bracket that
+    /// says which entry they belong to — and it is a line and not a bed
+    /// because a bed of their own would be the second column again, in
+    /// less room.
+    ///
+    /// Every number is the theme's: the stroke and its place across the
+    /// step are `settings.rail_guide_w` and `settings.rail_guide_x`, the
+    /// step itself is `settings.rail_indent`, the colour is
+    /// `component.settings.rail_guide`. The two ENDS are the drawing's,
+    /// handed in by the walker that laid the rows, so the line cannot
+    /// stand beside a run of a different length.
+    fn draw_rail_guide(&mut self, ctx: &mut Ctx, region: Rect, top: f32, bottom: f32) {
+        static INK: OnceLock<TokenId> = OnceLock::new();
+        let (x, w) = rail_guide_x(region);
+        let h = bottom - top;
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let ink = col(theme::resolved().color(tok(&INK, "component.settings.rail_guide")));
+        if ink.a <= 0.0 {
+            return;
+        }
+        ctx.dl.rect(x, top, w, h, ink);
     }
 
     /// Everything one control offers, and where it stands: the ONE
@@ -7114,7 +7379,9 @@ impl Settings {
             Ctrl::Drop { list } => {
                 vec![(Self::button_rect(BtnKind::Wide, rc), Act::ListBtn(*list))]
             }
-            Ctrl::Button { kind, act, .. } => {
+            // The section's own plate, and nothing else: its pages are
+            // ROWS, and the walker asks each of them for itself.
+            Ctrl::Button { kind, act, .. } | Ctrl::Expander { kind, act, .. } => {
                 vec![(Self::button_rect(*kind, rc), *act)]
             }
             Ctrl::Bar { items } => self
@@ -7300,8 +7567,13 @@ impl Settings {
             Ctrl::Slider { .. } => m.slider_h,
             Ctrl::Chips { .. } => m.seg_h,
             Ctrl::Cycle { .. } => m.cyc_h,
-            // A bar is ONE row however many verbs it carries.
-            Ctrl::Button { .. } | Ctrl::Drop { .. } | Ctrl::Bar { .. } => m.btn_h,
+            // A bar is ONE row however many verbs it carries — and so is
+            // an expander: what stands UNDER it is rows of its own, laid
+            // and measured by the walkers, never a taller row here.
+            Ctrl::Button { .. }
+            | Ctrl::Expander { .. }
+            | Ctrl::Drop { .. }
+            | Ctrl::Bar { .. } => m.btn_h,
             Ctrl::Section { .. } => m.block_h,
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
@@ -7369,6 +7641,18 @@ impl Settings {
                 let text = self.text_of(*label);
                 self.button(ctx, r, &text, *act);
             }
+            // The same plate, and the triangle that says there is more
+            // under it. The TREE grammar and not the DROP one: a drop's
+            // caret points at where a list will unfold OVER the page,
+            // and these pages unfold INSIDE the row's own column, which
+            // is the sentence every file tree ever drawn already speaks
+            // (`view::paint::Disclosure`).
+            Ctrl::Expander { label, kind, act, .. } => {
+                let r = Self::button_rect(*kind, rc);
+                let text = self.text_of(*label);
+                self.button(ctx, r, &text, *act);
+                self.expander_arrow(ctx, r, *act);
+            }
             Ctrl::Bar { items } => self.draw_bar(ctx, items, rc),
             // A separator like every other module header.
             Ctrl::Section { title } => {
@@ -7431,7 +7715,7 @@ impl Settings {
     /// inscription, and nothing in the hit map or the focus chain (R6).
     fn draw_disabled(&mut self, ctx: &mut Ctx, ctrl: &Ctrl, rc: RowCtx) {
         let plates: Vec<(Rect, Cow<'static, str>)> = match ctrl {
-            Ctrl::Button { label, kind, .. } => {
+            Ctrl::Button { label, kind, .. } | Ctrl::Expander { label, kind, .. } => {
                 vec![(Self::button_rect(*kind, rc), self.text_of(*label))]
             }
             Ctrl::Bar { items } => self
@@ -8034,16 +8318,55 @@ impl Settings {
     /// DROP grammar — closed it points down, at the direction the list
     /// will unfold, and open it points back up at the edge the list
     /// folds into. The tree's grammar (closed points along the row) is
-    /// the other sentence the same primitive speaks, and it belongs to
-    /// file trees; a `▷` on a drop-down reads as "go into this row".
+    /// the other sentence the same primitive speaks, and this window
+    /// speaks it too — on the rail, where a section's pages take their
+    /// place IN the column ([`Settings::expander_arrow`]). A `▷` here
+    /// would read as "go into this row", which is that other sentence.
     /// The state turns the GLYPH and not its colour, which is the
     /// primitive's rule and not this window's.
+    fn caret(&mut self, ctx: &mut Ctx, r: Rect, act: Act) {
+        let open = self.dropdown.map_or(false, |d| anchor_act(d) == act);
+        self.disclosure(ctx, r, act, nacelle::view::paint::Disclosure::Drop, open);
+    }
+
+    /// The triangle on a rail entry that HAS PAGES ([`Ctrl::Expander`]),
+    /// in the toolkit's TREE grammar: shut it points along the row at
+    /// what opening would reveal, open it points down at the pages it
+    /// just revealed.
+    ///
+    /// THE OTHER GRAMMAR WOULD BE THE WRONG SENTENCE, and the two are a
+    /// paragraph apart in the primitive that speaks both. A drop-down's
+    /// caret announces where a list will unfold — over the page, from
+    /// the anchor's bottom edge — and these pages do not unfold over
+    /// anything: they take their place IN the column, under the entry
+    /// they belong to, which is what a tree row does and what a tree
+    /// row's triangle has always said.
+    ///
+    /// Only an expander is ever asked, so the arrow cannot appear on an
+    /// entry with nothing behind it: [`Ctrl::Expander`] is the only kind
+    /// with a `kids` field to put pages in, and the only kind this is
+    /// drawn for (owner's mock-up §3 — an arrow on every entry would be
+    /// half of them lying).
+    fn expander_arrow(&mut self, ctx: &mut Ctx, r: Rect, act: Act) {
+        let open = self.rail_open(act);
+        self.disclosure(ctx, r, act, nacelle::view::paint::Disclosure::Tree, open);
+    }
+
+    /// A disclosure triangle at the tail of a plate, in whichever of the
+    /// primitive's two grammars the caller is speaking.
     ///
     /// Sized and inked like the BACK arrow at the other end of a button
     /// — `button.icon_size` glyph, `button.pad_x` from the edge, the
-    /// ladder's own text colour — because a glyph on a button is a
-    /// glyph on a button.
-    fn caret(&mut self, ctx: &mut Ctx, r: Rect, act: Act) {
+    /// ladder's own text colour — because a glyph on a button is a glyph
+    /// on a button, wherever it stands and whatever it means.
+    fn disclosure(
+        &mut self,
+        ctx: &mut Ctx,
+        r: Rect,
+        act: Act,
+        kind: nacelle::view::paint::Disclosure,
+        open: bool,
+    ) {
         static ICON_SIZE: OnceLock<TokenId> = OnceLock::new();
         static ICON_MIN: OnceLock<TokenId> = OnceLock::new();
         static PAD_X: OnceLock<TokenId> = OnceLock::new();
@@ -8052,7 +8375,6 @@ impl Settings {
             .px(tok(&ICON_SIZE, "button.icon_size"))
             .max(th.px(tok(&ICON_MIN, "button.icon_size_min_px")));
         let pad = th.px(tok(&PAD_X, "button.pad_x"));
-        let open = self.dropdown.map_or(false, |d| anchor_act(d) == act);
         let ink = col(ladder(th, &BTN_CLASS, "button", self.button_rung(ctx, r, act)).text);
         // `line_px` is the box the glyph is centred in vertically; the
         // glyph's own size is that box, so the triangle sits on the
@@ -8063,7 +8385,7 @@ impl Settings {
             r.y + (r.h - s) / 2.0,
             s,
             s,
-            nacelle::view::paint::Disclosure::Drop,
+            kind,
             open,
             ink,
         );
@@ -8568,12 +8890,63 @@ impl Settings {
         nacelle::object::button::ButtonState { hover, flash, selected }
     }
 
-    /// Whether an act is the navigation entry standing for the view in
-    /// force: its section in the rail, and its own entry in the second
-    /// column. Both can be true of one frame and of two different
-    /// buttons — that is the point of two columns.
+    /// Whether an act is a navigation entry standing for the view in
+    /// force: its SECTION, and, where the section unfolds pages, the
+    /// PAGE among them. Both are true in one frame, of two different
+    /// buttons — which is the mock-up's §4 in one line. An unfolded
+    /// section that did not stay marked would leave the reader looking
+    /// at a list of four entries with no way to tell which of them the
+    /// page on the right belongs to; a page that did not mark itself
+    /// would leave the section marked and the page anonymous.
     fn nav_marks(&self, act: Act) -> bool {
-        act == rail_act(self.view) || sub_act(self.view) == Some(act)
+        act == rail_act(self.view) || kid_act(self.view) == Some(act)
+    }
+
+    /// Whether a section of the rail stands UNFOLDED — its pages drawn
+    /// under it, in the focus chain and in the hit map.
+    ///
+    /// THIS IS NOT A FIELD, AND THAT IS THE ANSWER TO ALL THREE OF THE
+    /// QUESTIONS THE MOCK-UP LEFT OPEN. A section is unfolded exactly
+    /// when it is the section in force, so:
+    ///
+    /// * (a) TWO AT ONCE? No — not by a rule forbidding it but because
+    ///   there is nothing to forbid: being unfolded IS being the section
+    ///   you are in, and you are in one. GNOME's expander rows may all
+    ///   stand open because they live in a scrolled page; this rail does
+    ///   not scroll (`the_navigation_fits_the_window_it_stands_in` is
+    ///   fail-closed about that), so "every section open at once" would
+    ///   be a rail that can outgrow its column and hide a section with no
+    ///   way to reach it. Single-open bounds the worst case at the
+    ///   deepest section instead of the sum of all of them.
+    /// * (b) WHAT DOES PRESSING THE SECTION DO? It opens the section's
+    ///   first page, and unfolding is what that looks like. A press that
+    ///   only unfolded would make this the one entry in the window that
+    ///   answers with a list instead of a page — and it would have to
+    ///   mark a section whose page is not open, which is a lie in the
+    ///   one place §4 asks the window to tell the truth. It is also what
+    ///   the entry already did when the pages stood in a column, so no
+    ///   habit is broken.
+    /// * (c) IS THE UNFOLD ANIMATED? No, and `motion.rs` being ready is
+    ///   not the reason to. The unfold is not a thing of its own: it
+    ///   happens because the SECTION CHANGED, and the whole page beside
+    ///   it changes in the same frame with no transition. An animated
+    ///   rail would be the only moving thing on a window that has
+    ///   already finished changing — and while it moved it would have to
+    ///   leave the focus chain and the hit map, which is the toolkit's
+    ///   own rule for a blind in motion (`object::dropdown::accordion`:
+    ///   "a ring on a moving rect is the board-ride pitfall in
+    ///   miniature"). A drop-down may go dead for a moment because it is
+    ///   a transient over one page; the window's PERMANENT navigation
+    ///   may not, on every section change. The day the window
+    ///   cross-fades a page change (`motion::Crossfade` is the
+    ///   foundation) the rail should join THAT one motion, not run a
+    ///   second clock beside it.
+    ///
+    /// A field would also be a second statement of where the reader is,
+    /// free to disagree with `self.view` — the fault this file already
+    /// records about a BACK button that led to the page it stood on.
+    fn rail_open(&self, act: Act) -> bool {
+        act == rail_act(self.view)
     }
 
     /// Whether an act's click flash is still decaying
@@ -8990,16 +9363,16 @@ mod tests {
         );
     }
 
-    /// The page's three anchors are one column, and so is the section's
-    /// own column of pages.
+    /// The page's three anchors are one column, and so is the run of
+    /// pages the section unfolds on the rail.
     ///
     /// FONTS used to be a `Listed` button — `settings.list_w_frac` of
     /// the content, centred — under three anchors that ran the full
     /// width, and it read as a different class of control although it
     /// is the same kind of thing: another way into the same subject.
-    /// It is a navigation entry now, so the rule it has to keep is its
-    /// COLUMN's, not the page's: everything in the second column is one
-    /// edge, everything on the page is another, and no control of
+    /// It is a navigation entry now, so the rule it has to keep is the
+    /// RAIL's, not the page's: everything a section unfolds shares one
+    /// edge, everything on the page shares another, and no control of
     /// either straddles the two. The footer is deliberately in neither
     /// set: it is pinned, it is destructive, and looking unlike the
     /// page is its job.
@@ -9073,9 +9446,9 @@ mod tests {
             rows.iter()
                 .position(|r| matches!(r.ctrl, Ctrl::Button { act: a, .. } if a == act))
         }
-        let levels = button_at(&LOOKFEEL_SUBRAIL_ROWS, Act::OpenSoundLevels)
+        let levels = button_at(&LOOKFEEL_PAGES, Act::OpenSoundLevels)
             .expect("LOOK AND FEEL has no SOUND LEVELS page");
-        let fonts_at = button_at(&LOOKFEEL_SUBRAIL_ROWS, Act::OpenFont)
+        let fonts_at = button_at(&LOOKFEEL_PAGES, Act::OpenFont)
             .expect("LOOK AND FEEL lost FONTS");
         assert_eq!(fonts_at + 1, levels, "FONTS does not stand above SOUND LEVELS");
         assert!(
@@ -9087,7 +9460,7 @@ mod tests {
             "the page still carries the door the column replaced"
         );
         let Ctrl::Button { label: Text::Fixed(word), .. } =
-            LOOKFEEL_SUBRAIL_ROWS[levels].ctrl
+            LOOKFEEL_PAGES[levels].ctrl
         else {
             panic!("the entry lost its fixed label")
         };
@@ -9130,7 +9503,7 @@ mod tests {
         assert!(parent_view(View::SoundLevels).is_none());
         assert!(chrome_of(View::SoundLevels) == Chrome::Close);
         assert!(
-            sub_act(View::SoundLevels) == Some(Act::OpenSoundLevels),
+            kid_act(View::SoundLevels) == Some(Act::OpenSoundLevels),
             "the page the entry opens is not the page the entry marks"
         );
     }
@@ -9305,14 +9678,23 @@ mod tests {
     /// is what this test reads.
     #[test]
     fn every_list_anchor_wears_a_caret_that_turns() {
-        /// The closed three-point outlines one frame drew — the shape
-        /// `paint::disclosure` makes, and nothing else on this page.
-        fn carets(dl: &nacelle::draw::DrawList) -> Vec<Vec<[f32; 2]>> {
+        /// The closed three-point outlines one frame drew INSIDE a box —
+        /// the shape `paint::disclosure` makes, and nothing else.
+        ///
+        /// The box is the PAGE's. The rail speaks the same primitive in
+        /// its other grammar ([`Settings::expander_arrow`]) and an open
+        /// section's triangle is the same three points pointing the same
+        /// way as a shut list's, so a sweep of the whole frame would
+        /// count it as a fourth list. Where a triangle stands is the one
+        /// thing that tells the two apart, and it is the right thing:
+        /// this test is about the anchors ON THE PAGE.
+        fn carets(dl: &nacelle::draw::DrawList, box_: Rect) -> Vec<Vec<[f32; 2]>> {
             dl.cmds()
                 .iter()
                 .filter_map(|c| match c {
                     nacelle::draw::DrawCmd::Polyline { pts, closed: true, .. }
-                        if pts.len() == 3 =>
+                        if pts.len() == 3
+                            && pts.iter().all(|p| box_.contains(p[0], p[1])) =>
                     {
                         Some(pts.clone())
                     }
@@ -9328,8 +9710,10 @@ mod tests {
             s.dropdown = open.map(Dropdown::List);
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let page = s.panes(Metrics::of(&ctx, content), content).page;
             s.draw(&mut ctx);
-            carets(&dl)
+            carets(&dl, page)
         };
         let rest = drawn(&mut fonts, None);
         assert_eq!(rest.len(), 3, "one caret per list, and no more");
@@ -9573,9 +9957,12 @@ mod tests {
             .collect();
         s.addon_report = addon_report(true, &many);
         let mut dl = nacelle::draw::DrawList::recording();
-        // The shortest window the program is built for, so the box is
-        // certainly shorter than eighty lines.
-        let mut ctx = probe(&mut dl, &mut fonts, 720.0, 1.0);
+        // The shortest window that still stands in COLUMNS (below that
+        // the whole window is one scroll and the report's tail is a
+        // wheel away rather than dropped, which is a different claim).
+        // Eighty lines do not fit its box either, which is what this
+        // test needs.
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         s.draw(&mut ctx);
         let drawn = text_runs(&dl);
         assert!(
@@ -12085,7 +12472,7 @@ mod tests {
     ///
     /// AND THE COLUMNS ARE NOT BLACK WHEN THE THEME IS NOT BLACK. A HUE
     /// drag is a ROTATION, so this test could turn the whole interface
-    /// and never notice that two of the three columns were the sRGB codes
+    /// and never notice that the navigation columns were the sRGB codes
     /// 6 and 19 — which is what the owner photographed on 2026-08-17 and
     /// what a hue check structurally cannot see. `off_black` is the
     /// second ruler; the gate is on the LIGHTNESS slider standing still,
@@ -12123,7 +12510,7 @@ mod tests {
             col(t.color(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}"))))
         }
 
-        let before = lch(live("component.settings.sub_fill"));
+        let before = lch(live("component.settings.rail_fill"));
         // FOUR positions of the slider, not one: a claim that only holds
         // where the numbers happen to land is not the claim.
         for turn in [37u32, 90, 180, 251] {
@@ -12132,18 +12519,17 @@ mod tests {
             s.apply_editor_preview();
 
             let rail = lch(live("component.settings.rail_fill"));
-            let sub = lch(live("component.settings.sub_fill"));
             // The page's band is the window BODY's own token. The master
             // ships `settings.page_fill` as the sentinel and anchors the
-            // other two to this one, so this is both the page's bed and
-            // the number the other two are measured from.
+            // rail to this one, so this is both the page's bed and the
+            // number the rail is measured from.
             let page = lch(live("component.panel.fill"));
             // The window really turned, by the slider's own degrees.
             assert!(
-                hue_gap(sub.h, before.h + turn as f32) < 6.0,
-                "at {turn} deg the columns did not follow the slider: {} -> {}",
+                hue_gap(rail.h, before.h + turn as f32) < 6.0,
+                "at {turn} deg the navigation did not follow the slider: {} -> {}",
                 before.h,
-                sub.h
+                rail.h
             );
             // ONE HUE for the whole interface — the columns and the
             // plate a button stands on, which is the owner's own pair.
@@ -12151,35 +12537,27 @@ mod tests {
                 .class_state(theme::class_id("button").expect("no button class"), State::Idle)
                 .fill));
             assert!(
-                hue_gap(sub.h, plate.h) < 6.0,
+                hue_gap(rail.h, plate.h) < 6.0,
                 "at {turn} deg a column and a button plate are two COLOURS: {} vs {}",
-                sub.h,
+                rail.h,
                 plate.h
             );
             // DIFFERENT SHADES — the container is a bed and the plate is
             // a control, and no reader may have to guess which is which.
             // Measured on the master, decoded: 0.1780 against 0.8200.
             assert!(
-                (plate.l - sub.l).abs() > 0.40,
+                (plate.l - rail.l).abs() > 0.40,
                 "at {turn} deg a column and a button plate share a lightness: {} vs {}",
-                sub.l,
+                rail.l,
                 plate.l
             );
-            // And the two navigation columns are still ONE bed of it,
-            // one step above the page: the page is the well and the
-            // navigation the rim, and the rim is not split down the
-            // middle (owner, 2026-08-18).
+            // And the navigation is still one step above the page: the
+            // page is the well and the navigation the rim.
             assert!(
-                (rail.l - sub.l).abs() < 1e-3,
-                "at {turn} deg the two navigation columns are two shades: {} vs {}",
-                rail.l,
-                sub.l
-            );
-            assert!(
-                page.l < sub.l,
+                page.l < rail.l,
                 "at {turn} deg the navigation stopped standing off the page: {} {}",
                 page.l,
-                sub.l
+                rail.l
             );
             // AND NOT ONE OF THEM IS BLACK. The rotation this test drives
             // cannot darken anything, so a black band here is a black
@@ -12187,7 +12565,6 @@ mod tests {
             // no hue assertion above could ever have seen.
             for (name, c) in [
                 ("rail", live("component.settings.rail_fill")),
-                ("sub", live("component.settings.sub_fill")),
                 ("page", live("component.panel.fill")),
             ] {
                 let black = nacelle::theme::Color::from_hex("#000000").expect("black");
@@ -12202,26 +12579,23 @@ mod tests {
                 );
             }
             // ONE hue between themselves, and this is the assertion the
-            // SPACE is load-bearing for. The two COLUMNS take their h
-            // from one token (`@surface.hue`) and stand on one number:
-            // 203.46 against 203.46 at the first position. The BODY
-            // lands a quarter-degree off it (203.22) and not on it,
-            // because its colour is not a reference — the BACKGROUND
+            // SPACE is load-bearing for. The RAIL takes its h from the
+            // one token (`@surface.hue`): 203.46 at the first position.
+            // The BODY lands a quarter-degree off it (203.22) and not on
+            // it, because its colour is not a reference — the BACKGROUND
             // section holds it on integer HSV sliders, and BASIC's hue
             // is carried onto it by `Tone::shift`. One notch of that
             // slider is the finest the body's bed can be stated at, and
             // 0.24 deg is well inside one notch.
             //
-            // Read ENCODED instead of decoded the three spread nearly
+            // Read ENCODED instead of decoded the two spread nearly
             // three degrees — six times the quantisation and the thing
             // this tolerance is really here to catch, because a reader
             // could not tell that apart from a real drift.
-            let spread = hue_gap(rail.h, sub.h).max(hue_gap(sub.h, page.h));
             assert!(
-                spread < 0.5,
-                "at {turn} deg the three bands are on three hues: {} {} {}",
+                hue_gap(rail.h, page.h) < 0.5,
+                "at {turn} deg the two bands are on two hues: {} {}",
                 rail.h,
-                sub.h,
                 page.h
             );
             // THE EXCEPTION the owner carved out: severity carries
@@ -12243,30 +12617,30 @@ mod tests {
     }
 
     /// THE OTHER HALF OF THE OWNER'S SCREENSHOT: the editor's BACKGROUND
-    /// section moves the WHOLE window, and the columns go with it.
+    /// section moves the WHOLE window, and the navigation goes with it.
     ///
     /// WHAT WENT WRONG. BACKGROUND writes the window body as an ABSOLUTE
     /// colour off its own sliders — `component.panel.fill` on SOLID
-    /// (`edit::glass_edits`) — while the two navigation columns were
-    /// pinned to rungs of the surface ladder that no slider on that page
+    /// (`edit::glass_edits`) — while the navigation columns were pinned
+    /// to rungs of the surface ladder that no slider on that page
     /// touches. Drag the background and the page turned; the columns did
     /// not. What the owner photographed was a window in two colours,
     /// which is the same fault as the black stripes and not a second one.
     ///
     /// WHERE IT IS FIXED, and why nothing here does the fixing. The
-    /// master anchors all three beds to ONE token — the body — so the
-    /// columns follow it by construction, in the theme, and this window
-    /// keeps carrying names to the theme and painting back what it is
-    /// given. This test is the proof of the whole chain: slider,
-    /// `editor_edits`, `set_preview`, bake, and the three colours that
-    /// come back out.
+    /// master anchors both beds to ONE token — the body — so the rail
+    /// follows it by construction, in the theme, and this window keeps
+    /// carrying names to the theme and painting back what it is given.
+    /// This test is the proof of the whole chain: slider,
+    /// `editor_edits`, `set_preview`, bake, and the colours that come
+    /// back out.
     ///
     /// AND IT GUARDS THE SECTION IT LEANS ON. SOLID, BLUR and FROSTED
     /// GLASS each still do their own job, because a fix to the columns
     /// that quietly cost the window its glass would be a worse trade
     /// than the fault.
     #[test]
-    fn the_background_section_moves_all_three_columns_at_once() {
+    fn the_background_section_moves_both_columns_at_once() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
@@ -12297,47 +12671,35 @@ mod tests {
         s.apply_editor_preview();
 
         let page = lch(live("component.panel.fill"));
-        let sub = lch(live("component.settings.sub_fill"));
         let rail = lch(live("component.settings.rail_fill"));
 
         // The body really left the theme it opened on — or the assertion
-        // below would be comparing three colours that never moved.
+        // below would be comparing two colours that never moved.
         assert!(
             hue_gap(page.h, master_hue) > 20.0,
             "the BACKGROUND slider did not move the body at all: {} vs {}",
             master_hue,
             page.h
         );
-        // AND ALL THREE COLUMNS WENT WITH IT. This is the divergence,
-        // measured: pinned to the ladder the two columns would have
+        // AND BOTH COLUMNS WENT WITH IT. This is the divergence,
+        // measured: pinned to the ladder the navigation would have
         // stayed on the master's hue while the page took the slider's.
-        for (name, c) in [("sub", sub), ("rail", rail)] {
-            assert!(
-                hue_gap(c.h, page.h) < 2.0,
-                "the {name} column stayed behind while BACKGROUND moved the page: \
-                 {} vs {}",
-                c.h,
-                page.h
-            );
-        }
-        // Still ONE bed under both navigation columns, still one step
-        // above the page, still not black.
         assert!(
-            (rail.l - sub.l).abs() < 1e-3,
-            "the moved body parted the two navigation columns: {} vs {}",
-            rail.l,
-            sub.l
+            hue_gap(rail.h, page.h) < 2.0,
+            "the navigation stayed behind while BACKGROUND moved the page: {} vs {}",
+            rail.h,
+            page.h
         );
+        // Still one step above the page, still not black.
         assert!(
-            sub.l - page.l > 0.03,
+            rail.l - page.l > 0.03,
             "the navigation flattened onto the page it lies on: {} {}",
             page.l,
-            sub.l
+            rail.l
         );
         let black = nacelle::theme::Color::from_hex("#000000").expect("black");
         for (name, c) in [
             ("page", live("component.panel.fill")),
-            ("sub", live("component.settings.sub_fill")),
             ("rail", live("component.settings.rail_fill")),
         ] {
             let off = nacelle::theme::Color::wcag_contrast(c.to_linear(), black.to_linear());
@@ -12859,7 +13221,7 @@ mod tests {
                 // page's box less the scrollbar's lane. Asked of the same
                 // three functions the drawing asks, or the walk would be
                 // measuring a window nobody is looking at.
-                let nav = Panes::of(p.view, m, content);
+                let nav = s.panes(m, content);
                 let box_ = rows_box(nav.page);
                 // Walk the description band by band, at the furthest the
                 // offset goes, and inside a banded region column by
@@ -13580,7 +13942,7 @@ mod tests {
             for basic in [false, true] {
                 s.editor_basic = basic;
                 for page in PAGES.iter() {
-                    let nav = Panes::of(page.view, m, content);
+                    let nav = s.panes(m, content);
                     let box_ = rows_box(nav.page);
                     for zone in s.frame_zones(page, &nav) {
                         for (region, rows) in zone_regions(zone, box_) {
@@ -13617,6 +13979,7 @@ mod tests {
                                     Ctrl::Toggle { .. }
                                     | Ctrl::Drop { .. }
                                     | Ctrl::Button { .. }
+                                    | Ctrl::Expander { .. }
                                     | Ctrl::Bar { .. }
                                     | Ctrl::Section { .. }
                                     | Ctrl::Note { .. }
@@ -13981,10 +14344,21 @@ mod tests {
         viewport_home();
     }
 
-    // ------------------------------------------------ the three panels
+    // -------------------------------------------------- the two panels
 
     /// The rail stands on every page of the window, and it says which
-    /// page that is out of the theme's own ladder.
+    /// page that is out of the theme's own ladder — ON BOTH LEVELS AT
+    /// ONCE where the page is inside an unfolded section (the owner's
+    /// mock-up, §4).
+    ///
+    /// WHY BOTH. While a section's pages stood in a COLUMN of their own
+    /// the two marks were in two places and could not be confused. Under
+    /// one rail they are four entries in one list, so a mark on the
+    /// section alone would leave the reader with an open section and no
+    /// word about which of its pages is on the right, and a mark on the
+    /// page alone would leave the section it belongs to anonymous. Both,
+    /// and this test counts them: on a page inside a section it asserts
+    /// that TWO DIFFERENT buttons of the one column wear the rung.
     ///
     /// The marker is the point. "Where am I" is a STATE, so it is the
     /// button ladder's `selected` rung — the same rung an unfolded
@@ -13998,6 +14372,7 @@ mod tests {
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
         let mut fonts = nacelle::font::FontSystem::new();
+        let mut both_levels = 0;
         for p in PAGES.iter() {
             let mut s = furnished();
             s.view = p.view;
@@ -14007,31 +14382,51 @@ mod tests {
             let at = |act: Act| {
                 s.hits.iter().find(|&&(_, a)| a == act).map(|&(r, _)| r)
             };
+            // Everything the rail offers on this page — its sections and,
+            // under the open one, that section's pages. Exactly the two
+            // the view names wear the rung, and nothing else does.
+            let mut marked: Vec<Act> = Vec::new();
             for act in rail_acts(&s) {
                 let r = at(act).unwrap_or_else(|| {
-                    panic!("{}: the rail lost a section", p.title)
+                    panic!("{}: the rail lost an entry", p.title)
                 });
-                let want = act == rail_act(p.view);
-                assert_eq!(
-                    rung(s.button_state(&ctx, r, act)) == State::Selected,
-                    want,
-                    "{}: the rail marks the wrong section",
-                    p.title
-                );
+                let want = act == rail_act(p.view) || kid_act(p.view) == Some(act);
+                let got = rung(s.button_state(&ctx, r, act)) == State::Selected;
+                assert_eq!(got, want, "{}: the rail marks the wrong entry", p.title);
+                if got {
+                    marked.push(act);
+                }
             }
-            // The section's own column marks the page inside it, and
-            // marks nothing at all where the page is not one of its
-            // entries (the editor, the reset confirmation).
-            for act in sub_acts(&s, p.view) {
-                let r = at(act).expect("a page of the section was not drawn");
-                assert_eq!(
-                    rung(s.button_state(&ctx, r, act)) == State::Selected,
-                    sub_act(p.view) == Some(act),
-                    "{}: the section's column marks the wrong page",
-                    p.title
+            // BOTH LEVELS, counted. A page the section does not list
+            // (the editor, the reset confirmation) marks its section
+            // alone — which is true and not a gap: neither of them is
+            // one of its entries.
+            let want = 1 + usize::from(kid_act(p.view).is_some());
+            assert_eq!(
+                marked.len(),
+                want,
+                "{}: {} entries of the rail wear the rung and the page names {}",
+                p.title,
+                marked.len(),
+                want
+            );
+            if want == 2 {
+                both_levels += 1;
+                // Named by the id the chain knows them as: `Act` has no
+                // Debug and giving it one drags four more enums with it.
+                assert!(
+                    marked[0] != marked[1],
+                    "{}: one entry was counted as both levels of the mark ({})",
+                    p.title,
+                    focus_id(marked[0]).0
                 );
             }
         }
+        assert!(
+            both_levels > 0,
+            "no page in the window stands inside an unfolded section, so the \
+             double mark was never measured"
+        );
         // A section the machine cannot offer registers nothing at all
         // (R6): grey, and not a target.
         let mut s = furnished();
@@ -14099,11 +14494,22 @@ mod tests {
         }
     }
 
-    /// A second column only where the section has pages, and the two
-    /// columns are the same width when both stand (owner, 2026-08-16:
-    /// "OBIE kolumny nawigacji RÓWNEJ szerokości").
+    /// ONE COLUMN OF NAVIGATION AND THE PAGE (owner's mock-up,
+    /// 2026-08-18, §1) — and the page's width is the SAME width whatever
+    /// section stands open.
+    ///
+    /// WHAT THIS REPLACED. A section's pages used to stand in a column of
+    /// their own, so this window had to reserve that column's width on
+    /// every page whether the section showed one or not: reserving it
+    /// only where it stood would have re-shaped the window under the
+    /// reader's hand every time they changed section. A fifth of the
+    /// window was therefore spent, permanently, on a column most sections
+    /// never used. Pages that unfold UNDER their section take no width at
+    /// all, and the second half of this test is what says so — the page
+    /// is the same rectangle on the section that has pages and on the one
+    /// that does not.
     #[test]
-    fn only_a_section_with_pages_gets_a_second_column() {
+    fn the_navigation_is_one_column_and_the_page_takes_the_rest() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
@@ -14112,89 +14518,510 @@ mod tests {
         let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
-        let with = Panes::of(View::LookFeel, m, content);
-        // The BEDS are what a column IS: where the gutter falls and how
+        let nav = furnished().panes(m, content);
+        assert!(!nav.folded, "the window folded at a width it fits in");
+        // The BED is what a column IS: where the gutter falls and how
         // wide the column reads are questions about the paint, not about
         // the room its rows were given inside it.
-        let (rail, sub) = (
-            with.rail.expect("no rail").bed,
-            with.sub.expect("LOOK AND FEEL has pages and no column for them").bed,
-        );
-        assert!(!with.folded, "the window folded at a width it fits in");
+        let rail = nav.rail.expect("no rail").bed;
         assert!(
-            (rail.w - sub.w).abs() < 0.01,
-            "the two navigation columns are {} px and {} px",
-            rail.w,
-            sub.w
+            (rail.x - content.x).abs() < 0.01,
+            "the rail does not start at the content box's own edge"
         );
         assert!(
-            (sub.x - rail.right() - col_gap()).abs() < 0.01,
-            "the gutter between the columns is not settings.col_gap"
+            (nav.page.x - rail.right() - col_gap()).abs() < 0.01,
+            "the gutter between the rail and the page is not settings.col_gap"
         );
         assert!(
-            (with.page.x - sub.right() - col_gap()).abs() < 0.01,
-            "the page does not start after the second column"
-        );
-        assert!(
-            (with.page.right() - content.right()).abs() < 0.01,
+            (nav.page.right() - content.right()).abs() < 0.01,
             "the page does not take the whole of the rest"
         );
-        // The column and the band it becomes when the window folds are
-        // the SAME entries — one table read two ways.
-        let (rows, zone) = subrail(View::LookFeel).expect("no second column");
-        match zone {
-            Zone::Flow { rows: banded, .. } => assert!(
-                std::ptr::eq(*banded, rows),
-                "the folded window's column is not the column beside the page"
-            ),
-            _ => panic!("a navigation column is a flow and nothing else"),
-        }
 
-        // A section that IS its page: the content starts straight after
-        // the rail, and the width the second column would have taken is
-        // the page's.
-        let without = Panes::of(View::Grid, m, content);
-        assert!(without.sub.is_none(), "GRID grew a column of pages");
+        // AND THE SPLIT IS THE SAME SPLIT ON EVERY PAGE. The section with
+        // pages of its own and the one without are measured through the
+        // frames the window really draws, because the split is no longer
+        // even a question `Panes` is asked — a test that only called
+        // `Panes::of` twice would be comparing one value with itself.
+        let mut widths: Vec<f32> = Vec::new();
+        for view in [View::LookFeel, View::Grid] {
+            let mut s = furnished();
+            s.view = view;
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            s.draw(&mut ctx);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            widths.push(s.body_box(page(view), m, content).w);
+        }
         assert!(
-            (without.page.x - rail.right() - col_gap()).abs() < 0.01,
-            "a section without pages still leaves room for a column"
+            (widths[0] - widths[1]).abs() < 0.01,
+            "the section with pages leaves the page {} px and the one without {} px \
+             — the pages took width the mock-up says they take by standing under \
+             their section",
+            widths[0],
+            widths[1]
         );
+
+        // AND THE SHAPE IS THE WINDOW'S, NOT THE SECTION'S, at every
+        // height the program is built for. The fold now has a HEIGHT
+        // half ([`Settings::panes`]) and a section's pages are part of
+        // what the rail has to hold, so a threshold that asked about
+        // THIS page would stand in columns on GRID and fold on LOOK AND
+        // FEEL — the window re-shaping itself under the reader's hand
+        // every time they changed section. It asks about the deepest
+        // section instead ([`Settings::rail_reach`]), which is why this
+        // holds.
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            let mut dl = nacelle::draw::DrawList::new();
+            let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let mut shapes: Vec<(&str, bool)> = Vec::new();
+            for p in PAGES.iter() {
+                let mut s = furnished();
+                s.view = p.view;
+                shapes.push((p.title, s.panes(m, content).folded));
+            }
+            let first = shapes[0].1;
+            if let Some((title, _)) = shapes.iter().find(|(_, f)| *f != first) {
+                panic!(
+                    "at {h}px {} and {title} put the window in two different \
+                     shapes — the fold follows the section instead of the window",
+                    shapes[0].0
+                );
+            }
+        }
+        viewport_home();
+    }
+
+
+    /// One frame of the settings window, with the focus chain walked:
+    /// what the pointer was offered, what Tab can reach, and where the
+    /// rail stood.
+    ///
+    /// Both halves of "is this on screen" in one place, because the
+    /// expander's whole claim is that they answer TOGETHER — a page the
+    /// hand cannot press and the keyboard can reach is exactly the fault
+    /// the toolkit's own list rule exists to prevent
+    /// (`object::dropdown::accordion`).
+    fn rail_frame(
+        fonts: &mut nacelle::font::FontSystem,
+        view: View,
+    ) -> (Vec<(Rect, Act)>, Vec<FocusId>, Panes) {
+        let mut s = furnished();
+        s.view = view;
+        let mut fc = FocusCtl::new();
+        let mut dl = nacelle::draw::DrawList::recording();
+        fc.begin_frame();
+        let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+        ctx.focus = Some(&mut fc);
+        s.draw(&mut ctx);
+        // The chain answers about the last COMPLETED frame.
+        fc.begin_frame();
+        let mut chain: Vec<FocusId> = Vec::new();
+        fc.focus(None);
+        for _ in 0..s.hits.len() * 2 + 16 {
+            fc.nav(Nav::Next);
+            if let Some(id) = fc.focused() {
+                if chain.contains(&id) {
+                    break;
+                }
+                chain.push(id);
+            }
+        }
+        let content = content_rect(modal_rect(1080.0 * 16.0 / 9.0, 1080.0));
+        let mut dl2 = nacelle::draw::DrawList::new();
+        let ctx2 = probe(&mut dl2, fonts, 1080.0, 1.0);
+        let nav = s.panes(Metrics::of(&ctx2, content), content);
+        (s.hits.clone(), chain, nav)
+    }
+
+    /// A SECTION THAT IS NOT THE ONE IN FORCE HANDS OUT NOTHING. Its
+    /// pages are not drawn, are not in the hit map and are not a step in
+    /// the Tab order.
+    ///
+    /// This is the toolkit's own rule, borrowed rather than re-invented:
+    /// `object::dropdown::accordion` puts an element in the focus chain
+    /// only when the whole of it is standing, "because a ring on a
+    /// sliver says «this is the whole object» about a part". A ring on
+    /// a page that is not on the screen at all says it about nothing —
+    /// the keyboard would land somewhere the eye cannot follow, and
+    /// Enter would open a page the reader never chose to look for.
+    ///
+    /// Said in the walker and not in a filter beside it
+    /// ([`Settings::draw_rows`]): a shut section's pages are not
+    /// recursed into, so there is no path by which one could be drawn,
+    /// pressed or focused, and no second rule to keep in step.
+    #[test]
+    fn a_shut_section_hands_out_no_target_and_no_place_in_the_chain() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        // GRID is a section that IS its page, so LOOK AND FEEL — the one
+        // section with pages — stands shut.
+        let (hits, chain, nav) = rail_frame(&mut fonts, View::Grid);
+        assert!(!nav.folded, "the window folded, so there is no rail to measure");
+        let shut = furnished();
+        let pages = nav_row_acts(&shut, &LOOKFEEL_PAGES);
         assert!(
-            without.page.w > with.page.w + 0.01,
-            "the section without pages did not take the room back"
+            !pages.is_empty(),
+            "LOOK AND FEEL lists no pages at all, so this test measures nothing"
+        );
+        for act in pages {
+            assert!(
+                !hits.iter().any(|&(_, a)| a == act),
+                "a page of a shut section ({}) answers the pointer",
+                focus_id(act).0
+            );
+            assert!(
+                !chain.contains(&focus_id(act)),
+                "a page of a shut section ({}) is a step in the Tab order",
+                focus_id(act).0
+            );
+        }
+        // And the section itself is still there — shut is not gone.
+        assert!(
+            hits.iter().any(|&(_, a)| a == Act::OpenLookFeel),
+            "the shut section lost its own entry"
         );
         viewport_home();
     }
 
-    /// ŻYCZENIE 1, MEASURED HERE — AND RE-DECIDED ON 2026-08-18. The two
-    /// NAVIGATION columns are painted in ONE colour, the page keeps the
-    /// window body under it, every colour comes out of the theme, and not
-    /// one of them is BLACK.
+    /// AND THE SECTION IN FORCE HANDS OUT BOTH. Every page it unfolds is
+    /// on the screen, answers the pointer, and stands in the Tab order —
+    /// in the order the description writes them, under their section.
+    #[test]
+    fn an_open_section_hands_out_every_page_to_the_hand_and_the_keyboard() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let (hits, chain, nav) = rail_frame(&mut fonts, View::LookFeel);
+        assert!(!nav.folded, "the window folded, so there is no rail to measure");
+        let open = {
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            s
+        };
+        let pages = nav_row_acts(&open, &LOOKFEEL_PAGES);
+        assert!(pages.len() > 1, "one page is not an unfold");
+        let rail = nav.rail.expect("no rail").rows;
+        let mut chain_at: Vec<usize> = Vec::new();
+        for act in &pages {
+            let r = hits
+                .iter()
+                .find(|&&(_, a)| a == *act)
+                .map(|&(r, _)| r)
+                .unwrap_or_else(|| {
+                    panic!("a page of the open section ({}) is not a target", focus_id(*act).0)
+                });
+            assert!(
+                r.w > 0.0 && r.h > 0.0,
+                "a page of the open section was offered with no area to press"
+            );
+            assert!(
+                r.y >= rail.y - 0.01 && r.bottom() <= rail.bottom() + 0.01,
+                "a page of the open section stands outside the rail's own room"
+            );
+            let at = chain
+                .iter()
+                .position(|id| *id == focus_id(*act))
+                .expect("a page of the open section is not in the Tab order");
+            chain_at.push(at);
+        }
+        // …and in the order the table writes them, which is reading
+        // order down the column.
+        assert!(
+            chain_at.windows(2).all(|w| w[0] < w[1]),
+            "the open section's pages are in the Tab order out of the order they \
+             are drawn in: {chain_at:?}"
+        );
+        // The section stands ABOVE its own pages, because they belong to
+        // it and not the other way round.
+        let section = hits
+            .iter()
+            .find(|&&(_, a)| a == Act::OpenLookFeel)
+            .map(|&(r, _)| r)
+            .expect("the open section lost its own entry");
+        for act in &pages {
+            let r = hits.iter().find(|&&(_, a)| a == *act).map(|&(r, _)| r).unwrap();
+            assert!(
+                r.y >= section.bottom() - 0.01,
+                "a page of the section stands above the section it belongs to"
+            );
+        }
+        viewport_home();
+    }
+
+    /// AN ARROW IS A PROMISE (the owner's mock-up, §3). Only a section
+    /// that has pages wears one; a section that IS its page has nothing
+    /// to reveal and shows nothing that says it has.
     ///
-    /// THE ONE-COLOUR CLAIM IS READ OFF THE PAINT, not off the token
-    /// names. The two beds are pulled out of a recorded draw list and
-    /// their channels compared: a test that compared the names would pass
-    /// a master that had quietly gone back to two shades through a third
-    /// token, and the owner's complaint was about the SCREEN. His words:
-    /// "mają być po całości i obie w jednakowym kolorze, tym w środkowej
-    /// kolumnie".
+    /// STRUCTURAL FIRST, THEN PAINTED. The description can only give a
+    /// section pages through [`Ctrl::Expander`], which is also the only
+    /// kind the drawing puts a triangle on — so the first half of this
+    /// is a property of the grammar and the second half is the frame
+    /// agreeing with it. A `kids: &[]` written on an ordinary button
+    /// would be the failure this guards, and there is no field to write
+    /// it in.
+    #[test]
+    fn a_section_with_no_pages_wears_no_arrow() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        // THE GRAMMAR. Every entry of the rail is one kind or the other,
+        // and only the expanders carry pages.
+        let mut expanders = 0;
+        let mut plain = 0;
+        for row in RAIL_ROWS.iter() {
+            match row.ctrl {
+                Ctrl::Expander { kids, .. } => {
+                    expanders += 1;
+                    assert!(
+                        !kids.is_empty(),
+                        "an expander with no pages is an arrow that promises nothing"
+                    );
+                }
+                Ctrl::Button { .. } => plain += 1,
+                _ => {}
+            }
+        }
+        assert!(expanders > 0 && plain > 0, "the rail is all of one kind: this test \
+             needs a section with pages and one without");
+
+        // THE FRAME. One triangle in the whole navigation column,
+        // standing on the one entry that has pages — read off the
+        // recorded draw list, so a second arrow drawn by hand somewhere
+        // would be caught however it got there.
+        let mut fonts = nacelle::font::FontSystem::new();
+        for view in [View::LookFeel, View::Grid] {
+            let mut s = furnished();
+            s.view = view;
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let nav = s.panes(Metrics::of(&ctx, content), content);
+            let bed = nav.rail.expect("no rail").bed;
+            s.draw(&mut ctx);
+            let arrows: Vec<Vec<[f32; 2]>> = dl
+                .cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::Polyline { pts, closed: true, .. }
+                        if pts.len() == 3
+                            && pts.iter().all(|p| bed.contains(p[0], p[1])) =>
+                    {
+                        Some(pts.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                arrows.len(),
+                expanders,
+                "the rail drew {} triangles for {expanders} section(s) with pages",
+                arrows.len()
+            );
+            // And it stands on THAT entry's plate and on no other.
+            let owner = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == Act::OpenLookFeel)
+                .map(|&(r, _)| r)
+                .expect("the section with pages was not drawn");
+            for pts in &arrows {
+                assert!(
+                    pts.iter().all(|p| p[1] >= owner.y - 0.01 && p[1] <= owner.bottom() + 0.01),
+                    "a triangle stands on a rail entry that has no pages behind it"
+                );
+            }
+            // The GLYPH turns and the colour does not: shut it points
+            // along the row at what opening would reveal, open it points
+            // down at what it revealed. The toolkit's TREE grammar, which
+            // is the sentence a row that keeps its place in the column
+            // speaks (`view::paint::Disclosure`).
+            let pts = &arrows[0];
+            if view == View::LookFeel {
+                assert!(
+                    (pts[0][1] - pts[1][1]).abs() < 0.01 && pts[2][1] > pts[0][1],
+                    "an unfolded section's arrow is not pointing at its pages"
+                );
+            } else {
+                assert!(
+                    (pts[0][0] - pts[2][0]).abs() < 0.01 && pts[1][0] > pts[0][0],
+                    "a shut section's arrow is not pointing along its row"
+                );
+            }
+        }
+        viewport_home();
+    }
+
+    /// A SECTION'S PAGE STANDS IN FROM THE SECTION IT BELONGS TO, and
+    /// the step is the THEME's — `settings.rail_indent` — with the
+    /// hairline `settings.rail_guide_*` describes standing in it.
     ///
-    /// The window's half of the claim is what this can check: that each
+    /// THE INDENT IS THE WHOLE OF WHAT THE SECOND COLUMN USED TO SAY by
+    /// standing somewhere else, so it is the one thing here that may not
+    /// be a number in Rust. The theme is moved under the window and the
+    /// pages are measured again: a reader that had baked a step of its
+    /// own would keep the old offset and be caught, which a test that
+    /// only compared against `rail_indent()` could not do.
+    ///
+    /// AND THE GUIDE IS MEASURED WITH IT, from the recorded draw list.
+    /// Indent alone does not group anything — four buttons a little
+    /// further in read as four buttons that failed to line up — so the
+    /// line that brackets them is part of the claim and not decoration.
+    #[test]
+    fn a_sections_page_stands_in_from_the_section_it_belongs_to() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// The section's plate, its pages' plates, and every vertical
+        /// hairline the rail laid, at the theme in force.
+        fn measured(
+            fonts: &mut nacelle::font::FontSystem,
+        ) -> (Rect, Vec<Rect>, Vec<[f32; 4]>) {
+            theme::resolved();
+            theme::set_viewport(1080.0, 1.0);
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let nav = s.panes(Metrics::of(&ctx, content), content);
+            let bed = nav.rail.expect("no rail").bed;
+            s.draw(&mut ctx);
+            let at = |act: Act| {
+                s.hits.iter().find(|&&(_, a)| a == act).map(|&(r, _)| r).expect("no entry")
+            };
+            let section = at(Act::OpenLookFeel);
+            let pages: Vec<Rect> = nav_row_acts(&s, &LOOKFEEL_PAGES).into_iter().map(at).collect();
+            // A rect taller than it is wide, inside the rail: the guide,
+            // and nothing else the rail draws is that shape.
+            let rules: Vec<[f32; 4]> = dl
+                .cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::Rect { r, .. }
+                        if r[2] < r[3] && bed.contains(r[0], r[1]) =>
+                    {
+                        Some(*r)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (section, pages, rules)
+        }
+
+        let (section, pages, rules) = measured(&mut fonts);
+        let step = rail_indent();
+        assert!(step > 0.0, "the theme states no indent, so nothing is nested");
+        assert!(pages.len() > 1, "one page is not a run to bracket");
+        for (i, p) in pages.iter().enumerate() {
+            assert!(
+                (p.x - section.x - step).abs() < 0.01,
+                "page #{i} stands {} px in from its section and the theme asked \
+                 for {step}",
+                p.x - section.x
+            );
+            // …and it gives that room UP, rather than hanging off the
+            // column: a nested row is narrower, not shifted.
+            assert!(
+                (p.right() - section.right()).abs() < 0.01,
+                "page #{i} was shifted instead of nested — its right edge left \
+                 the section's by {} px",
+                p.right() - section.right()
+            );
+        }
+
+        // THE GUIDE: one hairline, of the theme's width, standing in the
+        // step, and spanning exactly the run it brackets.
+        assert_eq!(rules.len(), 1, "the rail laid {} vertical rules", rules.len());
+        let (want_x, want_w) = rail_guide_x(Rect::new(section.x, 0.0, section.w, 0.0));
+        let g = rules[0];
+        assert!(want_w > 0.0, "the theme states no width for the guide");
+        assert!(
+            (g[0] - want_x).abs() < 0.01 && (g[2] - want_w).abs() < 0.01,
+            "the guide stands at {} px wide {} px; the theme asked for {want_x} / \
+             {want_w}",
+            g[0],
+            g[2]
+        );
+        assert!(
+            g[0] >= section.x - 0.01 && g[0] + g[2] <= pages[0].x + 0.01,
+            "the guide left the step it brackets"
+        );
+        let (top, bottom) =
+            (pages[0].y, pages[pages.len() - 1].bottom());
+        assert!(
+            (g[1] - top).abs() < 0.01 && (g[1] + g[3] - bottom).abs() < 0.01,
+            "the guide runs {}..{} and the pages it brackets run {top}..{bottom}",
+            g[1],
+            g[1] + g[3]
+        );
+
+        // AND THE STEP IS THE THEME'S. Double it in a file and the pages
+        // move with it — a step baked into this window would not.
+        {
+            let _t = crate::widgets::Themed::new(
+                "wide-rail-indent",
+                "[settings]\nrail_indent = 6u\n",
+            );
+            let (section, pages, rules) = measured(&mut fonts);
+            let step = rail_indent();
+            assert!(
+                (step - 32.4).abs() < 0.5,
+                "the theme's own indent did not reach the window: {step}"
+            );
+            for p in &pages {
+                assert!(
+                    (p.x - section.x - step).abs() < 0.01,
+                    "a page kept its old step under a theme that asked for {step}"
+                );
+            }
+            let (want_x, _) = rail_guide_x(Rect::new(section.x, 0.0, section.w, 0.0));
+            assert!(
+                (rules[0][0] - want_x).abs() < 0.01,
+                "the guide stayed where the old step put it"
+            );
+        }
+        viewport_home();
+    }
+
+    /// ŻYCZENIE 1, MEASURED HERE — RE-DECIDED TWICE ON 2026-08-18. The
+    /// NAVIGATION is ONE bed, the page keeps the window body under it,
+    /// every colour comes out of the theme, and neither of them is BLACK.
+    ///
+    /// WHAT THE OWNER ASKED AND WHAT ANSWERED IT. First: "mają być po
+    /// całości i obie w jednakowym kolorze, tym w środkowej kolumnie" —
+    /// two adjacent navigation strips at two shades read as a seam
+    /// through one object. That was answered by pointing both at one
+    /// colour, and this test then read the two painted beds back out of a
+    /// recorded draw list and compared their channels. Then his mock-up
+    /// took the second column away altogether, and the strongest form of
+    /// the same claim came with it: there is ONE bed to paint, so there
+    /// is no seam to measure and no second token to drift.
+    ///
+    /// The window's half of the claim is what this can check: that the
     /// bed is the box [`Panes`] cut, wears the corner the THEME states,
-    /// and carries the colour ITS OWN TOKEN resolves to — no fourth
-    /// colour mixed in Rust, no radius written here, and no bed painted
-    /// off a name it does not own. That the two navigation tokens resolve
-    /// to one colour a step above the body is the MASTER's arrangement,
-    /// measured over the master in libnacelle
-    /// (`the_two_navigation_bands_are_one_bed_over_the_body`).
+    /// and carries the colour ITS OWN TOKEN resolves to — no colour mixed
+    /// in Rust, no radius written here, and no bed painted off a name it
+    /// does not own. That the rail's token resolves to one colour a step
+    /// above the body is the MASTER's arrangement, measured over the
+    /// master in libnacelle
+    /// (`the_navigation_band_is_one_bed_over_the_body`).
     ///
-    /// TWO OF THE THREE ARE PAINTED under the master and the third is
+    /// ONE OF THE TWO IS PAINTED under the master and the other is
     /// NAMED: `component.settings.page_fill` ships as the sentinel `none`
     /// because the page's bed is the WINDOW BODY, `component.panel.fill`,
     /// and that rung is translucent — laying a bed of it over the body
     /// composes its alpha twice (#131E19 against #15201B over the field
     /// the window stands on, an OKLab dE of 0.0078). A theme that gives
-    /// the token a colour gets a third band, and that is measured here as
+    /// the token a colour gets a second band, and that is measured here as
     /// well: a name with no reader is exactly what the previous shape of
     /// this window was rightly held to account for.
     ///
@@ -14210,7 +15037,7 @@ mod tests {
     /// far apart — the master's two beds are 0.2320 and 0.2784 decoded,
     /// and the first of them alone reads 0.4840 encoded.
     #[test]
-    fn the_two_navigation_columns_are_one_bed_the_theme_chose() {
+    fn the_navigation_is_one_bed_the_theme_chose() {
         let _g = crate::widgets::theme_test_lock();
         // The MASTER's own bands, so a theme-editor preview left standing
         // by another test is not what this measures — a preview moves
@@ -14233,7 +15060,7 @@ mod tests {
             let mut ctx = probe(&mut dl, fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = Panes::of(View::LookFeel, m, content);
+            let nav = s.panes(m, content);
             s.draw_bands(&mut ctx, &nav);
             let out = ctx
                 .dl
@@ -14278,24 +15105,19 @@ mod tests {
         theme::set_viewport(1080.0, 1.0);
         let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
         assert!(!nav.folded, "the window folded at a width it fits in");
-        assert_eq!(drawn.len(), 2, "two columns to bed; the page's is the sentinel");
-        // Each band is its column's own rectangle — the same cut the
-        // rows are laid in, or the bed and what stands on it would
-        // disagree about where the column is.
+        assert_eq!(drawn.len(), 1, "one column to bed; the page's is the sentinel");
+        // The band is the column's own rectangle — the same cut the rows
+        // are laid in, or the bed and what stands on it would disagree
+        // about where the column is.
         let boxes: Vec<[f32; 4]> = drawn.iter().map(|(r, _, _)| *r).collect();
         let same = |b: &[f32; 4], r: Rect| {
             let want = [r.x, r.y, r.w, r.h];
             b.iter().zip(want.iter()).all(|(a, w)| (a - w).abs() < 0.01)
         };
-        for (name, r) in [
-            ("rail", nav.rail.expect("no rail").bed),
-            ("sub", nav.sub.expect("no column of pages").bed),
-        ] {
-            assert!(
-                boxes.iter().any(|b| same(b, r)),
-                "the {name} column has no bed of its own"
-            );
-        }
+        assert!(
+            boxes.iter().any(|b| same(b, nav.rail.expect("no rail").bed)),
+            "the rail has no bed of its own"
+        );
         // Every colour is the one ITS token resolves to: the window
         // carries a name to the theme and paints back what it is given.
         let th = theme::resolved();
@@ -14311,8 +15133,7 @@ mod tests {
             0.0,
             "the master bedded the page a second time; the body's `panel.fill` is it"
         );
-        let want =
-            [of("component.settings.rail_fill"), of("component.settings.sub_fill")];
+        let want = [of("component.settings.rail_fill")];
         for (i, (_, _, got)) in drawn.iter().enumerate() {
             let w = want[i];
             assert!(
@@ -14347,11 +15168,11 @@ mod tests {
             }
         }
 
-        // AND NOT ONE BED IS BLACK. The two the window painted, and the
-        // body standing where the page is — which is the third bed as
+        // AND NEITHER BED IS BLACK. The one the window painted, and the
+        // body standing where the page is — which is the second bed as
         // far as the eye is concerned.
         let body = col(th.bed(nacelle::theme::id("component.panel.fill").expect("no body")));
-        for (name, c) in [("rail", want[0]), ("sub", want[1]), ("page", body)] {
+        for (name, c) in [("rail", want[0]), ("page", body)] {
             assert!(
                 off_black(c) >= NOT_BLACK,
                 "the {name} column reads {} against pure black — a black stripe, \
@@ -14391,57 +15212,44 @@ mod tests {
             once.to_hex(),
             twice.to_hex()
         );
-        // THE OWNER'S FIRST ASK, READ OFF THE PAINT AND NOT OFF THE
-        // TOKENS: the two beds this frame really laid are ONE COLOUR,
-        // channel for channel and alpha included. `want` came from the
-        // theme and `drawn` from the recorded draw list, and the loop
-        // above already tied each `want` to the band it was painted in —
-        // so this is the window's own pixels answering.
-        let (a, b) = (drawn[0].2, drawn[1].2);
-        for (ch, x, y) in
-            [("r", a.r, b.r), ("g", a.g, b.g), ("b", a.b, b.b), ("a", a.a, b.a)]
-        {
-            assert!(
-                (x - y).abs() < 1e-6,
-                "the two navigation columns were painted apart on {ch}: \
-                 {x} vs {y} — the owner asked for one colour across both"
-            );
-        }
+        // THE OWNER'S FIRST ASK IS NOW STRUCTURAL. It was "one colour
+        // across both navigation columns", and this test used to read
+        // the two painted beds back and compare their channels. There is
+        // ONE bed since the columns became one, so the assertion that
+        // replaces it is the count above — a second navigation band
+        // would have to be painted before it could be painted wrong.
+
         // ONE HUE, AND THE NAVIGATION A STEP OFF THE PAGE — the owner's
         // "hue ten sam, odcień koloru inny", read off what the window
-        // really shows: the bed it laid twice, and the BODY standing
-        // where the page is.
-        let (page, rail, sub) = (lch(body), lch(want[0]), lch(want[1]));
-        for (x, y, n) in [(page, rail, "page/rail"), (page, sub, "page/sub")] {
-            // Two degrees, which is what libnacelle holds each rung to
-            // against the SEED over the master — read in linear light
-            // they sit on ONE number because they come out of ONE token,
-            // and the tolerance is float noise and the sRGB rounding.
-            // Read encoded they spread nearly three degrees and this
-            // assertion would fail, which is the point of the space.
-            assert!(
-                hue_gap(x.h, y.h) < 2.0,
-                "{n}: two settings beds are two COLOURS ({} vs {} deg), not two shades",
-                x.h,
-                y.h
-            );
-            // The master's two, decoded: 0.2320 and 0.2784, a step of
-            // 0.046.
-            assert!(
-                (x.l - y.l).abs() > 0.03,
-                "{n}: the navigation and the page are the same shade ({} vs {})",
-                x.l,
-                y.l
-            );
-        }
+        // really shows: the bed it laid, and the BODY standing where the
+        // page is.
+        let (page, rail) = (lch(body), lch(want[0]));
+        // Two degrees, which is what libnacelle holds each rung to
+        // against the SEED over the master — read in linear light they
+        // sit on ONE number because they come out of ONE token, and the
+        // tolerance is float noise and the sRGB rounding. Read encoded
+        // they spread nearly three degrees and this assertion would
+        // fail, which is the point of the space.
+        assert!(
+            hue_gap(page.h, rail.h) < 2.0,
+            "page/rail: two settings beds are two COLOURS ({} vs {} deg), not two shades",
+            page.h,
+            rail.h
+        );
+        // The master's two, decoded: 0.2320 and 0.2784, a step of 0.046.
+        assert!(
+            (page.l - rail.l).abs() > 0.03,
+            "the navigation and the page are the same shade ({} vs {})",
+            page.l,
+            rail.l
+        );
         // AND THE NAVIGATION LIES ON THE PAGE, not under it: the page is
         // the well and the chrome you steer with lies on the thing you
         // are steering.
         assert!(
-            page.l < sub.l && (sub.l - rail.l).abs() < 1e-3,
-            "the columns are not one bed over the body: {} {} {}",
+            page.l < rail.l,
+            "the navigation is not a bed over the body: {} {}",
             page.l,
-            sub.l,
             rail.l
         );
 
@@ -14464,10 +15272,10 @@ mod tests {
             "no window height in HEIGHTS folds — the folded band was never measured"
         );
 
-        // A THEME MOVES ALL THREE AT ONCE, through the one token the
-        // master anchors them to. This is the divergence the owner
+        // A THEME MOVES BOTH AT ONCE, through the one token the master
+        // anchors them to. This is the divergence the owner
         // photographed — the page followed the editor's BACKGROUND
-        // sliders and the two columns did not — written as the theme
+        // sliders and the navigation did not — written as the theme
         // those sliders write.
         {
             let _t = crate::widgets::Themed::new(
@@ -14485,25 +15293,20 @@ mod tests {
             assert!((moved.l - 0.42).abs() < 0.01, "the fixture did not move the body");
             let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
             assert!(!nav.folded);
-            assert_eq!(drawn.len(), 2, "a moved body grew the window a third bed");
-            for (name, c) in [
-                ("rail", lch(of("component.settings.rail_fill"))),
-                ("sub", lch(of("component.settings.sub_fill"))),
-            ] {
-                assert!(
-                    hue_gap(c.h, moved.h) < 2.0,
-                    "the {name} column stayed on the old hue while the body moved: \
-                     {} vs {}",
-                    c.h,
-                    moved.h
-                );
-                assert!(
-                    c.l > moved.l + 0.03,
-                    "the {name} column did not climb off the body it follows: {} vs {}",
-                    c.l,
-                    moved.l
-                );
-            }
+            assert_eq!(drawn.len(), 1, "a moved body grew the window a second bed");
+            let c = lch(of("component.settings.rail_fill"));
+            assert!(
+                hue_gap(c.h, moved.h) < 2.0,
+                "the rail stayed on the old hue while the body moved: {} vs {}",
+                c.h,
+                moved.h
+            );
+            assert!(
+                c.l > moved.l + 0.03,
+                "the rail did not climb off the body it follows: {} vs {}",
+                c.l,
+                moved.l
+            );
         }
 
         // AND THE PAGE'S NAME IS NOT DECORATION: give it a colour and
@@ -14516,10 +15319,10 @@ mod tests {
             theme::set_viewport(1080.0, 1.0);
             let (drawn, nav, _) = bands(&s, &mut fonts, 1080.0);
             assert!(!nav.folded);
-            assert_eq!(drawn.len(), 3, "the page's own token was not honoured");
+            assert_eq!(drawn.len(), 2, "the page's own token was not honoured");
             assert!(
                 drawn.iter().any(|(b, _, _)| same(b, nav.page)),
-                "the third bed is not the page's box"
+                "the second bed is not the page's box"
             );
         }
 
@@ -14585,7 +15388,7 @@ mod tests {
             let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = Panes::of(View::LookFeel, m, content);
+            let nav = s.panes(m, content);
             if nav.folded {
                 continue;
             }
@@ -14600,10 +15403,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            for (name, bed) in [
-                ("rail", nav.rail.expect("no rail").bed),
-                ("sub", nav.sub.expect("no column of pages").bed),
-            ] {
+            for (name, bed) in [("rail", nav.rail.expect("no rail").bed)] {
                 assert!(
                     (bed.y - content.y).abs() < 0.01,
                     "at {h}px the {name} bed starts {} px below the content box",
@@ -14695,7 +15495,7 @@ mod tests {
             ctx.focus = Some(&mut fc);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = Panes::of(View::LookFeel, m, content);
+            let nav = s.panes(m, content);
             // Folded there is no bed and nothing stands on one: the
             // entries are ordinary bands in the flow, which is the
             // scroll's ground and another test's.
@@ -14705,10 +15505,7 @@ mod tests {
             measured += 1;
             s.draw(&mut ctx);
 
-            for (name, col_) in [
-                ("rail", nav.rail.expect("no rail")),
-                ("sub", nav.sub.expect("no column of pages")),
-            ] {
+            for (name, col_) in [("rail", nav.rail.expect("no rail"))] {
                 // The room inside the paint, stated once: the rows box is
                 // the bed less its air, and every side of it is checked,
                 // because a fix that only insets the sides leaves the
@@ -14780,8 +15577,20 @@ mod tests {
 
     /// THE PAGE FOLLOWS THE BUTTON IT HANGS UNDER. A page's first row
     /// stands its own lead below the chrome button's row — wherever that
-    /// row is — and where the page leads with the ordinary row gap, it
-    /// stands on the SAME LINE as the rail's first entry.
+    /// row is — and the rail's first entry stands its OWN break under
+    /// the same button.
+    ///
+    /// THE TWO USED TO BE ONE LINE and are deliberately not any more.
+    /// While the rail and the pages shared `modal.row_gap` the first
+    /// entry and the first row landed together, and this test held them
+    /// there. Since 2026-08-18 the rail has a rhythm of its own
+    /// (`settings.rail_row_gap`, [`Metrics::rail`]) because it carries
+    /// the open section's pages and cannot afford a form's breaks — so
+    /// the rail's first entry stands HIGHER than the page's first row,
+    /// by exactly the difference between the two tokens. That is the
+    /// claim now, and it is a claim about the theme's two numbers rather
+    /// than about one: a rail that drifted off the button for any other
+    /// reason still fails.
     ///
     /// THE FAULT THIS CATCHES was made by the fix beside it. Moving the
     /// chrome button onto the rail's bed (`settings.band_pad_y` down from
@@ -14815,7 +15624,7 @@ mod tests {
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
             for p in PAGES.iter() {
-                let nav = Panes::of(p.view, m, content);
+                let nav = s.panes(m, content);
                 let top = s.body_box(p, m, content).y;
                 let want = nav.corner.bottom() + m.space(p.lead);
                 assert!(
@@ -14826,17 +15635,21 @@ mod tests {
                     top - nav.corner.bottom(),
                     m.space(p.lead)
                 );
-                // ONE LINE, where the two ask for the same gap. The rail
-                // hangs a FIXED row gap under the button ([`Panes::of`]),
-                // so a page that leads with `Gap::Row` and the rail's
-                // first entry are the same line — the alignment the
-                // window has always had and the one the move broke.
+                // AND THE RAIL HANGS ITS OWN BREAK UNDER THE SAME
+                // BUTTON ([`Panes::of`]). A page leading with `Gap::Row`
+                // therefore stands exactly `modal.row_gap −
+                // settings.rail_row_gap` below the rail's first entry —
+                // both numbers the theme's, neither of them written
+                // here. Set the two tokens equal in a theme and the two
+                // are one line again, which is the alignment this
+                // window had before the rail needed a rhythm of its own.
                 if let (Some(rail), true) = (nav.rail, p.lead == Gap::Row) {
                     lined_up += 1;
+                    let step = m.gap - m.rail().gap;
                     assert!(
-                        (top - rail.rows.y).abs() < 0.01,
-                        "{} at {h}px: the page's first row stands {} px off the \
-                         rail's first entry",
+                        (top - rail.rows.y - step).abs() < 0.01,
+                        "{} at {h}px: the page's first row stands {} px under the \
+                         rail's first entry and the two rhythms differ by {step}",
                         p.title,
                         top - rail.rows.y
                     );
@@ -14860,7 +15673,7 @@ mod tests {
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
         assert!(
-            !Panes::of(View::LookFeel, m, content).folded,
+            !s.panes(m, content).folded,
             "the window folded at a width it fits in"
         );
         s.draw(&mut ctx);
@@ -14881,13 +15694,24 @@ mod tests {
     }
 
 
-    /// The rail shows every section it has, at every window height the
+    /// The rail shows every section it has — AND, ON EVERY PAGE, THE
+    /// PAGES THE OPEN SECTION UNFOLDS — at every window height the
     /// program is built for.
     ///
     /// Fail-closed: a rail taller than its box is cut off by its own
     /// clip, and a section cut off is a section no pointer can reach —
     /// the navigation would be the one part of this window with no way
     /// to scroll to what it hides.
+    ///
+    /// AND THIS IS THE MEASUREMENT THE SINGLE-OPEN RULE RESTS ON
+    /// ([`Settings::rail_open`], decision (a)). While a section's pages
+    /// stood in a column of their own the rail's height was one number
+    /// whatever page you were on; now the open section's pages are part
+    /// of it, so the tallest rail this window can ever build is the
+    /// tallest SECTION's — which is why the sweep runs every view and
+    /// not the two it used to. Were sections independently expandable
+    /// the bound would be the SUM of every section's pages instead, and
+    /// nothing here could tell whether that still fitted.
     #[test]
     fn the_navigation_fits_the_window_it_stands_in() {
         let _g = crate::widgets::theme_test_lock();
@@ -14899,70 +15723,117 @@ mod tests {
         // the shut rail is strictly the longer of the two. Measuring the
         // short one and calling the property proved is how a fail-closed
         // test comes to guard everything except the case that grew.
-        let open = furnished();
-        let mut shut = furnished();
-        shut.color_enabled = false;
-        assert!(open.color_enabled && !shut.color_enabled, "two rails, not one");
+        /// One window, on one page, on one of the two machines.
+        fn rail_of(view: View, colour_manager: bool) -> Settings {
+            let mut s = furnished();
+            s.color_enabled = colour_manager;
+            s.view = view;
+            s
+        }
+        assert!(
+            furnished().color_enabled,
+            "the fixture lost its colour manager, so the two machines are one"
+        );
         let mut fonts = nacelle::font::FontSystem::new();
         let mut dl = nacelle::draw::DrawList::new();
         let mut measured = 0;
+        let mut unfolded = 0;
         for h in HEIGHTS {
             theme::resolved();
             theme::set_viewport(h, 1.0);
             let ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            for view in [View::LookFeel, View::Grid] {
-                let nav = Panes::of(view, m, content);
-                // Folded, the entries are in the flow and the scroll
-                // answers for them — that is the other test's ground.
-                // `.rows` since the columns fix: a Column is a bed AND the
-                // box its rows stand in, and what a rail WANTS is measured
-                // against the latter.
-                let Some(rail) = nav.rail.map(|c| c.rows) else { continue };
+            for p in PAGES.iter() {
+                let (open, shut) = (rail_of(p.view, true), rail_of(p.view, false));
                 // The point of the second state, stated so it cannot
                 // quietly stop being true: a machine with no colour
                 // manager keeps the greyed entry AND gains the note, so
                 // its rail is the longer one. If the two ever measure
                 // the same, this loop is running twice over one rail.
-                assert!(
-                    shut.rows_h(&RAIL_ROWS, m, rail) > open.rows_h(&RAIL_ROWS, m, rail),
-                    "at {h}px the shut rail is no taller than the open one — \
-                     the case this test was widened for is not being measured"
-                );
-                for (which, s) in [("with a colour manager", &open), ("without one", &shut)] {
-                    measured += 1;
-                    let want = s.rows_h(&RAIL_ROWS, m, rail);
+                let both = open.panes(m, content).rail.map(|c| c.rows);
+                if let Some(rail) = both {
                     assert!(
-                        want <= rail.h + 0.01,
-                        "at {h}px, {which}, the rail wants {want} px and has {} px",
-                        rail.h
+                        shut.rows_h(&RAIL_ROWS, m.rail(), rail)
+                            > open.rows_h(&RAIL_ROWS, m.rail(), rail),
+                        "at {h}px the shut rail is no taller than the open one — \
+                         the case this test was widened for is not being measured"
                     );
-                    if let (Some(box_), Some(rows)) =
-                        (nav.sub.map(|c| c.rows), subrail_rows(view))
-                    {
-                        let want = s.rows_h(rows, m, box_);
+                }
+                for (which, s) in [("with a colour manager", &open), ("without one", &shut)] {
+                    let nav = s.panes(m, content);
+                    // Folded, the entries are in the flow and the scroll
+                    // answers for them — that is the other test's
+                    // ground. `.rows` since the columns fix: a Column is
+                    // a bed AND the box its rows stand in, and what a
+                    // rail WANTS is measured against the latter.
+                    let Some(rail) = nav.rail.map(|c| c.rows) else {
+                        // …and 1080p is not allowed to be one of those.
+                        // THIS is the fail-closed half now: the height
+                        // fallback in [`Settings::panes`] is a floor for
+                        // a genuinely tiny window, not a way for a rail
+                        // that has outgrown its column to pass quietly.
                         assert!(
-                            want <= box_.h + 0.01,
-                            "at {h}px, {which}, the section's column wants {want} px \
-                             and has {} px",
-                            box_.h
+                            h < 1080.0,
+                            "at {h}px, {which}, {} folded the whole window because \
+                             its rail no longer fits a column — the rail has \
+                             outgrown the size this program is written for",
+                            p.title
+                        );
+                        continue;
+                    };
+                    measured += 1;
+                    let want = s.rows_h(&RAIL_ROWS, m.rail(), rail);
+                    // The pages the open section unfolds are IN that
+                    // number: `rows_h` recurses into the section in
+                    // force and into no other ([`Settings::rows_span`]).
+                    // Measured against the SAME rail standing on a page
+                    // whose section has no pages, so the difference is
+                    // exactly what the unfold cost.
+                    let plain =
+                        rail_of(View::Grid, s.color_enabled).rows_h(&RAIL_ROWS, m.rail(), rail);
+                    if kid_acts(s, p.view).is_empty() {
+                        assert!(
+                            (want - plain).abs() < 0.01,
+                            "at {h}px, {which}, {} unfolds nothing and still costs \
+                             {want} px against the plain rail's {plain}",
+                            p.title
+                        );
+                    } else {
+                        unfolded += 1;
+                        assert!(
+                            want > plain + 0.01,
+                            "at {h}px, {which}, {} unfolds pages and the rail did not \
+                             grow for them: {want} against {plain}",
+                            p.title
                         );
                     }
+                    assert!(
+                        want <= rail.h + 0.01,
+                        "at {h}px, {which}, the rail on {} wants {want} px and has \
+                         {} px",
+                        p.title,
+                        rail.h
+                    );
                 }
             }
         }
         assert!(measured > 0, "no height in the ladder drew a rail at all");
+        assert!(
+            unfolded > 0,
+            "no page in the sweep unfolded a section, so the height this test was \
+             widened for was never measured"
+        );
         viewport_home();
     }
 
     /// M4 in the large — the whole window folds, and the FOCUS CHAIN
     /// does not move a step when it does.
     ///
-    /// At the smallest window the three panels cannot all have their
-    /// width, so there are no panels: the rail's sections, the section's
-    /// pages and the page itself become one vertical list inside the one
-    /// scroll, and a band of columns runs its columns one after the
+    /// At the smallest window the two panels cannot both have their
+    /// width — or the rail cannot show what it holds — so there are no
+    /// panels: the rail's sections, the open section's pages and the
+    /// page itself become one vertical list inside the one scroll, and a band of columns runs its columns one after the
     /// other down that list instead of beside one another. At the
     /// largest, all of it stands side by side. Three things have to
     /// survive that, on EVERY page and at EVERY window the program is
@@ -15158,10 +16029,12 @@ mod tests {
 
         // The shapes really are different shapes, or all of the above is
         // one window measured five times. The WINDOW folds at the
-        // smallest height and stands in three panels at the largest; a
+        // smallest height and stands in two panels at the largest; a
         // BAND of columns folds with it and stands again once its own
         // columns have the width. Both sides of M4 are therefore walked
         // above, because both are true somewhere in the ladder.
+        let mut s = furnished();
+        s.view = View::Color;
         for (h, window_folded, band_folded) in
             [(HEIGHTS[0], true, true), (HEIGHTS[4], false, false)]
         {
@@ -15171,7 +16044,7 @@ mod tests {
             let ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = Panes::of(View::Color, m, content);
+            let nav = s.panes(m, content);
             assert_eq!(
                 nav.folded, window_folded,
                 "the window at {h}px is not the shape this test is about"
@@ -15245,7 +16118,7 @@ mod tests {
     /// TWO SHAPES, because the fold moves the navigation out of its
     /// columns and into the flow: at the smallest window the whole thing
     /// is one list inside the one scroll, at the largest it stands in
-    /// three panels, and neither shape may hide what the other offers.
+    /// two panels, and neither shape may hide what the other offers.
     ///
     /// The hit map is asked of the SWEEP — a target is owed to the
     /// pointer somewhere along the travel, not at every stop of it — and
@@ -15393,7 +16266,7 @@ mod tests {
                     let mut dl = nacelle::draw::DrawList::new();
                     let ctx = probe(&mut dl, &mut fonts, h, 1.0);
                     let content = content_rect(modal_rect(ctx.w, ctx.h));
-                    Panes::of(p.view, Metrics::of(&ctx, content), content).folded
+                    s.panes(Metrics::of(&ctx, content), content).folded
                 };
                 let flowed = flowed_acts(&s, p, folded);
                 let mut fc = FocusCtl::new();
@@ -15426,27 +16299,34 @@ mod tests {
     }
 
     /// The live acts of a run of navigation rows, in the order the
-    /// column registers them. A disabled entry (COLOR SPACE with no
-    /// colour compositor) is deliberately not one: R6 says it registers
-    /// nothing at all.
+    /// column registers them — a section's own pages included, WHERE
+    /// THE SECTION IS THE ONE OPEN, and at the place they stand.
+    ///
+    /// A disabled entry (COLOR SPACE with no colour compositor) is
+    /// deliberately not one: R6 says it registers nothing at all. Nor is
+    /// a shut section's page, which is the same sentence one level up
+    /// and the one [`row_acts`] answers with.
     fn nav_row_acts(s: &Settings, rows: &'static [Row]) -> Vec<Act> {
-        rows.iter()
-            .filter(|r| (r.enabled)(s) && (r.when)(s))
-            .filter_map(|r| match r.ctrl {
-                Ctrl::Button { act, .. } => Some(act),
-                _ => None,
-            })
-            .collect()
+        rows.iter().flat_map(|r| row_acts(s, r)).collect()
     }
 
-    /// The sections the rail offers this window.
+    /// Everything the rail offers this window: its sections, and the
+    /// pages of whichever section stands open.
     fn rail_acts(s: &Settings) -> Vec<Act> {
         nav_row_acts(s, &RAIL_ROWS)
     }
 
-    /// The pages the section in force offers beside the rail, if any.
-    fn sub_acts(s: &Settings, view: View) -> Vec<Act> {
-        subrail_rows(view).map_or_else(Vec::new, |rows| nav_row_acts(s, rows))
+    /// The pages the section in force unfolds under itself, if any —
+    /// asked on its own by the test that checks the SECOND half of the
+    /// double mark (§4).
+    fn kid_acts(s: &Settings, view: View) -> Vec<Act> {
+        RAIL_ROWS
+            .iter()
+            .find_map(|r| match r.ctrl {
+                Ctrl::Expander { act, kids, .. } if act == rail_act(view) => Some(kids),
+                _ => None,
+            })
+            .map_or_else(Vec::new, |kids| nav_row_acts(s, kids))
     }
 
     /// Everything the WINDOW promises on one page: the navigation, then
@@ -15457,8 +16337,10 @@ mod tests {
         // The chrome first, then the navigation, then the rest of the
         // page: `described_acts` puts the corner button at its head.
         let rest = out.split_off(1);
+        // The section's pages are IN `rail_acts`, at the place the rail
+        // draws them — under their section and not after the last of
+        // the sections, which is what the second column used to mean.
         out.extend(rail_acts(s));
-        out.extend(sub_acts(s, page.view));
         out.extend(rest);
         out
     }
@@ -15494,7 +16376,6 @@ mod tests {
         let mut out: Vec<Act> = Vec::new();
         if folded {
             out.extend(rail_acts(s));
-            out.extend(sub_acts(s, page.view));
         }
         for zone in page.zones {
             if matches!(zone, Zone::Pinned { .. }) || !zone_shown(zone, s) {
@@ -15521,6 +16402,16 @@ mod tests {
             | Ctrl::Slider { act, .. }
             | Ctrl::Cycle { act, .. }
             | Ctrl::Button { act, .. } => vec![*act],
+            // A section, and then its pages where it is the one open —
+            // the description's own reading of what the walker lays, and
+            // the reason a shut section contributes NOTHING here.
+            Ctrl::Expander { act, kids, .. } => {
+                let mut out = vec![*act];
+                if s.rail_open(*act) {
+                    out.extend(kids.iter().flat_map(|k| row_acts(s, k)));
+                }
+                out
+            }
             Ctrl::Chips { values, act, .. } => {
                 values(s).iter().map(|v| act(*v)).collect()
             }
@@ -15552,3 +16443,4 @@ fn next_of(list: &[String], current: Option<String>) -> Option<String> {
         },
     }
 }
+
