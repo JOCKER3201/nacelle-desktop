@@ -285,22 +285,14 @@ enum Knob {
     BarTrackB,
     BarTrackS,
     BarTrackH,
-    // ---- the BASIC page (2026-08-17). Three knobs for the WHOLE theme,
-    // ---- and every one of them a RELATIVE move over whatever the theme
-    // ---- already says — a rotation, a multiplier and an offset. They
-    // ---- are not a fourth way of writing a colour: the model turns them
-    // ---- into edits to the AUTHORS the rest of the theme derives from
-    // ---- (`theme::edit::tone_edits`), and the cascade does the rest.
-    /// Degrees the whole theme is turned by. One hue for the interface,
-    /// and the severity roles carried round together so `ok` stays as
-    /// far from `critical` as its author put it.
-    ToneHue,
-    /// The multiplier over every author's chroma; 100 is the theme
-    /// unchanged.
-    ToneSat,
-    /// The offset over every author's lightness and over the surface and
-    /// text ladders' two lifts; 50 is the theme unchanged.
-    ToneLight,
+    // ---- BASIC's three knobs stood here from 2026-08-17 to
+    // ---- 2026-08-18: a rotation, a multiplier and an offset over the
+    // ---- ten authors. The MOVE they wrote is still exactly what that
+    // ---- page sends the theme (`Settings::tone`, `theme::edit::Tone`);
+    // ---- what is gone is the three TRACKS, which the owner replaced
+    // ---- with a picker. A knob is a slider's name, so a page with no
+    // ---- slider has no knob — and `Act::Picker*` names the parts of
+    // ---- the control that took their place.
 }
 
 /// Which of the editor's switches a toggle row flips. Named like [`Knob`]
@@ -410,6 +402,28 @@ enum Act {
     EditorSaveAs,
     /// Drop the preview and reseed the controls from the theme.
     EditorCancel,
+    /// The colour picker's parts, one act each
+    /// ([`nacelle::object::color_picker::Part`]).
+    ///
+    /// SEVEN ACTS AND NOT ONE, because they are seven answers to
+    /// different questions and the window's whole event road is built on
+    /// an act naming what a press MEANS: the field and the bar are
+    /// dragged, the notation plate steps, a ready-made colour is picked
+    /// in one press, and the bank cell writes the current colour into
+    /// the row of the user's own. One act with a part inside it would
+    /// have been shorter and would have put the same focus id on seven
+    /// rects.
+    PickerField,
+    PickerValue,
+    PickerFormat,
+    /// The value written out. It has an act so it is a TARGET — a place
+    /// the Tab chain lands and a rect the pointer can find — before it
+    /// can be typed into; what a press does there is the next stage's
+    /// (a caret in this plate, `object::text_input`).
+    PickerText,
+    PickerBase(usize),
+    PickerCustom(usize),
+    PickerAdd,
     FamilyBtn(Sect),
     WeightBtn(Sect),
     FamilyPick(Sect, usize),
@@ -559,9 +573,6 @@ fn focus_id(act: Act) -> FocusId {
             Knob::BarTrackB => "settings.editor.scrollbar.track.b",
             Knob::BarTrackS => "settings.editor.scrollbar.track.s",
             Knob::BarTrackH => "settings.editor.scrollbar.track.h",
-            Knob::ToneHue => "settings.editor.tone.hue",
-            Knob::ToneSat => "settings.editor.tone.sat",
-            Knob::ToneLight => "settings.editor.tone.light",
         }),
         EditorFlip(f) => FocusId::of(match f {
             Flip::SurfaceOwnHue => "settings.editor.surface.own_hue",
@@ -594,6 +605,16 @@ fn focus_id(act: Act) -> FocusId {
         // door is no longer a row of that list — an id derived from the
         // list would now collide with its first theme.
         ThemesEditor => FocusId::of("settings.lookfeel.themes.editor"),
+        // The picker's seven, under one path: the two areas, the two
+        // plates and the cells, whose index is their id exactly as a
+        // list's rows' is.
+        PickerField => FocusId::of("settings.editor.picker.field"),
+        PickerValue => FocusId::of("settings.editor.picker.value"),
+        PickerFormat => FocusId::of("settings.editor.picker.format"),
+        PickerText => FocusId::of("settings.editor.picker.text"),
+        PickerBase(i) => FocusId::of("settings.editor.picker.base").item(i),
+        PickerCustom(i) => FocusId::of("settings.editor.picker.custom").item(i),
+        PickerAdd => FocusId::of("settings.editor.picker.add"),
         LookFeelReset => FocusId::of("settings.lookfeel.reset"),
         LookFeelResetConfirm => FocusId::of("settings.lookfeel.reset.confirm"),
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
@@ -1363,6 +1384,25 @@ impl ListId {
     }
 }
 
+/// Which act one part of the colour picker answers to.
+///
+/// The ONE map between the toolkit's parts and this window's acts. Both
+/// directions of the seam go through it — what the drawing registers,
+/// what the hit map records and what the description says the page
+/// offers — so the three cannot name the same rect differently.
+fn picker_act(part: nacelle::object::color_picker::Part) -> Act {
+    use nacelle::object::color_picker::Part;
+    match part {
+        Part::Field => Act::PickerField,
+        Part::Value => Act::PickerValue,
+        Part::Format => Act::PickerFormat,
+        Part::Text => Act::PickerText,
+        Part::Base(i) => Act::PickerBase(i),
+        Part::Custom(i) => Act::PickerCustom(i),
+        Part::Add => Act::PickerAdd,
+    }
+}
+
 /// One control of a page, as a description. Everything a row needs to
 /// draw itself, register itself and answer a key lives here: nothing
 /// else in the file may know that GRID has three sliders.
@@ -1464,6 +1504,27 @@ enum Ctrl {
     /// else: `h` is the vertical reserve it takes out of the content
     /// box, `draw` fills it.
     Custom { h: fn(Metrics, Rect) -> f32, draw: fn(&mut Settings, &mut Ctx, Rect) },
+    /// The colour picker (`nacelle::object::color_picker`), taking the
+    /// whole band: a field of hue by saturation, a value bar, the
+    /// chosen colour as a patch, the value written out in one of six
+    /// notations, and two grids of ready-made colours.
+    ///
+    /// NO LABEL COLUMN AND NO VALUE GUTTER, unlike every other control
+    /// here, and the reason is the control's own shape: the label
+    /// column exists so a word and a track do not collide on one line,
+    /// and this is not a line — it is a block as tall as ten rows. The
+    /// word above it is a `Ctrl::Section`, which is what a heading over
+    /// a block is everywhere else in this window.
+    ///
+    /// It takes no `get`/`set` pair either, and that is deliberate
+    /// rather than lazy: the picker is a MODEL and not a number
+    /// ([`color_picker::Picker`] keeps the hue a drag onto the grey
+    /// axis would otherwise lose), so the window owns one and the row
+    /// says which questions it answers. When a second picker joins,
+    /// this variant grows a slot to name which one — and not a
+    /// closure returning a colour, or the hue would be lost on the way
+    /// through.
+    Picker,
 }
 
 impl Ctrl {
@@ -2110,32 +2171,44 @@ static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
     act: Act::EditorMode,
 })];
 
-/// THE WHOLE THEME ON THREE SLIDERS — the editor's BASIC page.
+/// THE WHOLE THEME ON ONE COLOUR — the editor's BASIC page.
 ///
-/// Three questions, and the reason three of them can move a hundred
-/// colours is that they do not move colours at all: the model turns
-/// them into edits to the AUTHORS everything else is derived from
-/// (`theme::edit::tone_edits` — `palette.accent`, the seven
+/// FOUR QUESTIONS, and every one of them about the whole desktop: what
+/// colour is it, what are its borders, what are its beds, what shape are
+/// its corners. That is the page's rule, written down in
+/// `.gap-program/audyt-basic.md` on 2026-08-18 and applied here: BASIC
+/// answers "how should this desktop look", one move to the whole thing;
+/// ADVANCED answers "what exactly should this one token do".
+///
+/// THE MOVE IS STILL RELATIVE. Until 2026-08-18 the colour was three
+/// sliders — a hue rotation, a chroma multiplier and a lightness offset
+/// — and the owner replaced them with a picker, having seen one and
+/// asked for "coś podobnego, dopasowane do projektu". What changed is
+/// how a person SAYS how far to move: they point at the colour they want
+/// instead of hunting for it by turning what is there. What did NOT
+/// change is the arithmetic behind it ([`Settings::set_tone_from_picker`]
+/// turns the picked colour into the same [`Tone`] the sliders wrote), so
+/// every sentence the old page's head made is still true of this one:
+///
+/// The model turns the move into edits to the AUTHORS everything else is
+/// derived from (`theme::edit::tone_edits` — `palette.accent`, the seven
 /// `severity.<role>.text`, `surface.lift` and `text.lift`), and the
-/// cascade does what it already does.
+/// cascade does what it already does. Being RELATIVE is what leaves
+/// every difference the theme's author wrote exactly where it was: it
+/// keeps a theme from flattening into one colour, and it makes ONE HUE
+/// FOR THE INTERFACE and A ROTATION FOR SEVERITY the same mechanism
+/// instead of two — the chrome family has one author, so the move lands
+/// surfaces, containers, controls and text on a single shared hue, while
+/// the severity family has seven, so the same turn carries all of them
+/// and green `ok` stays as far from red `critical` as it was. What tells
+/// the families apart afterwards is SHADE, and the shades are the
+/// master's own ladders, which this page never touches — the owner's
+/// ŻYCZENIE 2b, and it needed no second mechanism.
 ///
-/// EVERY ONE IS RELATIVE, by the owner's decision. HUE is a rotation,
-/// SATURATION a multiplier and LIGHTNESS an offset, so each of them
-/// leaves every difference the theme's author wrote exactly where it
-/// was. That is what keeps a theme from flattening into one colour, and
-/// it is what makes ONE HUE FOR THE INTERFACE and A ROTATION FOR
-/// SEVERITY the same mechanism instead of two: the chrome family has
-/// one author, so turning it lands surfaces, containers, controls and
-/// text on a single shared hue, while the severity family has seven, so
-/// the same turn carries all of them and green `ok` stays as far from
-/// red `critical` as it was. What tells the families apart afterwards is
-/// SHADE, and the shades are the master's own ladders, which this page
-/// never touches — the owner's ŻYCZENIE 2b, and it needed no second
-/// mechanism.
-///
-/// The three tracks step by what the pipeline can SHOW
-/// ([`Settings::tone_step`]), which is why `step` is a question and not
-/// a literal here.
+/// The move still lands on whole notches of what the pipeline can SHOW
+/// ([`Settings::tone_step`]): the picker is continuous and the tone it
+/// writes is not, which is the same statement the three tracks made with
+/// their `step` and is now made once, where the colour crosses over.
 ///
 /// AND THREE KINDS UNDER THEM (owner, 2026-08-17). A kind is a choice
 /// between shapes, not a number to nudge, so asking it costs the page
@@ -2152,38 +2225,9 @@ static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
 /// carries the window body's bed, which the theme writes as an absolute
 /// colour ([`Settings::editor_edits`], `carry`) — a TINT or WASH slider
 /// on this page would land that shift on top of itself.
-static EDITOR_BASIC_ROWS: [Row; 10] = [
-    row_after(Ctrl::Section { title: "THE WHOLE THEME" }, Gap::None),
-    row(Ctrl::Slider {
-        label: "HUE",
-        act: Act::EditorTrack(Knob::ToneHue),
-        unit: Unit::None,
-        range: (0, TONE_HUE_MAX),
-        step: |s| s.tone_step()[0],
-        get: |s| s.tone[0],
-        set: |s, v| s.tone[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "SATURATION",
-        act: Act::EditorTrack(Knob::ToneSat),
-        unit: Unit::None,
-        range: (0, TONE_SAT_MAX),
-        step: |s| s.tone_step()[1],
-        get: |s| s.tone[1],
-        set: |s, v| s.tone[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "LIGHTNESS",
-        act: Act::EditorTrack(Knob::ToneLight),
-        unit: Unit::None,
-        range: (0, 100),
-        step: |s| s.tone_step()[2],
-        get: |s| s.tone[2],
-        set: |s, v| s.tone[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+static EDITOR_BASIC_ROWS: [Row; 8] = [
+    row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
+    row(Ctrl::Picker),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
     row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
@@ -4242,9 +4286,37 @@ pub struct Settings {
     /// of "switching modes loses no work", and the reason this is one
     /// bool beside the rest of the editor rather than two editors.
     editor_basic: bool,
-    /// BASIC's three sliders in TRACK units, indexed HUE, SATURATION,
-    /// LIGHTNESS. [`TONE_REST`] is the theme untouched.
+    /// BASIC's move in TRACK units, indexed HUE, SATURATION, LIGHTNESS.
+    /// [`TONE_REST`] is the theme untouched.
+    ///
+    /// Written by three sliders until 2026-08-18 and by
+    /// [`Settings::set_tone_from_picker`] since. It stayed a triple of
+    /// whole track units through that change on purpose: everything
+    /// downstream of it — `tone_of`, the fold into ADVANCED, the write-out
+    /// — is about a RELATIVE move and knows nothing about how a person
+    /// said how far.
     tone: [u32; 3],
+    /// BASIC's colour control. A model and not a colour, because the hue
+    /// of a grey is not in the grey: drag the field's handle down to the
+    /// axis and the colour has no hue left to answer with, so the handle
+    /// must remember where it stands
+    /// ([`nacelle::object::color_picker::Picker`]).
+    picker: nacelle::object::color_picker::Picker,
+    /// The colours the user banked with the picker's own bank cell, in
+    /// the order they were banked. THE WINDOW's and not the picker's:
+    /// they outlive the frame the control is drawn in, and a control that
+    /// kept them would lose them on the next page turn.
+    ///
+    /// They live for the session and no longer. Writing them to the
+    /// config is a decision about a file's shape and belongs with the
+    /// rest of `nacelle-desktop.ron`, which is another stage's.
+    picker_custom: Vec<nacelle::theme::Color>,
+    /// What the last activation SAID, so that "one press, one sound" can
+    /// be asked of this window instead of assumed of it. Written only by
+    /// [`Settings::say`], cleared at the head of [`Settings::perform`],
+    /// and absent from the shipping build entirely.
+    #[cfg(test)]
+    heard: Vec<nacelle::sound::Event>,
     /// What BASIC's relative move is relative TO: the theme's own
     /// authors, read off the live bake when the page was seeded. `None`
     /// until it has been — an unseeded BASIC writes nothing, the same
@@ -4649,6 +4721,18 @@ impl Settings {
             editor_basic: false,
             tone: TONE_REST,
             tone_seeds: None,
+            // The picker opens on nothing in particular and is seeded off
+            // the theme with everything else the moment the editor is
+            // entered ([`Settings::seed_tone_from_theme`]). "Nothing in
+            // particular" is `component.picker.rest`, which the toolkit
+            // reads for us: this used to be `Color::GREY`, defended as
+            // neutrality rather than look — but the grey WAS on screen
+            // for as long as it took somebody to reach the editor, and a
+            // neutral is a choice like any other. The theme names its own.
+            picker: nacelle::object::color_picker::Picker::at_rest(),
+            picker_custom: Vec::new(),
+            #[cfg(test)]
+            heard: Vec::new(),
             // Nothing dressed until the seeding says so — the same
             // opening neutrality the seeds themselves keep, and the
             // answer the master's own zeroes give.
@@ -4857,6 +4941,33 @@ impl Settings {
         set(self, (lo as f32 + t * (hi - lo) as f32).round() as u32);
     }
 
+    /// The picker's two dragged areas, from a point in the window.
+    ///
+    /// The rect comes from the hit map, exactly as a track's does, so the
+    /// hand and the ink are reading one layout. What differs from
+    /// [`Settings::set_from_x`] is that a FIELD has two axes: the same
+    /// press that chooses a hue chooses a saturation, and clamping is the
+    /// object's ([`Picker::pick_field`]) so a hand that wanders off the
+    /// area keeps dragging along its edge rather than letting go — the
+    /// behaviour every slider in this window already has, in two
+    /// directions instead of one.
+    ///
+    /// AND IT ENDS IN THE TONE. The colour is the picker's, but what the
+    /// theme receives is a relative move ([`Settings::set_tone_from_picker`]),
+    /// so the two are re-derived together on every step of the drag and
+    /// can never be a frame apart.
+    fn set_picker_from(&mut self, act: Act, x: f32, y: f32) {
+        let Some(r) = self.rect_of_act(act) else { return };
+        let fx = (x - r.x) / r.w.max(1.0);
+        let fy = (y - r.y) / r.h.max(1.0);
+        match act {
+            Act::PickerField => self.picker.pick_field(fx, fy),
+            Act::PickerValue => self.picker.pick_value(fy),
+            _ => return,
+        }
+        self.set_tone_from_picker();
+    }
+
     /// A wheel notch over the open window — the pointer's half of the
     /// scrolling. The window is modal, so nothing under it may take the
     /// turn; how far a notch goes, and whether it glides, is the
@@ -4991,6 +5102,95 @@ impl Settings {
         ]
     }
 
+    /// The picked colour, as the RELATIVE move BASIC has always written.
+    ///
+    /// THE PICKER IS ABSOLUTE AND THE PAGE IS NOT, and this is the one
+    /// line between them. A person points at the colour they want the
+    /// desktop to be; what the theme receives is how far that is from the
+    /// colour it already has —
+    ///
+    ///     hue    = picked.h − seed.h        (degrees round the circle)
+    ///     sat    = picked.c ÷ seed.c        (a multiplier, 100 % = as written)
+    ///     light  = picked.l − seed.l        (an offset on the ladder)
+    ///
+    /// — which is exactly the triple the three sliders wrote, so nothing
+    /// downstream of `self.tone` can tell which control moved it. That is
+    /// what keeps the difference the theme's author put between `ok` and
+    /// `critical`, between a surface and the surface above it: an
+    /// absolute write would flatten every one of them onto the picked
+    /// colour.
+    ///
+    /// THE NOTCH IS STILL THE PIPELINE'S. The picker is continuous and
+    /// the tone is not: each number lands on a whole multiple of what one
+    /// output code can show ([`Settings::tone_step`]), which is the
+    /// statement the sliders made with their `step`. Without it a drag
+    /// across the field would write hundreds of tones the swapchain
+    /// cannot tell apart, and every one of them would cost a bake.
+    ///
+    /// A GREY THEME CANNOT BE SCALED, and the multiplier says so by
+    /// standing still: with `seed.c` at zero there is no chroma to scale
+    /// and the ratio is not a number. The hue and the lightness still
+    /// move, which is all a grey theme has to move.
+    fn set_tone_from_picker(&mut self) {
+        let Some(seeds) = self.tone_seeds else { return };
+        // THE MOVE IS MEASURED AGAINST THE SEED AS THIS CONTROL CAN SHOW
+        // IT, and the reason is like-against-like. The control holds a
+        // colour the way a screen holds one (sRGB, in the field's own
+        // coordinates), so the theme's accent put in and read back out is
+        // not the same number to the fourth decimal — the master's mint
+        // comes back with about 0.6 % less chroma. Both sides of a
+        // subtraction should have been through the same pipe, or the
+        // difference carries the pipe's loss as if a hand had made it.
+        //
+        // WHAT THIS IS NOT: it is not what fixed the untouched page
+        // asking for a multiplier of 99. That was the notch grid being
+        // laid from zero (see below), and it is worth stating plainly,
+        // because attributing a fix to the wrong cause is the mistake
+        // `.gap-program/obalone-naprawy.md` exists to record. On the
+        // master's numbers the loss is under half a track unit, so this
+        // line changes nothing that can be measured today; it is the
+        // discipline that keeps it that way when a theme's seed sits
+        // nearer a gamut wall.
+        //
+        // Pure, and no fourth piece of state: the origin is a function
+        // of the seed and of the control's own arithmetic, so it cannot
+        // fall out of step with either.
+        let seed = nacelle::object::color_picker::Picker::of(
+            nacelle::theme::Color::from_oklch(seeds.accent).to_srgb(),
+        )
+        .oklch();
+        let want = self.picker.oklch();
+        let step = self.tone_step();
+        // One number onto its track: rounded to a whole notch, then held
+        // inside the track's own ends — the same two walls the sliders
+        // had, stated once instead of three times.
+        //
+        // THE GRID OF NOTCHES IS ANCHORED AT REST, not at zero, and the
+        // difference is the whole of whether this page can be left alone.
+        // The saturation track's notch on the master is THREE units and
+        // its rest is a hundred, which is not a multiple of three: a grid
+        // laid from zero has no notch at rest, so an untouched picker
+        // rounded to 99 and quietly desaturated the theme. Measured from
+        // rest, every track's rest is on the grid by construction, and
+        // "no move" is a value the arithmetic can express.
+        let notch = |v: f32, rest: u32, s: u32, hi: u32| {
+            let s = s.max(1) as f32;
+            let rest = rest as f32;
+            (rest + ((v - rest) / s).round() * s).clamp(0.0, hi as f32) as u32
+        };
+        let sat = if seed.c > 1e-4 { want.c / seed.c * 100.0 } else { 100.0 };
+        self.tone = [
+            notch((want.h - seed.h).rem_euclid(360.0), TONE_REST[0], step[0], TONE_HUE_MAX),
+            notch(sat, TONE_REST[1], step[1], TONE_SAT_MAX),
+            notch(
+                span_back(want.l - seed.l, TONE_LIGHT_SPAN) as f32,
+                TONE_REST[2],
+                step[2],
+                100,
+            ),
+        ];
+    }
+
     /// BASIC's move, folded into the ADVANCED page's own controls.
     ///
     /// This is what makes leaving BASIC keep its work. BASIC is
@@ -5119,6 +5319,13 @@ impl Settings {
             surface_lift: px("surface.lift"),
             text_lift: px("text.lift"),
         });
+        // AND THE CONTROL OPENS ON THE THEME, like every other one on
+        // this page. The move is measured FROM the accent, so the accent
+        // is where the picker's handles stand at rest: a picker showing
+        // anything else would say the theme is a colour it is not, and
+        // the first drag would then write that lie's distance into the
+        // file.
+        self.picker.set_oklch(accent);
     }
 
     /// The whole of what the editor is set to, as the token edits both the
@@ -5780,22 +5987,55 @@ impl Settings {
             return;
         }
         let Some(act) = self.dragging else { return };
+        // The picker's areas take BOTH coordinates and then follow the
+        // same pulse as the tracks below: a colour dragged across the
+        // field re-bakes the desktop on the theme's pulse, not on every
+        // frame.
+        if let Act::PickerField | Act::PickerValue = act {
+            self.set_picker_from(act, x, y);
+            if self.preview_pulse_due() {
+                self.apply_editor_preview();
+            }
+            return;
+        }
         self.set_from_x(act, x);
         self.mark_dirty(act);
         // The editor's tracks show themselves WHILE dragged — the owner asked
-        // for the picture to follow the hand, not the release. Throttled,
-        // because every distinct value is a fresh 76 KB bake that is never
-        // freed: ten a second is ~0.8 MB for a second of active dragging,
-        // sixty a second would be 4.5. The slider itself still moves every
-        // frame; only the desktop behind it updates on the pulse.
+        // for the picture to follow the hand, not the release.
         if let Act::EditorTrack(_) = act {
-            let due = self
-                .editor_pulse
-                .map_or(true, |t| t.elapsed().as_millis() >= 100);
-            if due {
-                self.editor_pulse = Some(Instant::now());
+            if self.preview_pulse_due() {
                 self.apply_editor_preview();
             }
+        }
+    }
+
+    /// Whether a control held under the hand may re-bake the desktop
+    /// behind it yet, and books the pulse if it may.
+    ///
+    /// THE RATE IS `settings.preview_pulse_ms` AND NOT A NUMBER HERE. How
+    /// fast the picture follows the hand is something a person sees, so
+    /// it is the theme's; and it is ONE reader because two controls hold
+    /// this pulse — the editor's sliders and the picker's two areas —
+    /// and they were two copies of `100` in this file until 2026-08-18,
+    /// which is one copy away from the day they disagree.
+    ///
+    /// It lives in `[settings]` and not in `[motion]` although it is a
+    /// time. `[motion]` is a CLOSED catalogue — eighteen effects, eight
+    /// keys each, two globals, counted by a test in the toolkit — and
+    /// this is not an effect. It is a rate limiter, and it must not be
+    /// multiplied by `motion.scale`: reduced motion sets that to zero,
+    /// which for an animation means "show the end state at once" and for
+    /// a limiter would mean "re-bake every frame" — 76 KB a bake, none
+    /// of it freed, ~4.5 MB for a second of dragging. Reduced motion is
+    /// a promise about movement, not about heat.
+    fn preview_pulse_due(&mut self) -> bool {
+        static PULSE: OnceLock<TokenId> = OnceLock::new();
+        let ms = theme::resolved().px(tok(&PULSE, "settings.preview_pulse_ms")).max(0.0) as u128;
+        if self.editor_pulse.map_or(true, |t| t.elapsed().as_millis() >= ms) {
+            self.editor_pulse = Some(Instant::now());
+            true
+        } else {
+            false
         }
     }
 
@@ -6049,18 +6289,39 @@ impl Settings {
         if let Some(fc) = fc {
             fc.focus(Some(focus_id(act)));
         }
-        self.perform(act, x)
+        self.perform(act, x, y)
+    }
+
+    /// Every sound an activation makes leaves the window through here.
+    ///
+    /// ONE PRESS, ONE SOUND is a statement about the whole of
+    /// [`Settings::perform`] and there was no way to put it TO the
+    /// window: `nacelle::sound::emit` shouts into a queue shared by the
+    /// entire process, so a count taken from it during a test run is a
+    /// count of whatever else the run was doing at the time. So the
+    /// window keeps its own log of what it said, under `cfg(test)`, and
+    /// the test reads that instead of the queue. Nothing about the
+    /// shipping build changes: the log does not exist in it.
+    fn say(&mut self, e: nacelle::sound::Event) {
+        #[cfg(test)]
+        self.heard.push(e);
+        nacelle::sound::emit(e);
     }
 
     /// The body every activation runs — mouse ([`Settings::click`])
     /// and keyboard ([`Settings::key`]) share it, so the two ways of
     /// pressing a control cannot drift apart (F1 §1.5). `x` is where
-    /// along a slider track the press landed; buttons ignore it.
-    fn perform(&mut self, act: Act, x: f32) -> bool {
+    /// along a slider track the press landed and `y` its companion for
+    /// the one control that reads both — the picker's field, where a
+    /// press chooses a hue and a saturation at once. Buttons ignore
+    /// them.
+    fn perform(&mut self, act: Act, x: f32, y: f32) -> bool {
         self.flash = Some((act, self.now));
+        #[cfg(test)]
+        self.heard.clear();
         // Every button clicks; the actions below that mean more than a
         // plain press replace it with their own sound.
-        use nacelle::sound::{emit, Event as Sfx};
+        use nacelle::sound::Event as Sfx;
         match act {
             Act::Close | Act::Back => {}
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
@@ -6072,7 +6333,16 @@ impl Settings {
             Act::ColorHdr => {}
             Act::VolumeTrack => {}
             Act::Pick(..) => {}
-            _ => emit(Sfx::Click),
+            // THE PICKER'S TWO GRIDS, for the same reason `Pick` is here:
+            // a ready-made colour moves the theme's live preview, so it
+            // speaks `Theme` in its own arm below. The other five picker
+            // acts are NOT on this list, and that is the whole of the
+            // fix: they were not on it before either, but three of them
+            // emitted a sound of their own anyway, so pressing the
+            // notation plate or the bank cell made two clicks and
+            // pressing a ready-made colour made a click and a theme.
+            Act::PickerBase(_) | Act::PickerCustom(_) => {}
+            _ => self.say(Sfx::Click),
         }
         match act {
             Act::Close => {
@@ -6080,7 +6350,7 @@ impl Settings {
                 // editor's preview is dropped here as well.
                 self.leave_editor_preview();
                 self.open = false;
-                emit(Sfx::PanelClose);
+                self.say(Sfx::PanelClose);
             }
             Act::EditorCancel => {
                 nacelle::theme::clear_preview();
@@ -6145,7 +6415,7 @@ impl Settings {
                 }
             }
             Act::Back => {
-                emit(Sfx::Click);
+                self.say(Sfx::Click);
                 // The same answer Escape peels a layer by, so the two
                 // ways out of a page cannot lead to different places. A
                 // page with no layer above it wears CLOSE and never has
@@ -6195,13 +6465,13 @@ impl Settings {
                         ListId::Borders => {
                             self.current_border = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::Backgrounds => {
                             self.current_background = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         // The whole-theme lists follow the two above: a
@@ -6215,31 +6485,31 @@ impl Settings {
                             // re-aim at the role's stored colour, and only
                             // a slider marks it touched.
                             self.current_severity = Some(name.clone());
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::Corners => {
                             self.current_corner = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::RingStyles => {
                             self.current_ring_style = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::ScrollModes => {
                             self.current_scroll_mode = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::ScrollEdges => {
                             self.current_scroll_edge = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         // Not a theme: it writes its config line at once,
@@ -6251,12 +6521,12 @@ impl Settings {
                             self.set_space(&name);
                             config::set_color_space(&self.color_space);
                             self.color_dirty = true;
-                            emit(Sfx::Click);
+                            self.say(Sfx::Click);
                             return false;
                         }
                     }
                     self.refresh_current();
-                    emit(Sfx::Theme);
+                    self.say(Sfx::Theme);
                     return true;
                 }
             }
@@ -6310,6 +6580,61 @@ impl Settings {
                 self.set_from_x(act, x);
                 self.mark_dirty(act);
             }
+            // THE PICKER'S TWO AREAS ARE DRAGGED, and they are the only
+            // targets in this window whose value depends on BOTH
+            // coordinates — a field is two questions at once, which is
+            // the whole reason it is a field and not two tracks. They
+            // join `dragging` like every other held control, and
+            // [`Settings::drag`] is where the second coordinate is read.
+            Act::PickerField | Act::PickerValue => {
+                self.dragging = Some(act);
+                self.set_picker_from(act, x, y);
+                self.apply_editor_preview();
+            }
+            // The notation steps. Nothing about the COLOUR moves, so
+            // there is no preview to show and no theme to disturb: this
+            // is a change to how the value is spelled.
+            // It takes the plain click from the head of this function
+            // like any other button. It emitted a second one here until
+            // 2026-08-18, which was audible: two clicks for one press.
+            Act::PickerFormat => self.picker.cycle_format(),
+            // A target, and for now nothing more: the plate is a place
+            // the Tab chain lands and a rect the pointer finds, so that
+            // typing into it is a change to what a press DOES and not a
+            // change to the page's shape.
+            Act::PickerText => {}
+            // A ready-made colour, in one press. `Base` reads the
+            // THEME's grid and `Custom` the user's own, and both are
+            // taken from the same lists the drawing and the hit map used.
+            Act::PickerBase(i) => {
+                if let Some(c) = nacelle::object::color_picker::base_colours().get(i) {
+                    self.picker.set_colour(*c);
+                    self.set_tone_from_picker();
+                    self.apply_editor_preview();
+                    self.say(Sfx::Theme);
+                }
+            }
+            Act::PickerCustom(i) => {
+                if let Some(c) = self.picker_custom.get(i).copied() {
+                    self.picker.set_colour(c);
+                    self.set_tone_from_picker();
+                    self.apply_editor_preview();
+                    self.say(Sfx::Theme);
+                }
+            }
+            // The bank. A colour already in the row is not banked twice
+            // — the grid is a set of places to come back to, and two
+            // identical cells are one cell that wastes the other. The
+            // press still CLICKS either way, from the head of this
+            // function: whether the colour was new is answered by the
+            // row growing or not, and a button that fell silent on the
+            // second press would read as a button that missed it.
+            Act::PickerAdd => {
+                let c = self.picker.colour();
+                if !self.picker_custom.iter().any(|k| *k == c) {
+                    self.picker_custom.push(c);
+                }
+            }
             // The editor's switches: flip the field, show the answer at
             // once — the same live contract as the tracks, with a toggle's
             // own sound. A flip writes no config line and answers false
@@ -6338,19 +6663,19 @@ impl Settings {
                     }
                 };
                 self.apply_editor_preview();
-                emit(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ToggleTyping => {
                 self.sound_typing = !self.sound_typing;
                 config::set_sound_typing(self.sound_typing);
                 self.sound_dirty = true;
-                emit(if self.sound_typing { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.sound_typing { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ToggleAmbient => {
                 self.sound_ambient = !self.sound_ambient;
                 config::set_sound_ambient(self.sound_ambient);
                 self.sound_dirty = true;
-                emit(if self.sound_ambient { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.sound_ambient { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::OpenColor => {
                 if self.color_enabled {
@@ -6377,7 +6702,7 @@ impl Settings {
                     config::set_color_depth(self.color_depth);
                 }
                 self.color_dirty = true;
-                emit(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ColorLutNext => {
                 // None -> first -> ... -> last -> None again.
@@ -6418,7 +6743,7 @@ impl Settings {
             Act::ToggleSnap => {
                 self.grid_snap = !self.grid_snap;
                 config::set_grid_snap(self.grid_snap);
-                emit(if self.grid_snap { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.grid_snap { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::EditGrid => {
                 self.edit_requested = true;
@@ -6618,8 +6943,24 @@ impl Settings {
                     // A slider has no press; its keys are the arrows.
                     return KeyOut::Consumed;
                 }
-                let x = fc.rect_of(focus_id(act)).map_or(0.0, |r| r.cx());
-                if self.perform(act, x) {
+                // AND NEITHER HAS THE PICKER'S FIELD, for the same
+                // reason written larger: a synthetic press at the centre
+                // of a two-dimensional field would set the colour to
+                // whatever happens to be in the middle of it, which is a
+                // colour nobody chose. The swatches are how this control
+                // is used from the keyboard today.
+                if let Act::PickerField | Act::PickerValue = act {
+                    return KeyOut::Consumed;
+                }
+                // The CENTRE of whatever the chain is standing on, both
+                // ways: a keyboard press has no point of its own, and the
+                // middle of the target is the only honest answer for a
+                // control that reads one (the picker's field; the tracks
+                // take the arrows instead and never arrive here).
+                let (x, y) = fc
+                    .rect_of(focus_id(act))
+                    .map_or((0.0, 0.0), |r| (r.cx(), r.y + r.h / 2.0));
+                if self.perform(act, x, y) {
                     KeyOut::Changed
                 } else {
                     KeyOut::Consumed
@@ -7584,11 +7925,26 @@ impl Settings {
                 .into_iter()
                 .map(|(r, _, act)| (r, act))
                 .collect(),
+            // The picker's parts, ASKED OF THE OBJECT: one enumeration
+            // serves the hit map, the Tab chain and the drawing, so a
+            // part that is painted is a part that can be pressed and
+            // reached, and no third list can fall behind the other two.
+            Ctrl::Picker => nacelle::object::color_picker::parts(&self.picker_layout(rc))
+                .into_iter()
+                .map(|(part, r)| (r, picker_act(part)))
+                .collect(),
             Ctrl::Section { .. }
             | Ctrl::Note { .. }
             | Ctrl::Hint { .. }
             | Ctrl::Custom { .. } => Vec::new(),
         }
+    }
+
+    /// Where the picker's parts stand in a row's band — ONE statement of
+    /// it, so the drawing, the hit map and the Tab chain cannot disagree
+    /// about where the field is.
+    fn picker_layout(&self, rc: RowCtx) -> nacelle::object::color_picker::Layout {
+        nacelle::object::color_picker::layout(rc.band, self.picker_custom.len())
     }
 
     /// A row the frame did not draw, taking its place in the chain from
@@ -7736,6 +8092,13 @@ impl Settings {
             Ctrl::Note { .. } => m.note_h,
             Ctrl::Hint { .. } => m.hint_h,
             Ctrl::Custom { h, .. } => h(m, content),
+            // Asked of the object, at the width it will be drawn in and
+            // with the count that decides its last row: the control is a
+            // block whose height depends on how many rows of swatches its
+            // grids come to, and only the object knows that.
+            Ctrl::Picker => {
+                nacelle::object::color_picker::height(content.w, self.picker_custom.len())
+            }
         }
     }
 
@@ -7865,6 +8228,23 @@ impl Settings {
                 );
             }
             Ctrl::Custom { draw, .. } => draw(self, ctx, rc.band),
+            // The picker draws itself; this row says WHERE and registers
+            // what the hand may reach. The rects come from the same
+            // `picker_layout` the targets do, so a part that is drawn is a
+            // part that can be pressed and the two cannot come apart.
+            Ctrl::Picker => {
+                let l = self.picker_layout(rc);
+                nacelle::object::color_picker::draw_focusable(
+                    ctx,
+                    &l,
+                    &self.picker,
+                    &self.picker_custom,
+                    |part| focus_id(picker_act(part)),
+                );
+                for (r, act) in self.targets(ctx, &Ctrl::Picker, rc) {
+                    self.push_hit(r, act);
+                }
+            }
         }
     }
 
@@ -9387,7 +9767,7 @@ mod tests {
         s.dropdown = Some(Dropdown::List(ListId::Looks));
         let before = s.current_look.clone();
         assert!(
-            !s.perform(Act::ThemesEditor, 0.0),
+            !s.perform(Act::ThemesEditor, 0.0, 0.0),
             "the door reported a configuration change"
         );
         assert_eq!(s.current_look, before, "the door moved the selection");
@@ -9634,7 +10014,7 @@ mod tests {
         s.dropdown = Some(Dropdown::List(ListId::Sounds));
         let before = s.current_sounds.clone();
         assert!(
-            !s.perform(Act::OpenSoundLevels, 0.0),
+            !s.perform(Act::OpenSoundLevels, 0.0, 0.0),
             "the door reported a configuration change"
         );
         assert!(s.view == View::SoundLevels, "the door opened the wrong page");
@@ -9965,7 +10345,7 @@ mod tests {
         let mut s = furnished();
         s.view = View::LookFeel;
         assert!(
-            !s.perform(Act::LookFeelReset, 0.0),
+            !s.perform(Act::LookFeelReset, 0.0, 0.0),
             "the footer reported a configuration change"
         );
         assert!(s.view == View::LookFeelReset, "the footer opened nothing");
@@ -10140,7 +10520,7 @@ mod tests {
     #[test]
     fn the_addons_page_reads_the_toolkit_on_the_way_in() {
         let mut s = furnished();
-        assert!(!s.perform(Act::OpenAddons, 0.0), "a report changed the configuration");
+        assert!(!s.perform(Act::OpenAddons, 0.0, 0.0), "a report changed the configuration");
         assert!(s.view == View::Addons, "the door opened nothing");
         assert_eq!(
             s.addon_report,
@@ -10491,7 +10871,7 @@ mod tests {
         let _t = crate::widgets::Themed::new(tag, body);
         let mut s = furnished();
         s.now = 1.0;
-        s.perform(Act::OpenFont, 0.0);
+        s.perform(Act::OpenFont, 0.0, 0.0);
         // The next frame, a millisecond later: well inside the master's
         // 150 ms and outside a decay of no length at all.
         s.now = 1.001;
@@ -11245,7 +11625,7 @@ mod tests {
         // the page arrives rather than right by the time it is drawn.
         s.sound_set.clear();
         s.view = View::LookFeel;
-        assert!(!s.perform(Act::OpenSoundLevels, 0.0));
+        assert!(!s.perform(Act::OpenSoundLevels, 0.0, 0.0));
         assert!(
             !s.sound_set.is_empty(),
             "the page opened with nothing to say about its own sound set"
@@ -11847,6 +12227,7 @@ mod tests {
         s
     }
 
+
     /// ŻYCZENIE 2, the switch. It stands at the HEAD of the page, before
     /// every section, and it is the ONE control both modes share with the
     /// footer — press it and the page under it is the other page.
@@ -11874,19 +12255,25 @@ mod tests {
             "ADVANCED is not showing the border section"
         );
         assert!(
-            !advanced.contains(&Act::EditorTrack(Knob::ToneHue)),
-            "ADVANCED is showing a BASIC slider"
+            !advanced.contains(&Act::PickerField),
+            "ADVANCED is showing BASIC's picker"
         );
 
         // The switch flips it, and the two pages trade places whole.
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         assert!(s.editor_basic, "the switch did not reach BASIC");
         let basic = described_acts(&s, page);
-        for k in [Knob::ToneHue, Knob::ToneSat, Knob::ToneLight] {
-            assert!(
-                basic.contains(&Act::EditorTrack(k)),
-                "BASIC is missing one of its three sliders"
-            );
+        // The picker and every part of it: the one control the three
+        // tone sliders became on 2026-08-18.
+        for part in [
+            Act::PickerField,
+            Act::PickerValue,
+            Act::PickerFormat,
+            Act::PickerText,
+            Act::PickerBase(0),
+            Act::PickerAdd,
+        ] {
+            assert!(basic.contains(&part), "BASIC is missing a part of its picker");
         }
         assert!(
             !basic.iter().any(|a| matches!(
@@ -11901,7 +12288,7 @@ mod tests {
             assert!(advanced.contains(&verb), "ADVANCED lost one of the editor's verbs");
         }
         // And back, on the same one control.
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         assert!(!s.editor_basic, "the switch is one-way");
         // The preview these presses pushed is this test's, and it does
         // not leave the room in it: another test reading the theme
@@ -11921,7 +12308,7 @@ mod tests {
     fn the_basic_sliders_move_the_authors_and_leave_the_rest_standing() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         assert!(s.tone_seeds.is_some(), "BASIC opened without seeds to move from");
 
         // AT REST the page is a no-op: `TONE_REST` is `Tone::NEUTRAL`,
@@ -12013,6 +12400,309 @@ mod tests {
         nacelle::theme::clear_preview();
     }
 
+    /// THE PICKER OPENS ON THE THEME AND ASKS FOR NOTHING.
+    ///
+    /// The scar this stands on is written up at `oklch_of_track` and in
+    /// `.gap-program/obalone-naprawy.md`: BASIC used to seed itself from
+    /// what it had just written, so the accent's lightness climbed on
+    /// every visit with every control at rest. The picker moved the road
+    /// but not the hazard — it reads the accent on the way in and writes
+    /// a distance from the accent on the way out, so if those two
+    /// crossings ever disagree the theme walks again. TWENTY visits
+    /// here, for the same reason the toolkit's own test takes twenty
+    /// trips.
+    #[test]
+    fn the_picker_opens_on_the_theme_and_asks_for_no_move() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        let seed = s.tone_seeds.expect("the editor opened without seeds").accent;
+        // What the control SHOWS is the theme's own accent.
+        let shown = s.picker.oklch();
+        assert!(
+            (shown.l - seed.l).abs() < 2e-3 && (shown.c - seed.c).abs() < 5e-3,
+            "the picker opened on {shown:?}, the theme says {seed:?}"
+        );
+        // And asking it for a move, untouched, is asking for none.
+        s.set_tone_from_picker();
+        assert_eq!(s.tone, TONE_REST, "an untouched picker asked for a move");
+        // AND AT THE FINEST NOTCH THE PIPELINE HAS. The eight-bit grid
+        // is coarse enough to round a small error away, so a page that
+        // only ever asked at eight bits could be quietly wrong; sixteen
+        // bits is one track unit per notch and rounds nothing away.
+        s.color_depth = 16;
+        s.set_tone_from_picker();
+        assert_eq!(
+            s.tone, TONE_REST,
+            "an untouched picker asked for a move at the finest notch"
+        );
+        for visit in 0..20 {
+            s.seed_editor_from_theme();
+            s.set_tone_from_picker();
+            assert_eq!(s.tone, TONE_REST, "visit {visit} asked for a move");
+            let now = s.picker.oklch();
+            assert!(
+                (now.l - seed.l).abs() < 2e-3,
+                "visit {visit} shows lightness {} where the theme says {}",
+                now.l,
+                seed.l
+            );
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// ONE PRESS, ONE SOUND — and the picker's seven were the exception.
+    ///
+    /// `perform` gives every activation a plain click and exempts the
+    /// ones that mean more than a press and say so themselves. None of
+    /// the picker's acts was on that exemption list, and three of them
+    /// emitted a sound of their own regardless: the notation plate and
+    /// the bank cell made TWO CLICKS for one press, and a ready-made
+    /// colour made a click and a theme. The comment two lines above that
+    /// catch-all already stated the rule the code was breaking — "a
+    /// press that clicked AND toggled would be the only one in the
+    /// window that made two sounds".
+    ///
+    /// Counted off [`Settings::heard`] and not off `nacelle::sound`'s
+    /// queue: that queue belongs to the whole process and every other
+    /// test in this binary shouts into it, so a count taken from there
+    /// would be a count of the test run.
+    #[test]
+    fn every_press_on_the_picker_makes_exactly_one_sound() {
+        use nacelle::sound::Event as Sfx;
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.picker_custom = vec![nacelle::theme::Color::WHITE, nacelle::theme::Color::BLACK];
+        // Named by hand because `Act` carries no `Debug` and this window
+        // has never wanted one; the names are what a failure has to say.
+        for (name, act) in [
+            ("the field", Act::PickerField),
+            ("the value bar", Act::PickerValue),
+            ("the notation plate", Act::PickerFormat),
+            ("the value plate", Act::PickerText),
+            ("a ready-made colour", Act::PickerBase(0)),
+            ("a banked colour", Act::PickerCustom(0)),
+            ("the bank cell", Act::PickerAdd),
+            // Pressed a second time: the colour is already banked, so
+            // the row does not grow — and the press is still a press.
+            ("the bank cell again", Act::PickerAdd),
+        ] {
+            s.perform(act, 0.5, 0.5);
+            assert_eq!(
+                s.heard.len(),
+                1,
+                "{name} made {:?}, and a press makes one sound",
+                s.heard
+            );
+        }
+        // AND THE RIGHT ONE. The two grids move the live preview, which
+        // is what `Theme` is the window's word for; the rest are plain
+        // presses. A test that only counted would pass on a picker that
+        // clicked when it should have spoken.
+        for (name, act, want) in [
+            ("a ready-made colour", Act::PickerBase(0), Sfx::Theme),
+            ("a banked colour", Act::PickerCustom(1), Sfx::Theme),
+            ("the notation plate", Act::PickerFormat, Sfx::Click),
+            ("the value plate", Act::PickerText, Sfx::Click),
+        ] {
+            s.perform(act, 0.5, 0.5);
+            assert_eq!(s.heard, vec![want], "{name} said the wrong thing");
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// The picker opens on a colour THE THEME NAMED.
+    ///
+    /// It opened on `Color::GREY` — 0.5, 0.5, 0.5, written into this
+    /// file — and the defence was that the value is neutral rather than
+    /// decorative and lives only until `seed_editor_from_theme` runs.
+    /// Both halves of that are true and neither makes it not a look: the
+    /// grey is on the screen for as long as it takes somebody to reach
+    /// the editor, and a neutral is a colour somebody chose. On a page
+    /// whose entire thesis is that no colour lives in Rust, it was the
+    /// one colour that did.
+    #[test]
+    fn the_picker_opens_on_a_colour_the_theme_named() {
+        let _g = crate::widgets::theme_test_lock();
+        let want = theme::resolved().color(
+            nacelle::theme::id("component.picker.rest")
+                .expect("the master names what a picker holds at rest"),
+        );
+        let shown = Settings::new().picker.colour();
+        for (got, want, ch) in
+            [(shown.r, want.r, 'r'), (shown.g, want.g, 'g'), (shown.b, want.b, 'b')]
+        {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "the picker opened on channel {ch} = {got}, the theme says {want}"
+            );
+        }
+    }
+
+    /// How fast a dragged control re-bakes the desktop is the THEME's
+    /// number.
+    ///
+    /// It was `100` written twice in this file — once for the editor's
+    /// sliders, once for the picker's two areas — which is one edit away
+    /// from two controls that follow the hand at different speeds. A
+    /// rate a person can see is a look, and looks live in the theme.
+    #[test]
+    fn the_drag_pulse_is_the_themes_number() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = furnished();
+        {
+            // A theme that asks for no throttle at all: every drag frame
+            // re-bakes, so two calls running are both due.
+            let _t = crate::widgets::Themed::new("pulse-open", "[settings]\npreview_pulse_ms = 0ms\n");
+            assert!(s.preview_pulse_due(), "the first drag frame is always due");
+            assert!(s.preview_pulse_due(), "at 0 ms every frame is due");
+        }
+        {
+            // And one that asks for a pulse longer than this test takes:
+            // the second call is refused.
+            let _t =
+                crate::widgets::Themed::new("pulse-slow", "[settings]\npreview_pulse_ms = 5000ms\n");
+            s.editor_pulse = None;
+            assert!(s.preview_pulse_due(), "the first drag frame is always due");
+            assert!(!s.preview_pulse_due(), "at 5 s the next frame waits");
+        }
+    }
+
+    /// A COLOUR POINTED AT BECOMES THE DISTANCE TO IT — the one line
+    /// between an absolute control and a page whose every write is
+    /// relative ([`Settings::set_tone_from_picker`]).
+    ///
+    /// It is measured in both directions: the tone the window computes,
+    /// and the colour that tone puts in the file, read back with the
+    /// toolkit's own parser so nothing here is checked against a string
+    /// this test wrote itself.
+    #[test]
+    fn a_colour_picked_in_basic_travels_as_the_distance_from_the_theme() {
+        use nacelle::object::color_picker::{parse, Format};
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        let seed = s.tone_seeds.expect("BASIC opened without seeds").accent;
+
+        // A QUARTER TURN. Taken at HALF THE CHROMA on purpose: the
+        // picker is an sRGB control and the master's mint at full chroma
+        // has no sRGB colour ninety degrees round — `Color::from_oklch`
+        // bisects the chroma down until there is one, and the honest
+        // report of that is a move the theme's author did not ask for.
+        // What is measured here is the arithmetic, so the colour is one
+        // the control can actually show.
+        let step = s.tone_step();
+        let half = nacelle::theme::color::Oklch { c: seed.c * 0.5, ..seed };
+        s.picker.set_oklch(nacelle::theme::color::Oklch { h: half.h + 90.0, ..half });
+        s.set_tone_from_picker();
+        assert!(
+            (s.tone[0] as i32 - 90).abs() <= step[0] as i32,
+            "a quarter turn asked for {} degrees",
+            s.tone[0]
+        );
+        assert!(
+            (s.tone[1] as i32 - 50).abs() <= 2 * step[1] as i32,
+            "half the chroma asked for a multiplier of {}",
+            s.tone[1]
+        );
+        assert!(
+            (s.tone[2] as i32 - 50).abs() <= step[2] as i32,
+            "a turn and a chroma change moved the lightness to {}",
+            s.tone[2]
+        );
+
+        // WHAT THE FILE WOULD RECEIVE IS WHAT THE CONTROL SHOWS — read
+        // back with the toolkit's own parser, so nothing here is checked
+        // against a string this test wrote itself.
+        let edits = s.editor_edits();
+        let written = edits
+            .iter()
+            .find(|e| e.token == "palette.accent")
+            .map(|e| e.value.clone())
+            .expect("BASIC wrote no accent");
+        let got = parse(&written, Format::Oklch)
+            .expect("the accent is written in the notation the picker reads")
+            .to_linear()
+            .to_oklch();
+        let shown = s.picker.oklch();
+        let off = (got.h - shown.h).rem_euclid(360.0);
+        let off = off.min(360.0 - off);
+        assert!(off <= step[0] as f32 + 1.0, "the file receives hue {}, shown {}", got.h, shown.h);
+        assert!(
+            (got.c - shown.c).abs() < 0.02,
+            "the file receives chroma {}, shown {}",
+            got.c,
+            shown.c
+        );
+
+        // A CHROMA MOVE ALONE DOES NOT TURN THE THEME.
+        s.picker.set_oklch(half);
+        s.set_tone_from_picker();
+        // Within a notch of no turn at all: the control holds its colour
+        // in the field's own coordinates, so a chroma move re-read out of
+        // them lands a fraction of a degree from where it started, and a
+        // fraction of a degree is what a notch is for.
+        assert!(
+            s.tone[0].min(360 - s.tone[0]) <= step[0],
+            "a chroma change turned the theme by {} degrees",
+            s.tone[0]
+        );
+        assert!(
+            (s.tone[1] as i32 - 50).abs() <= 2 * step[1] as i32,
+            "half the chroma asked for a multiplier of {}",
+            s.tone[1]
+        );
+        nacelle::theme::clear_preview();
+    }
+
+    /// The grids: a press picks, and the bank keeps one cell per colour.
+    ///
+    /// THE FIRST CELL IS THE ACCENT (the master points `picker.base.1` at
+    /// it), so pressing it is pressing what the theme already says — and
+    /// the move that comes out of it must be NO move. That is the same
+    /// sentence the seeding test makes, arriving from the other side.
+    #[test]
+    fn the_pickers_grids_choose_a_colour_and_bank_it_once() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        let base = nacelle::object::color_picker::base_colours();
+        assert!(base.len() > 2, "the master ships a grid to press");
+
+        s.perform(Act::PickerBase(0), 0.0, 0.0);
+        assert_eq!(s.tone, TONE_REST, "pressing the theme's own accent asked for a move");
+
+        // A cell that is NOT the accent moves the theme, and the picker
+        // shows exactly what was pressed.
+        s.perform(Act::PickerBase(2), 0.0, 0.0);
+        // Compared as the eight-bit colour a screen can show and a file
+        // can spell: the control holds its colour in the field's own
+        // coordinates, so a channel may come back a single float ulp
+        // away, and an assertion about ulps would be an assertion about
+        // nothing anybody can see.
+        let hex = |c: nacelle::theme::Color| {
+            nacelle::object::color_picker::write(c, nacelle::object::color_picker::Format::Argb)
+        };
+        assert_eq!(
+            hex(s.picker.colour()),
+            hex(base[2]),
+            "the press did not take the cell's colour"
+        );
+        assert_ne!(s.tone, TONE_REST, "a different colour asked for no move");
+
+        // The bank: one cell per colour, however many times it is asked
+        // for, and the colour banked is the one on screen.
+        s.perform(Act::PickerAdd, 0.0, 0.0);
+        s.perform(Act::PickerAdd, 0.0, 0.0);
+        assert_eq!(s.picker_custom.len(), 1, "the bank kept the same colour twice");
+        assert_eq!(hex(s.picker_custom[0]), hex(base[2]), "the bank kept another colour");
+        // And a banked colour can be pressed back.
+        s.perform(Act::PickerBase(0), 0.0, 0.0);
+        s.perform(Act::PickerCustom(0), 0.0, 0.0);
+        assert_eq!(hex(s.picker.colour()), hex(base[2]), "the banked colour did not come back");
+        nacelle::theme::clear_preview();
+    }
+
     /// NEITHER MODE EATS THE OTHER'S WORK — the owner's condition on the
     /// switch, in both directions.
     #[test]
@@ -12024,7 +12714,7 @@ mod tests {
         s.ring_on = true;
         s.current_ring_style = Some("DASHED".to_string());
 
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         // ADVANCED -> BASIC keeps the advanced page untouched: those
         // controls hold work that is in no file yet.
         assert_eq!(s.current_corner.as_deref(), Some("CHAMFER"), "the cut was lost");
@@ -12045,7 +12735,7 @@ mod tests {
             .iter()
             .find(|e| e.token == "palette.accent")
             .map(|e| e.value.clone());
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         assert!(!s.editor_basic);
         // THE FOLD. The sliders are back at rest — the move has become
         // part of what they are now relative to — and the advanced page
@@ -12117,10 +12807,10 @@ mod tests {
         // three — the loss above is the destination page's gamut and
         // nothing else. A small turn at the theme's own lightness.
         let mut inside = editor_open();
-        inside.perform(Act::EditorMode, 0.0);
+        inside.perform(Act::EditorMode, 0.0, 0.0);
         inside.tone[0] = 20;
         let basic_small = oklch_of(&inside.editor_edits()).expect("no accent");
-        inside.perform(Act::EditorMode, 0.0);
+        inside.perform(Act::EditorMode, 0.0, 0.0);
         let folded_small = oklch_of(&inside.editor_edits()).expect("no accent");
         assert!(
             (basic_small.0 - folded_small.0).abs() < 0.02
@@ -12137,8 +12827,8 @@ mod tests {
         // untouched role must keep the theme's own words, references
         // included.
         let mut quiet = editor_open();
-        quiet.perform(Act::EditorMode, 0.0);
-        quiet.perform(Act::EditorMode, 0.0);
+        quiet.perform(Act::EditorMode, 0.0, 0.0);
+        quiet.perform(Act::EditorMode, 0.0, 0.0);
         assert_eq!(
             quiet.severity_touched,
             [false; 7],
@@ -12207,7 +12897,7 @@ mod tests {
             // back. Out: the fold hands the move to ADVANCED, which
             // previews the same ten authors through its own tracks. Both
             // directions are on this path, and both used to move it.
-            s.perform(Act::EditorMode, 0.0);
+            s.perform(Act::EditorMode, 0.0, 0.0);
             let inside = lch(live("palette.accent"));
             assert!(
                 (inside.l - start.l).abs() < 0.004,
@@ -12226,7 +12916,7 @@ mod tests {
                 "visit {trip} moved `ok` and `critical` apart: {start_gap} -> {}",
                 sev_gap()
             );
-            s.perform(Act::EditorMode, 0.0);
+            s.perform(Act::EditorMode, 0.0, 0.0);
             let outside = lch(live("palette.accent"));
             // Four thousandths of L is what the ADVANCED page's
             // whole-number HSV tracks cost a colour on the way through
@@ -12258,9 +12948,9 @@ mod tests {
         let mut turned = editor_open();
         let base = lch(live("palette.accent"));
         for step in 1..=6u32 {
-            turned.perform(Act::EditorMode, 0.0);
+            turned.perform(Act::EditorMode, 0.0, 0.0);
             turned.tone[0] = 20;
-            turned.perform(Act::EditorMode, 0.0);
+            turned.perform(Act::EditorMode, 0.0, 0.0);
             let now = lch(live("palette.accent"));
             // Two hundredths, and the number is the ADVANCED page's own
             // rounding: the fold lands on whole-number HSV tracks, so a
@@ -12363,7 +13053,7 @@ mod tests {
         // authors are a move measured from seeds taken off the live bake,
         // so a set that moved by its own last move would climb instead of
         // blinking — the same fault wearing another face.
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         assert!(s.editor_basic, "the switch did not reach BASIC");
         s.tone[0] = 40;
         let first = pulse(&s);
@@ -12670,7 +13360,7 @@ mod tests {
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
 
         let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
         let hue_gap = |a: f32, b: f32| {
@@ -13212,7 +13902,7 @@ mod tests {
     fn the_basic_notch_comes_from_the_colour_depth() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0);
+        s.perform(Act::EditorMode, 0.0, 0.0);
         let seeds = s.tone_seeds.expect("no seeds");
         assert!(seeds.accent.c > 0.0, "the master's accent is grey — the test is blind");
         // The seed's chroma is what the two derived notches divide by, so
@@ -14202,6 +14892,10 @@ mod tests {
                                         cyclers += 1;
                                         Some((label, cycle_rect(rc).x))
                                     }
+                                    // The picker writes NO word in the
+                                    // label column — its heading is the
+                                    // section row above it — so there is
+                                    // no collision here to measure.
                                     Ctrl::Toggle { .. }
                                     | Ctrl::Drop { .. }
                                     | Ctrl::Button { .. }
@@ -14210,6 +14904,7 @@ mod tests {
                                     | Ctrl::Section { .. }
                                     | Ctrl::Note { .. }
                                     | Ctrl::Hint { .. }
+                                    | Ctrl::Picker
                                     | Ctrl::Custom { .. } => None,
                                 };
                                 if let Some((label, ctrl_x)) = placed {
@@ -14695,7 +15390,7 @@ mod tests {
             let mut s = furnished();
             s.view = View::LookFeel;
             s.dropdown = Some(Dropdown::List(ListId::Looks));
-            s.perform(act, 0.0);
+            s.perform(act, 0.0, 0.0);
             assert!(
                 s.dropdown.is_none(),
                 "a list stayed open behind the page a navigation entry opened"
@@ -17354,6 +18049,16 @@ mod tests {
             // while it is open, which is another test's question
             // (`an_open_list_offers_every_name_it_has`).
             Ctrl::Drop { list } => vec![Act::ListBtn(*list)],
+            // The picker's parts, in the order `Settings::targets`
+            // places them — this is the DESCRIPTION's copy of that list
+            // and the two are checked against each other by the sweep
+            // that calls both.
+            Ctrl::Picker => nacelle::object::color_picker::parts(
+                &nacelle::object::color_picker::layout(Rect::new(0.0, 0.0, 0.0, 0.0), s.picker_custom.len()),
+            )
+            .into_iter()
+            .map(|(part, _)| picker_act(part))
+            .collect(),
             Ctrl::Section { .. }
             | Ctrl::Note { .. }
             | Ctrl::Hint { .. }
@@ -17375,5 +18080,6 @@ fn next_of(list: &[String], current: Option<String>) -> Option<String> {
             _ => None,
         },
     }
+
 }
 
