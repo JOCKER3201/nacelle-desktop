@@ -19,15 +19,26 @@ offered.
 
 | repository | what it installs |
 |---|---|
-| **nacelle-desktop** | the program: binary, fonts, icon, desktop entry |
-| [nacelle-widgets](https://github.com/JOCKER3201/nacelle-widgets) | the widgets — Rhai scripts and compiled `.so` plugins |
-| [nacelle-themes](https://github.com/JOCKER3201/nacelle-themes) | looks, styles, sound themes, layouts and the default configuration |
+| **nacelle-desktop** | the program: binary, fonts, icons, desktop entry |
+| [nacelle-addons](https://github.com/JOCKER3201/nacelle-addons) | the addons — Rhai scripts and compiled `.so` plugins |
+| [nacelle-themes](https://github.com/JOCKER3201/nacelle-themes) | sound themes, layauts, the shell startup file and the default configuration |
 
-Everything is read from three directories, searched in this order:
+The look is NOT among them: the theme engine's master is compiled into
+the toolkit, and a theme file is a file you write. There is nothing to
+install for the program to be drawn.
+
+Everything is read from three places, searched in this order:
 
     ~/.local/share/nacelle      your own
     /usr/local/share/nacelle    sudo make install
     /usr/share/nacelle          a distribution package
+
+Each of those is searched TWICE, under the family name and under the
+folder's old name (`~/.local/share/nacelle-desktop` and so on) — see
+"The folder's old name" below. It is not only history: today's
+`nacelle-addons` installer still writes its addons under the old name,
+so `~/.local/share/nacelle-desktop/addons/` is where a fresh addon
+install lands.
 
 The first copy of a given name wins, so anything you install for
 yourself shadows a packaged one without either being touched — and
@@ -109,13 +120,33 @@ goes on being read, the program says what is wrong with the file, and
 repairing it brings your settings straight back. The mark holds no
 settings; delete it and the old folder is simply read again.
 
-## Widgets
+## Addons
 
-A widget is one directory holding one file: a **Rhai script**
-(`<name>.rhai`) or a **compiled plugin** (`<name>.so`). The directory
-name is the widget's name and is what ties it to a place in a layout.
-Adding a widget means adding a directory; there is no list to register
-it in.
+An addon is ONE FILE, and the two kinds lie flat in two directories
+under the data folder:
+
+    <data>/addons/scripts/<name>.rhai     a Rhai script
+    <data>/addons/plugins/<name>.so       a compiled plugin
+
+The file's stem is the addon's name, and that name is what ties it to a
+place in a layout. Adding an addon means dropping a file in; there is
+no list to register it in.
+
+Everything the program has to know before an addon draws is carried by
+the addon itself, so nothing outside it remembers anything: a script
+declares it in header pragmas within its first lines (`// label:`,
+`// ref_h:`, `// min_h:`, `// category:`), a compiled plugin in the
+`<name>.meta` file installed beside its library. What an addon does not
+declare it is simply given — its name in capitals, the standard
+heights, a board widget.
+
+An earlier release gave every addon a directory of its own
+(`widgets/<name>/<name>.rhai`) with the category carried by a
+directory above it. That layout is retired: the first start after the
+upgrade moves what is in your own `widgets/` into `addons/`, writes the
+pragma or the `.meta` file the directory used to stand for, and says on
+stderr what it moved. Nothing is overwritten — a name already present
+under `addons/` keeps its file and the old copy stays where it was.
 
 Scripts are the ordinary way to write one. They are sandboxed by
 construction — a script sees the host data and the drawing vocabulary
@@ -123,10 +154,14 @@ and nothing else, so it cannot read a file, open a socket or start a
 process — they survive upgrades untouched, and one script works on every
 platform.
 
-Compiled plugins exist for the few widgets a script cannot express: the
-terminal view, which draws thousands of character cells per frame, and
-the file browser, which has to read directories. They are the escape
-hatch, not the default.
+Compiled plugins exist for what a script cannot express: the terminal
+view, which draws thousands of character cells per frame; the file
+browser and the application grids, which have to read directories and
+start processes; the AI panels, which talk to a daemon over a socket.
+Everything that is only a reading of the host's own telemetry — the
+clock, the CPU and memory gauges, the network, the process table — is a
+script in `nacelle-addons`, and that is the line. For anything else the
+plugin is the escape hatch, not the default.
 
 > ### This warning is about `.so` plugins only
 >
@@ -162,35 +197,51 @@ nothing the machine reports puts it down again.
 **Ctrl+Shift+M** does the same while the program is running: each press
 takes the next mood the theme declares, and one more press hands the
 screen back to the theme's own rules. A mood change announces itself with
-a single full-screen tint that fades over a quarter of a second — without
-it a re-skin looks like a drawing fault rather than an alarm.
+a single full-screen tint that fades over the time the theme's
+`motion.mood_change` gives it — a quarter of a second in the master —
+without which a re-skin looks like a drawing fault rather than an alarm.
 
 ## Installation
 
-Requirements: Linux, a Vulkan driver, Rust (cargo), GNU make.
+Requirements: Linux, a Vulkan driver, Rust (cargo), GNU make, git —
+git because the toolkit, the renderer and the addon crates are cargo
+dependencies fetched from their own repositories.
 
 ```sh
 make install        # clean build + install to ~/.local/
 sudo make install   # clean build + install to /usr/local/
 ```
 
-That installs the program alone — the binary, its fonts, the icons and
-the desktop entry, and nothing under `/etc` or `~/.config`. For a
-working interface, install the widgets and the default theme set as
-well; the theme set is also what ships
-`/etc/xdg/nacelle/nacelle-desktop.ron`, the file that answers every
-setting nobody has changed. Each has the same two commands:
+That installs the program alone — the binary, the icons, the desktop
+entry and whatever font files you have put in `fonts/` (none ship; see
+`fonts/README.md`, and without them the interface takes the closest
+system fonts) — and nothing under `/etc` or `~/.config`. For a working
+interface, install the addons and the asset set as well. Each has the
+same two commands:
 
 ```sh
-git clone https://github.com/JOCKER3201/nacelle-widgets && (cd nacelle-widgets && make install)
-git clone https://github.com/JOCKER3201/nacelle-themes  && (cd nacelle-themes  && make install)
+git clone https://github.com/JOCKER3201/nacelle-addons && (cd nacelle-addons && make install)
+git clone https://github.com/JOCKER3201/nacelle-themes && (cd nacelle-themes && make install)
 ```
+
+`nacelle-themes` is also what ships
+`/etc/xdg/nacelle/nacelle-desktop.ron`, the file that answers every
+setting nobody has changed, and `shellrc` beside it. Both go to the
+SYSTEM end of the cascade and nowhere else, so a `make install` into
+`~/.local` lays down the sounds and the layauts and says out loud that
+it wrote no configuration: nothing is ever copied into `~/.config`, and
+the program falls back to the defaults built into it for everything
+that file would have said.
 
 Then run:
 
 ```sh
 nacelle-desktop
 ```
+
+A user install puts the binary in `~/.local/bin`, which is on `PATH` on
+most distributions but not all; if the shell cannot find it, run
+`~/.local/bin/nacelle-desktop` or put that directory on `PATH`.
 
 Uninstall:
 
@@ -199,5 +250,6 @@ make uninstall        # if installed to ~/.local/
 sudo make uninstall   # if installed to /usr/local/
 ```
 
-This removes the program only. The widgets and themes have their own
-`make uninstall`, and neither touches anything you edited.
+This removes the program only. `nacelle-addons` and `nacelle-themes`
+have their own `make uninstall`, and neither touches anything you
+edited.
