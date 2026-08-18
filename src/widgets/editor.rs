@@ -125,7 +125,6 @@ fn grab_edge() -> f32 {
 fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
     static FILL: OnceLock<TokenId> = OnceLock::new();
     static PAD: OnceLock<TokenId> = OnceLock::new();
-    static INSET: OnceLock<TokenId> = OnceLock::new();
     let t = theme::resolved();
     let role = role_label();
     let px = px_of(role, ctx);
@@ -133,10 +132,30 @@ fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
     // The role's own face, not this call site's guess at one.
     let face = role.font();
     let tw = ctx.fonts.measure(face, px, label, track);
+    // ONE key for one plate, spent the way the master's other `pad_x`
+    // keys are: ON EACH SIDE. That is what `button.pad_x` means to every
+    // reader it has — `settings.rs`'s bar plates and disclosure inset
+    // here, all three AI panels in nacelle-addons — and a word cannot
+    // mean one thing per tag. So the plate is the text plus twice the
+    // padding and the label starts one padding in — which is the same
+    // statement twice, and is why a theme cannot slide the label off
+    // its own plate.
+    //
+    // The inset used to come from `panel.title.inset_x`, a length
+    // belonging to the title band of a PANEL: two families met on one
+    // tag, and a theme that widened the plate slid its label off centre
+    // instead of moving it with the padding. (At the master's own
+    // numbers the label sat 8.6 px from the left edge and 2.9 px from
+    // the right.) The master halves the key in the same batch — 1.2x of
+    // the caption size became 0.6x, because the number was calibrated
+    // against a reader spending it on both sides at once — so the tag is
+    // drawn exactly as it is today the moment the toolkit pin carries
+    // that master, and until then it wears the padding twice over.
+    let pad = t.px(tok(&PAD, "editor.proxy.label_pad_x"));
     ctx.dl.rect(
         x,
         y,
-        tw + t.px(tok(&PAD, "editor.proxy.label_pad_x")),
+        tw + 2.0 * pad,
         nameplate_h(),
         col(t.color(tok(&FILL, "component.nameplate.fill"))),
     );
@@ -144,7 +163,7 @@ fn nameplate(ctx: &mut Ctx, x: f32, y: f32, label: &str, ink: Color) {
         ctx.fonts,
         face,
         px,
-        x + t.px(tok(&INSET, "panel.title.inset_x")),
+        x + pad,
         nameplate_text_y(y, px),
         label,
         ink,
@@ -1354,7 +1373,6 @@ impl Editor {
             static TILE_CLASS: OnceLock<Option<u16>> = OnceLock::new();
             static HOLD_FILL: OnceLock<TokenId> = OnceLock::new();
             static HEAD: OnceLock<TokenId> = OnceLock::new();
-            static MINI_PAD: OnceLock<TokenId> = OnceLock::new();
             static RING_W: OnceLock<TokenId> = OnceLock::new();
             let (win, items) = self.add_list_rects(w, h);
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
@@ -1412,7 +1430,14 @@ impl Editor {
                 // Live miniature of the widget (headers drawn above the
                 // rect by some widgets get a little headroom).
                 let head = t.px(tok(&HEAD, "editor.list.preview_head"));
-                let m = t.px(tok(&MINI_PAD, "editor.list.pad_min_px"));
+                // The window's own padding, through the one function that
+                // knows it: `editor.list.pad` held above
+                // `editor.list.pad_min_px`. Reading the FLOOR here read a
+                // device-px companion (§3.2) as though it were the length
+                // — a theme that opened the list up left its miniatures
+                // pressed against the entry at 6 px, and every other
+                // inset in this window moved without them.
+                let m = list_pad();
                 mini(
                     ctx,
                     widget,
@@ -1569,6 +1594,180 @@ mod tests {
     /// so the numbers only have to be a plausible screen.
     const W: f32 = 1920.0;
     const H: f32 = 1080.0;
+
+    /// A drawing context over a plausible screen, and everything the
+    /// closure put on it.
+    ///
+    /// The editor draws through the same `Ctx` the program hands it, so
+    /// these tests need no window: a recording [`DrawList`] is as good a
+    /// destination as a GPU, and the miniature callback is a closure the
+    /// caller already owns.
+    fn recorded(draw: impl FnOnce(&mut Ctx)) -> Vec<nacelle::draw::DrawCmd> {
+        let mut fonts = crate::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::recording();
+        {
+            let mut ctx = Ctx {
+                dl: &mut dl,
+                fonts: &mut fonts,
+                w: W,
+                h: H,
+                t: 0.0,
+                // Off the screen: a hovered control may swap the look it
+                // draws in, and nothing here is a question about hover.
+                mouse: nacelle::pointer::Pointer::new(-1.0, -1.0),
+                term_font_scale: 1.0,
+                ui_font_scale: 1.0,
+                panel_scale: 1.0,
+                focus: None,
+                tips: None,
+            };
+            draw(&mut ctx);
+        }
+        dl.cmds().to_vec()
+    }
+
+    /// The name tag is ONE plate: its label stands the same distance
+    /// from its left edge as from its right, and that distance is the
+    /// padding the master declares for it.
+    ///
+    /// The plate's width comes from `editor.proxy.label_pad_x` and the
+    /// label's inset used to come from `panel.title.inset_x` — a length
+    /// belonging to the title band of a PANEL. Two families met on one
+    /// tag: at the master's own numbers the label sat 8.6 px in from the
+    /// left of a plate that allowed 11.5 px for both sides together, so
+    /// it stood 2.9 px from the right, and a theme that widened the plate
+    /// slid its label further off centre instead of moving it.
+    ///
+    /// Both halves are asked here, because centring alone is the weaker
+    /// half of the claim: a plate `tw + pad` wide with its label `pad / 2`
+    /// in is centred too, and hands a theme author half the room the
+    /// master's word `pad_x` promises — the word every other reader of
+    /// `button.pad_x` in this program spends on EACH side.
+    #[test]
+    fn a_nameplate_centres_its_label_in_its_own_padding() {
+        // Selects nothing, but READS a process-wide engine other tests
+        // select in (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        nacelle::theme::load();
+        nacelle::theme::set_viewport(H, 1.0);
+
+        const LABEL: &str = "SHELL";
+        const X: f32 = 100.0;
+        const Y: f32 = 200.0;
+        let mut text_w = 0.0;
+        let cmds = recorded(|ctx| {
+            nameplate(ctx, X, Y, LABEL, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            // Measured through the plate's OWN role and face, which is
+            // what the plate measured itself with.
+            let role = role_label();
+            let px = px_of(role, ctx);
+            text_w = ctx.fonts.measure(role.font(), px, LABEL, role.tracking_px(px));
+        });
+
+        let plate = cmds
+            .iter()
+            .find_map(|c| match c {
+                nacelle::draw::DrawCmd::Rect { r, .. } => Some(*r),
+                _ => None,
+            })
+            .expect("the tag draws its plate");
+        let (tx, anchor) = cmds
+            .iter()
+            .find_map(|c| match c {
+                nacelle::draw::DrawCmd::Text { at, anchor, .. } => Some((at[0], *anchor)),
+                _ => None,
+            })
+            .expect("the tag draws its label");
+        assert_eq!(
+            anchor,
+            nacelle::draw::TextAnchor::Left,
+            "the label is set from its left edge, so `at[0]` is where it starts"
+        );
+
+        let left = tx - plate[0];
+        let right = (plate[0] + plate[2]) - (tx + text_w);
+        assert!(
+            left > 0.0,
+            "the label starts outside its own plate: left {left}, plate {plate:?}"
+        );
+        assert!(
+            (left - right).abs() < 0.01,
+            "the label is off centre in its plate — {left} px from the left edge and \
+             {right} px from the right: the width and the inset are two different \
+             tokens' answers"
+        );
+        let pad = crate::widgets::token_px("editor.proxy.label_pad_x");
+        assert!(
+            (left - pad).abs() < 0.01,
+            "the label stands {left} px in from its plate's edge, and the master \
+             declares `editor.proxy.label_pad_x` = {pad} px — a padding a reader \
+             spends on both sides together is half the padding the file offered"
+        );
+    }
+
+    /// The ADD WIDGET miniatures are inset by the LIST's padding.
+    ///
+    /// `editor.list.pad_min_px` is a §3.2 companion — the device-px floor
+    /// under `editor.list.pad`, never a length in its own right — and the
+    /// miniature read it directly. A theme that opened the list up moved
+    /// every other inset in that window and left the previews pressed
+    /// against their entries at six pixels.
+    #[test]
+    fn a_miniature_is_inset_by_the_lists_own_padding() {
+        // Selects a theme in a process-wide engine (see `theme_test_lock`).
+        let _theme = crate::widgets::theme_test_lock();
+        fixture_registry();
+        // Far above the floor, so the two answers cannot be mistaken for
+        // each other: 6u is 32.4 px against a 6 px floor.
+        let _open = Themed::new("editor-list-pad", "[editor]\nlist.pad = 6u\n");
+        nacelle::theme::set_viewport(H, 1.0);
+        let pad = list_pad();
+        assert!(
+            pad > 20.0,
+            "the fixture must part the padding from its floor, or this test guards \
+             nothing (it read {pad})"
+        );
+
+        let mut ed = Editor::new(screen_gutter(0.0));
+        ed.start(
+            &Layout::empty(W, H),
+            W,
+            H,
+            false,
+            20,
+            20,
+            screen_gutter(0.0),
+            (0, 0),
+            WidgetCategory::Board,
+            1,
+        );
+        // ADD WIDGET is the second button of the stack; pressing it is
+        // how the window opens in the program.
+        let btns = Editor::save_buttons(W, H);
+        let b = btns[1];
+        ed.buttons_hit(b.x + b.w / 2.0, b.y + b.h / 2.0, W, H);
+
+        let (_, items) = ed.add_list_rects(W, H);
+        assert!(!items.is_empty(), "the fixture registry offers no widget to list");
+
+        let mut shown: Vec<Rect> = Vec::new();
+        recorded(|ctx| ed.draw(ctx, |_, _, r| shown.push(r)));
+        assert!(!shown.is_empty(), "the open ADD WIDGET window drew no miniature");
+        for (m, entry) in shown.iter().zip(items.iter()) {
+            assert!(
+                (m.x - (entry.x + pad)).abs() < 0.01,
+                "a miniature is {} px in from its entry, not the list's own {pad} px",
+                m.x - entry.x
+            );
+            assert!(
+                (m.w - (entry.w - 2.0 * pad)).abs() < 0.01,
+                "a miniature is {} px wide inside a {} px entry, which is not that \
+                 padding on both sides",
+                m.w,
+                entry.w
+            );
+        }
+    }
 
     /// A gutter as a SCREEN would hand it over.
     ///
