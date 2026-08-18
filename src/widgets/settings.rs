@@ -3643,9 +3643,25 @@ struct RowCtx {
     m: Metrics,
 }
 
-/// Where a page's body starts: under the chrome's own row.
-fn body_top(page: &Page, m: Metrics, content: Rect) -> f32 {
-    content.y + m.btn_h + m.space(page.lead)
+/// Where a page's body starts: under the chrome's own row, and under
+/// the row WHEREVER IT STANDS.
+///
+/// ASKED OF THE BUTTON AND NOT OF THE BOX. This used to read
+/// `content.y + button.h + lead`, which is the same sentence only while
+/// the chrome button starts at the top edge of the content box. Since
+/// 2026-08-18 it does not: unfolded it is the head of the RAIL and
+/// stands `settings.band_pad_y` down from the top of the rail's bed
+/// ([`Panes::of`]), so a body still measured from the box would leave
+/// the page's first row `lead - band_pad_y` under the button instead of
+/// `lead` — 5.4 px of the master's 16.2 at 1080p — and would put it a
+/// whole `band_pad_y` ABOVE the rail's first entry, which the two used
+/// to share a line with. Both faults come from asking the wrong
+/// rectangle, so this asks the rectangle the button was really given.
+///
+/// Folded there is no bed and no air, `Panes::of` puts the corner back
+/// at the head of the content box, and this is the old sentence again.
+fn body_top(page: &Page, m: Metrics, nav: &Panes) -> f32 {
+    nav.corner.bottom() + m.space(page.lead)
 }
 
 /// The body box of the window: the modal less its title band and its
@@ -6339,12 +6355,16 @@ impl Settings {
     /// of it here, so every caller — the drawing, the scroll, the tests
     /// — asks one question and gets the box the flow really has.
     fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
-        let box_ = Panes::of(page.view, m, content).page;
+        // The WHOLE split and not the page column alone: the body starts
+        // under the chrome button, and where that button stands is the
+        // rail's business ([`body_top`]).
+        let nav = Panes::of(page.view, m, content);
+        let box_ = nav.page;
         // The box is the FULL one — the clip and the bar are drawn on it
         // — but what a pinned band COSTS is measured where its rows
         // stand, which is beside the bar's lane ([`rows_box`]).
         let rows = rows_box(box_);
-        let top = body_top(page, m, box_);
+        let top = body_top(page, m, &nav);
         let mut bottom = box_.bottom();
         for zone in page.zones {
             if matches!(zone, Zone::Pinned { .. }) {
@@ -13197,7 +13217,8 @@ mod tests {
         {
             assert!(
                 (x - y).abs() < 1e-6,
-                "the two navigation columns were painted apart on {ch}: {x} vs {y} —                  the owner asked for one colour across both"
+                "the two navigation columns were painted apart on {ch}: \
+                 {x} vs {y} — the owner asked for one colour across both"
             );
         }
         // ONE HUE, AND THE NAVIGATION A STEP OFF THE PAGE — the owner's
@@ -13450,93 +13471,225 @@ mod tests {
     /// the chrome button matters most, because it is the one that used to
     /// be placed by a rule of its own (`settings.back_w_frac` against the
     /// content box) with no idea a bed was under it.
+    ///
+    /// AT EVERY HEIGHT, like its twin above. The air is a THEME LENGTH
+    /// (`@space.4`), so it doubles with the viewport — 10.8 px at 1080p,
+    /// 21.6 at 2160p — while the widths it has to stay inside of scale
+    /// on a different rule (`rail_w_frac` against the content box, under
+    /// two floors in device px). A reader that took the padding once and
+    /// spent it at every scale would pass at 1080p and eat the column
+    /// somewhere else, and a measurement taken at one height could not
+    /// tell.
     #[test]
     fn nothing_in_a_navigation_column_touches_the_bed_it_stands_on() {
         let _g = crate::widgets::theme_test_lock();
         nacelle::theme::clear_preview();
-        theme::resolved();
-        theme::set_viewport(1080.0, 1.0);
         let mut fonts = nacelle::font::FontSystem::new();
-        let (pad_x, pad_y) = band_pad();
-        assert!(
-            pad_x > 0.5 && pad_y > 0.5,
-            "the theme states no air around a column's bed ({pad_x} x {pad_y}) — \
-             the fault the owner reported is the absence of it"
-        );
+        let mut measured = 0;
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            // Read INSIDE the sweep: the air is a viewport length, so the
+            // number this height was drawn with is the only one that can
+            // judge it.
+            let (pad_x, pad_y) = band_pad();
+            assert!(
+                pad_x > 0.5 && pad_y > 0.5,
+                "at {h}px the theme states no air around a column's bed \
+                 ({pad_x} x {pad_y}) — the fault the owner reported is the \
+                 absence of it"
+            );
 
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            ctx.focus = Some(&mut fc);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let nav = Panes::of(View::LookFeel, m, content);
+            // Folded there is no bed and nothing stands on one: the
+            // entries are ordinary bands in the flow, which is the
+            // scroll's ground and another test's.
+            if nav.folded {
+                continue;
+            }
+            measured += 1;
+            s.draw(&mut ctx);
+
+            for (name, col_) in [
+                ("rail", nav.rail.expect("no rail")),
+                ("sub", nav.sub.expect("no column of pages")),
+            ] {
+                // The room inside the paint, stated once: the rows box is
+                // the bed less its air, and every side of it is checked,
+                // because a fix that only insets the sides leaves the
+                // owner's other complaint — the heading welded to the top
+                // edge — standing.
+                let (bed, rows) = (col_.bed, col_.rows);
+                for (side, got) in [
+                    ("left", rows.x - bed.x),
+                    ("right", bed.right() - rows.right()),
+                    ("top", rows.y - bed.y),
+                    ("bottom", bed.bottom() - rows.bottom()),
+                ] {
+                    let want =
+                        if side == "left" || side == "right" { pad_x } else { pad_y };
+                    assert!(
+                        got >= want - 0.01,
+                        "at {h}px the {name} column's rows stand {got} px from the \
+                         {side} edge of their bed; the theme asked for {want}"
+                    );
+                }
+                // AND THE FRAME AGREES. Everything the window registered
+                // inside this column — its entries and, for the rail, the
+                // chrome button at its head — stands inside that room.
+                let air = Rect::new(
+                    bed.x + pad_x,
+                    bed.y + pad_y,
+                    bed.w - 2.0 * pad_x,
+                    bed.h - 2.0 * pad_y,
+                );
+                let mut seen = 0;
+                for (r, act) in s.hits.iter() {
+                    if !bed.contains(r.cx(), r.y + r.h / 2.0) {
+                        continue;
+                    }
+                    seen += 1;
+                    // Named by the id the chain knows it as: `Act` has no
+                    // Debug and giving it one drags four more enums with
+                    // it, and the id is the same handle the focus tests
+                    // print.
+                    assert!(
+                        r.x >= air.x - 0.01
+                            && r.right() <= air.right() + 0.01
+                            && r.y >= air.y - 0.01
+                            && r.bottom() <= air.bottom() + 0.01,
+                        "at {h}px a control ({}) in the {name} column is flush with \
+                         the bed it stands on: {:?} against the room {:?}",
+                        focus_id(*act).0,
+                        [r.x, r.y, r.w, r.h],
+                        [air.x, air.y, air.w, air.h]
+                    );
+                }
+                assert!(
+                    seen > 0,
+                    "at {h}px the {name} column registered nothing to measure"
+                );
+            }
+            // THE CHROME BUTTON IS ONE OF THEM, named rather than left to
+            // the sweep: it is the head of the RAIL and the one control
+            // this window used to place against the content box instead.
+            assert!(
+                s.hits.iter().any(|(_, a)| matches!(a, Act::Back | Act::Close)),
+                "at {h}px the frame carried no way out, so the sweep never \
+                 measured it"
+            );
+        }
+        assert!(measured > 0, "no window height in HEIGHTS stands in columns at all");
+        viewport_home();
+    }
+
+    /// THE PAGE FOLLOWS THE BUTTON IT HANGS UNDER. A page's first row
+    /// stands its own lead below the chrome button's row — wherever that
+    /// row is — and where the page leads with the ordinary row gap, it
+    /// stands on the SAME LINE as the rail's first entry.
+    ///
+    /// THE FAULT THIS CATCHES was made by the fix beside it. Moving the
+    /// chrome button onto the rail's bed (`settings.band_pad_y` down from
+    /// the bed's top edge) left [`body_top`] still measuring the page
+    /// from `content.y`, so the room under the button shrank by the whole
+    /// padding — 16.2 px to 5.4 at 1080p on the master — and the first
+    /// rail entry, which had always started on the page's first line,
+    /// dropped `band_pad_y` below it. Two spacing faults introduced by a
+    /// spacing fix, neither of them visible to a test that asked only
+    /// where the beds and the rows boxes were.
+    ///
+    /// BOTH SIDES OF IT ARE ASSERTED. The computed side sweeps every page
+    /// at every height, because `lead` differs page by page and the
+    /// padding is a viewport length; the drawn side takes the frame the
+    /// window really laid at 1080p and compares the rect the CHROME
+    /// BUTTON was registered with against the box the flow was really
+    /// given ([`Flow`]), so a `body_top` that agreed with `Panes` while
+    /// the drawing did something else would still be caught.
+    #[test]
+    fn a_page_starts_its_own_lead_under_the_chrome_row_it_shares_with_the_rail() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let s = furnished();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut lined_up = 0;
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            for p in PAGES.iter() {
+                let nav = Panes::of(p.view, m, content);
+                let top = s.body_box(p, m, content).y;
+                let want = nav.corner.bottom() + m.space(p.lead);
+                assert!(
+                    (top - want).abs() < 0.01,
+                    "{} at {h}px: the body starts {} px under the chrome button \
+                     and the page asked for {}",
+                    p.title,
+                    top - nav.corner.bottom(),
+                    m.space(p.lead)
+                );
+                // ONE LINE, where the two ask for the same gap. The rail
+                // hangs a FIXED row gap under the button ([`Panes::of`]),
+                // so a page that leads with `Gap::Row` and the rail's
+                // first entry are the same line — the alignment the
+                // window has always had and the one the move broke.
+                if let (Some(rail), true) = (nav.rail, p.lead == Gap::Row) {
+                    lined_up += 1;
+                    assert!(
+                        (top - rail.rows.y).abs() < 0.01,
+                        "{} at {h}px: the page's first row stands {} px off the \
+                         rail's first entry",
+                        p.title,
+                        top - rail.rows.y
+                    );
+                }
+            }
+        }
+        assert!(lined_up > 0, "no page in HEIGHTS ever stood beside a rail at all");
+
+        // AND THE FRAME AGREES, read off one real draw: the rect the
+        // chrome button was registered with, against the box the flow was
+        // given.
         let mut s = furnished();
         s.view = View::LookFeel;
+        let page = page(View::LookFeel);
         let mut fc = FocusCtl::new();
         let mut dl = nacelle::draw::DrawList::new();
         fc.begin_frame();
+        theme::set_viewport(1080.0, 1.0);
         let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         ctx.focus = Some(&mut fc);
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
-        let nav = Panes::of(View::LookFeel, m, content);
-        assert!(!nav.folded, "the window folded at a width it fits in");
-        s.draw(&mut ctx);
-
-        for (name, col_) in [
-            ("rail", nav.rail.expect("no rail")),
-            ("sub", nav.sub.expect("no column of pages")),
-        ] {
-            // The room inside the paint, stated once: the rows box is the
-            // bed less its air, and every side of it is checked, because
-            // a fix that only insets the sides leaves the owner's other
-            // complaint — the heading welded to the top edge — standing.
-            let (bed, rows) = (col_.bed, col_.rows);
-            for (side, got) in [
-                ("left", rows.x - bed.x),
-                ("right", bed.right() - rows.right()),
-                ("top", rows.y - bed.y),
-                ("bottom", bed.bottom() - rows.bottom()),
-            ] {
-                let want = if side == "left" || side == "right" { pad_x } else { pad_y };
-                assert!(
-                    got >= want - 0.01,
-                    "the {name} column's rows stand {got} px from the {side} edge of \
-                     their bed; the theme asked for {want}"
-                );
-            }
-            // AND THE FRAME AGREES. Everything the window registered
-            // inside this column — its entries and, for the rail, the
-            // chrome button at its head — stands inside that room.
-            let air = Rect::new(
-                bed.x + pad_x,
-                bed.y + pad_y,
-                bed.w - 2.0 * pad_x,
-                bed.h - 2.0 * pad_y,
-            );
-            let mut seen = 0;
-            for (r, act) in s.hits.iter() {
-                if !bed.contains(r.cx(), r.y + r.h / 2.0) {
-                    continue;
-                }
-                seen += 1;
-                // Named by the id the chain knows it as: `Act` has no
-                // Debug and giving it one drags four more enums with it,
-                // and the id is the same handle the focus tests print.
-                assert!(
-                    r.x >= air.x - 0.01
-                        && r.right() <= air.right() + 0.01
-                        && r.y >= air.y - 0.01
-                        && r.bottom() <= air.bottom() + 0.01,
-                    "a control ({}) in the {name} column is flush with the bed it \
-                     stands on: {:?} against the room {:?}",
-                    focus_id(*act).0,
-                    [r.x, r.y, r.w, r.h],
-                    [air.x, air.y, air.w, air.h]
-                );
-            }
-            assert!(seen > 0, "the {name} column registered nothing to measure");
-        }
-        // THE CHROME BUTTON IS ONE OF THEM, named rather than left to the
-        // sweep: it is the head of the RAIL and the one control this
-        // window used to place against the content box instead.
         assert!(
-            s.hits.iter().any(|(_, a)| matches!(a, Act::Back | Act::Close)),
-            "the frame carried no way out, so the sweep never measured it"
+            !Panes::of(View::LookFeel, m, content).folded,
+            "the window folded at a width it fits in"
+        );
+        s.draw(&mut ctx);
+        let corner = s
+            .hits
+            .iter()
+            .find(|(_, a)| matches!(a, Act::Back | Act::Close))
+            .map(|(r, _)| *r)
+            .expect("the frame carried no way out to measure from");
+        let slack = s.flow.view.y - corner.bottom();
+        assert!(
+            (slack - m.space(page.lead)).abs() < 0.01,
+            "the frame left {slack} px between the chrome button and the page, \
+             where the page's lead is {} px",
+            m.space(page.lead)
         );
         viewport_home();
     }
