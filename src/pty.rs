@@ -107,8 +107,14 @@ impl Drain {
 
 impl Drop for Drain {
     fn drop(&mut self) {
-        // Only reached when a `Pty` was never finished being built;
-        // `Pty::drop` stops the reader itself, in the right order.
+        // This runs on EVERY session teardown, right after
+        // `Pty::end_session` already stopped the reader — a struct's
+        // fields are dropped once its own `Drop` body has returned. So
+        // the second stop is the normal path, not a hypothetical one,
+        // and the `take()` in `stop` is what keeps it from writing to a
+        // pipe end that is closed and whose number may already belong to
+        // something else. The other way in is a `Pty` that was never
+        // finished being built.
         self.stop();
     }
 }
@@ -148,13 +154,25 @@ fn read_loop(master: RawFd, wake: RawFd, tx: Sender<PtyEvent>) -> Stop {
             continue;
         }
         if n <= 0 {
-            let _ = tx.send(PtyEvent::Exited);
             break Stop::Hangup;
         }
         if tx.send(PtyEvent::Data(buf[..n as usize].to_vec())).is_err() {
             break Stop::Orphaned;
         }
     };
+    // A HANGUP IS ANNOUNCED FROM ONE PLACE, whichever way it was
+    // learned. The reader that came before this one had no `poll` at
+    // all, so every failure it could have arrived at was a failing
+    // `read` and every one of them sent `Exited`; adding a second
+    // syscall added a second way to leave the loop, and a `poll` that
+    // fails for its own reasons (ENOMEM, and it is allowed others)
+    // would have ended the thread in silence — the channel simply stops
+    // delivering and the terminal keeps a dead session looking alive.
+    // Announcing on the way out instead of at each site is what makes
+    // that impossible to reintroduce by adding a third exit.
+    if stop == Stop::Hangup {
+        let _ = tx.send(PtyEvent::Exited);
+    }
     unsafe {
         libc::close(wake);
     }
@@ -357,27 +375,43 @@ impl Pty {
     pub fn child_cwd(&self) -> Option<std::path::PathBuf> {
         std::fs::read_link(format!("/proc/{}/cwd", self.child)).ok()
     }
-}
 
-impl Drop for Pty {
-    fn drop(&mut self) {
+    /// Ends the session, and THE ORDER IS THE FIX: the shell is told to
+    /// go, the reader is stopped AND JOINED, and only after that does
+    /// the master go back to the kernel. When the close happens there is
+    /// no thread anywhere in this process sitting inside `read` or
+    /// `poll` on that number — see [`Drain`] for what used to go wrong
+    /// and why it only went wrong sometimes.
+    ///
+    /// The close is a PARAMETER because an order is only worth having if
+    /// it can be checked, and an order that lives inside a `Drop` body
+    /// cannot be: by the time a test regains control both steps have
+    /// happened and the struct is gone, so a reversed teardown looks
+    /// exactly like a correct one. Production hands in the real `close`
+    /// (below); the test hands in one that first asks whether the reader
+    /// has really finished and whether the descriptor is still ours.
+    fn end_session(&mut self, close_master: impl FnOnce(RawFd)) -> Option<Stop> {
         unsafe {
             libc::kill(self.child, libc::SIGHUP);
         }
-        // THE ORDER IS THE FIX. The reader is stopped and joined first,
-        // so that when the master is closed a line below there is no
-        // thread anywhere in this process sitting inside `read` on that
-        // number — see [`Drain`] for what used to go wrong and why it
-        // only went wrong sometimes.
-        self.drain.stop();
+        let why = self.drain.stop();
+        close_master(self.master);
         unsafe {
-            libc::close(self.master);
             // Reap the child so it does not linger as a zombie. Closing
             // the master gives the shell EOF and SIGHUP terminates it, so
             // this returns promptly (a zombie is reaped immediately).
             let mut status = 0;
             libc::waitpid(self.child, &mut status, 0);
         }
+        why
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        self.end_session(|fd| unsafe {
+            libc::close(fd);
+        });
     }
 }
 
@@ -413,14 +447,146 @@ mod tests {
         flags >= 0
     }
 
-    /// THE ORDER. The reader stops because it was ASKED, and at the
-    /// moment it has stopped the master is still open — meaning nothing
-    /// was ever inside `read` on a descriptor number that had already
-    /// been handed back to the kernel.
+    /// WHICH pty this number is the master of. A closed number answers
+    /// nothing, and a number the kernel has already handed to something
+    /// else answers about that something else — which is the entire
+    /// confusion this fix exists to prevent, so anything checking after
+    /// a close has to ask by identity and not by "is it open". The other
+    /// tests in this file open descriptors too, on other threads.
+    fn pty_number(fd: RawFd) -> Option<libc::c_uint> {
+        let mut n: libc::c_uint = 0;
+        if unsafe { libc::ioctl(fd, libc::TIOCGPTN, &mut n) } != 0 {
+            return None;
+        }
+        Some(n)
+    }
+
+    /// A child that exists and is already over: a zombie. `end_session`
+    /// signals it and reaps it, and a zombie answers both without any
+    /// running process that could be surprised by a SIGHUP. Its pid also
+    /// cannot be recycled underneath the test, precisely because it has
+    /// not been reaped yet — the test would otherwise be signalling a
+    /// number, which is the same class of mistake it exists to catch.
+    fn spent_child() -> libc::pid_t {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // Between fork and exit, only async-signal-safe calls. This
+            // child makes none at all.
+            unsafe { libc::_exit(0) };
+        }
+        assert!(pid > 0, "fork failed: {}", io::Error::last_os_error());
+        pid
+    }
+
+    /// THE ORDER, WHERE THE ORDER ACTUALLY LIVES. A whole session is
+    /// torn down, and the close is asked, at the instant it runs, two
+    /// questions that only a correct order can answer yes to: is the
+    /// master still ours, and is the reader thread already finished.
     ///
-    /// The predecessor could not pass this: closing the master WAS the
-    /// stop signal, so the reader's answer would be `Hangup` and the
-    /// descriptor would already be gone.
+    /// The second question is the one with teeth. The reader owns the
+    /// sending end of the event channel, so a receiver that reports
+    /// `Disconnected` is proof that the thread has run to the end —
+    /// there is no other way for that sender to be dropped. Reverse the
+    /// two steps in `end_session` and the first question still answers
+    /// yes (the test's own closure is the thing that closes), while the
+    /// second answers no, because the reader is still sitting in `poll`
+    /// on a number that is on its way back to the kernel. That reversal
+    /// is exactly the pre-change teardown.
+    #[test]
+    fn the_session_stops_the_reader_before_it_closes_the_master() {
+        let (master, slave) = pair();
+        let (tx, rx) = channel();
+        let drain = Drain::start(master, tx).expect("stop pipe");
+        let mut pty = Pty {
+            master,
+            child: spent_child(),
+            drain,
+        };
+
+        // The property is about interrupting a BLOCKED reader, so give
+        // it time to reach its wait.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut seen = None;
+        let why = pty.end_session(|fd| {
+            let reader_gone = loop {
+                match rx.try_recv() {
+                    // Whatever a pty pair says to itself is beside the
+                    // point; only the end of the channel is.
+                    Ok(_) => continue,
+                    Err(e) => break e == std::sync::mpsc::TryRecvError::Disconnected,
+                }
+            };
+            seen = Some((still_open(fd), reader_gone));
+            unsafe {
+                libc::close(fd);
+            }
+        });
+
+        // Forgotten rather than dropped: the teardown has already run,
+        // and running it again would close a number the kernel is free
+        // to have handed to something else in the meantime — which is
+        // the hazard under test, and no nicer inside a test than out.
+        std::mem::forget(pty);
+        unsafe {
+            libc::close(slave);
+        }
+
+        assert_eq!(why, Some(Stop::Asked), "the reader must answer the ask");
+        let (open_at_close, reader_gone) = seen.expect("the close never ran");
+        assert!(
+            open_at_close,
+            "the master was already gone when the session closed it"
+        );
+        assert!(
+            reader_gone,
+            "the master was closed while the reader thread was still running — the very race"
+        );
+    }
+
+    /// And `Drop` is that teardown, not another one beside it. Without
+    /// this the test above would be checking a method the program never
+    /// reaches: a `Drop` that closed the master itself would leave every
+    /// assertion in it true and the race back in place.
+    #[test]
+    fn dropping_a_session_ends_it() {
+        let (master, slave) = pair();
+        let (tx, rx) = channel();
+        let drain = Drain::start(master, tx).expect("stop pipe");
+        let pty = Pty {
+            master,
+            child: spent_child(),
+            drain,
+        };
+        let ours = pty_number(master).expect("a fresh master knows its pty");
+        std::thread::sleep(Duration::from_millis(50));
+
+        drop(pty);
+
+        assert_ne!(
+            pty_number(master),
+            Some(ours),
+            "the session was dropped and the master is still this pty's"
+        );
+        let reader_gone = loop {
+            match rx.try_recv() {
+                Ok(_) => continue,
+                Err(e) => break e == std::sync::mpsc::TryRecvError::Disconnected,
+            }
+        };
+        assert!(reader_gone, "the reader outlived the session it belonged to");
+        unsafe {
+            libc::close(slave);
+        }
+    }
+
+    /// The ask alone stops the reader: nothing has to be closed for it
+    /// to come back, and at the moment it has come back the master is
+    /// still open.
+    ///
+    /// This is the half of the fix that lives in [`Drain`]. The
+    /// predecessor had no such thing — closing the master WAS the stop
+    /// signal — and could not have answered `Asked` at all.
     #[test]
     fn the_reader_is_stopped_before_the_descriptor_is_closed() {
         let (master, slave) = pair();
@@ -500,6 +666,10 @@ mod tests {
     /// Asking twice is not an error, and the second ask does not write
     /// to a descriptor number that has been closed and possibly reused —
     /// the same hazard one level up.
+    ///
+    /// Every teardown asks twice: `Pty::end_session` stops the reader,
+    /// and then the `Drain` field is dropped and stops it again. So this
+    /// is the shape of the real path, not a defensive extra.
     #[test]
     fn stopping_twice_is_harmless() {
         let (master, slave) = pair();
