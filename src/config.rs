@@ -106,25 +106,59 @@
 //!
 //! A machine with several screens gives each of them a desktop of its
 //! own, so `layaut:` is only the DEFAULT arrangement. A screen takes a
-//! layaut of its own when the file names it by connector:
+//! layaut of its own when the file names it, and one screen carries the
+//! MAIN SCREEN role:
 //!
 //!   (
-//!       layaut: Named("console"),          // every screen not named below
+//!       layaut: Named("console"),                 // every screen not named below
 //!       screens: {
-//!           "DP-1": Named("cockpit"),      // the monitor on DisplayPort 1
-//!           "eDP-1": Named("panel"),       // the laptop's own screen
+//!           "edid:DEL-41B2-0123ABCD": Named("cockpit"),  // that Dell, wherever it is plugged in
+//!           "eDP-1": Named("panel"),                     // whatever hangs off the laptop's panel
 //!       },
+//!       main_screen: Named("edid:DEL-41B2-0123ABCD"),
 //!   )
 //!
-//! The connector — DP-1, HDMI-A-1, eDP-1 — is what the display server
-//! calls the socket a screen hangs off, and the program prints it for
-//! every screen at startup. It is the only stable name a screen has:
-//! the order screens come up in depends on which monitor is switched
-//! on first, so a number in that order would name a different screen
-//! every morning. Case is not significant, `Off` means "no layaut of
-//! its own" and outranks a system file that gives it one, and a name no
-//! layauts/ file answers to costs that screen nothing but a line in the
-//! log — it takes the default.
+//! A screen is named in one of TWO vocabularies, and the difference
+//! matters:
+//!
+//! `edid:MAKER-MODEL-SERIAL` is what the MONITOR says about itself —
+//! the description block every screen carries in its own firmware. It
+//! travels with the monitor: unplug it, move it to another socket, turn
+//! the machine on in another order, and the settings written under this
+//! key are still describing that screen.
+//!
+//! `DP-1`, `HDMI-A-1`, `eDP-1` is the SOCKET, which is a property of
+//! the cable and not of the screen. It is what a monitor gets when its
+//! firmware says nothing, it is what every file written before
+//! 2026-08-18 uses, and it is still perfectly good for a rule that
+//! really is about a socket — "whatever is plugged in here".
+//!
+//! Both are read, the monitor's own name first, so a file of either
+//! generation answers. The program prints both the label and the key
+//! for every screen at startup, so the line to write is never guesswork.
+//! Case is not significant, `Off` means "no layaut of its own" and
+//! outranks a system file that gives it one, and a name no layauts/ file
+//! answers to costs that screen nothing but a line in the log — it
+//! takes the default.
+//!
+//! A file that has NEVER named a monitor is converted once, at the first
+//! start that can see which monitor is on which socket, and the log says
+//! so. After that the two vocabularies stand side by side and nothing
+//! rewrites either of them: a socket line typed into a file that names a
+//! monitor anywhere is a rule about that socket and stays one. Two
+//! monitors that give the same name — some models print one serial for
+//! every unit — are left keyed by their sockets, which is the only
+//! vocabulary that can still tell them apart.
+//!
+//! A number in the order the screens came up would be no name at all:
+//! which monitor is switched on first is not a property of anything.
+//!
+//! `main_screen:` gives one screen the MAIN SCREEN role, in that same
+//! vocabulary. What the role MEANS — four duties, one setting — is
+//! written down in `screens::MainScreenDuty` and nowhere else. Absent,
+//! the display server's own answer stands; `Off` says to take that
+//! answer whatever it is, which is how a user overrules a system file
+//! naming a monitor that is not on this desk.
 
 pub mod model;
 
@@ -643,12 +677,14 @@ fn load_layaut_or_default(name: &str, warning: &mut Option<String>) -> (String, 
     ("default".to_string(), layaut_by_name("default").unwrap_or_default())
 }
 
-/// The key one screen's layaut is written under in `screens:` — the
-/// connector name, trimmed. None when the text is not a connector name:
-/// a key nothing could ever match a screen to is not worth writing.
-fn screen_layaut_key(connector: &str) -> Option<String> {
-    let c = connector.trim();
-    (crate::screens::connector_of(c).as_deref() == Some(c)).then(|| c.to_string())
+/// The key one screen's layaut is written under in `screens:`. None
+/// when the text names no screen: a key nothing could ever match a
+/// screen to is not worth writing.
+///
+/// The vocabulary itself lives in [`crate::screens::screen_key`], with
+/// the two kinds of key and the reason they cannot be confused.
+fn screen_layaut_key(key: &str) -> Option<String> {
+    crate::screens::screen_key(key)
 }
 
 /// What one screen's layaut resolves to, and the one sentence the log
@@ -658,7 +694,7 @@ struct ScreenLayaut {
     note: Option<String>,
 }
 
-/// Which layaut a connector takes: the one it is assigned when that
+/// Which layaut one screen takes: the one it is assigned when that
 /// layaut is installed, the desktop's default in every other case.
 ///
 /// Pure, and handed everything it judges by — the assignments, the
@@ -667,8 +703,14 @@ struct ScreenLayaut {
 /// because it must never be able to name a layaut the store did not
 /// list: that is what keeps a hand-written value out of the paths
 /// built from it.
+///
+/// A screen has TWO keys and both are read, the monitor's own name
+/// first — `ScreenId::keys` is that order. So a file written before
+/// screens were keyed by their monitors goes on answering for exactly
+/// as long as it says anything: nothing is lost by the change of key,
+/// with or without the migration that rewrites it.
 fn choose_layaut(
-    connector: Option<&str>,
+    id: &crate::screens::ScreenId,
     assigned: &BTreeMap<String, String>,
     default_name: &str,
     installed: &[String],
@@ -676,10 +718,10 @@ fn choose_layaut(
     let default = || ScreenLayaut { name: default_name.to_string(), note: None };
     // Case is not significant: RandR says eDP-1 and a user typing
     // edp-1 means that same screen, not a screen the machine lacks.
-    let Some((c, want)) = connector.and_then(|c| {
+    let Some((c, want)) = id.keys().into_iter().find_map(|key| {
         assigned
             .iter()
-            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(c))
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(&key))
             .map(|(k, v)| (k.as_str(), v.as_str()))
     }) else {
         return default();
@@ -698,38 +740,43 @@ fn choose_layaut(
 
 // The per-screen layaut API below — read it, write it, resolve it —
 // has no caller in this file. It is answered here and asked
-// elsewhere: main.rs hands each screen the layaut its connector is
+// elsewhere: screen.rs hands each screen the layaut its identity is
 // assigned, and the settings screen writes the assignments once it
 // exists (until then the user writes the line by hand, which is what
 // the format is shaped for). `allow(dead_code)` says exactly that,
 // and comes off the day each one is called.
 
-/// Every connector→layaut assignment the configuration carries, the
+/// Every screen→layaut assignment the configuration carries, the
 /// user's file laid over the system ones.
 #[allow(dead_code)]
 pub fn screen_layauts() -> BTreeMap<String, String> {
     conf().screens()
 }
 
-/// The layaut assigned to one connector, if any. Case is not
-/// significant.
+/// The layaut assigned to one screen, if any. Both of a screen's keys
+/// are asked, the monitor's own first; case is not significant.
 #[allow(dead_code)]
-pub fn layaut_for_connector(connector: &str) -> Option<String> {
-    screen_layauts()
-        .into_iter()
-        .find(|(k, _)| k.as_str().eq_ignore_ascii_case(connector))
-        .map(|(_, v)| v)
+pub fn layaut_for_screen(id: &crate::screens::ScreenId) -> Option<String> {
+    let assigned = screen_layauts();
+    id.keys().into_iter().find_map(|key| {
+        assigned
+            .iter()
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(&key))
+            .map(|(_, v)| v.clone())
+    })
 }
 
-/// Assigns a layaut to a connector. An empty name switches the screen
-/// OFF — written as [`Choice::Off`] rather than dropped, so the user's
-/// file also overrules an assignment a system file makes. Removing the
-/// entry outright is [`clear_screen_layauts`].
+/// Assigns a layaut to one screen, by the key that screen answers to —
+/// `edid:DEL-41B2-0123ABCD` for the monitor itself, `DP-1` for the
+/// socket. An empty name switches the screen OFF — written as
+/// [`Choice::Off`] rather than dropped, so the user's file also
+/// overrules an assignment a system file makes. Removing the entry
+/// outright is [`clear_screen_layauts`].
 #[allow(dead_code)]
-pub fn set_layaut_for_connector(connector: &str, name: &str) {
-    let Some(key) = screen_layaut_key(connector) else {
+pub fn set_layaut_for_screen(key: &str, name: &str) {
+    let Some(key) = screen_layaut_key(key) else {
         eprintln!(
-            "nacelle-desktop: '{connector}' is not a connector name \u{2014} \
+            "nacelle-desktop: '{key}' names no screen \u{2014} \
              no screen was assigned a layaut"
         );
         return;
@@ -739,9 +786,9 @@ pub fn set_layaut_for_connector(connector: &str, name: &str) {
     });
 }
 
-/// The NAME of the layaut a screen takes, by the connector it hangs
-/// off. None connector — a screen the display server would not name —
-/// takes the default, and so does a screen nothing was written for.
+/// The NAME of the layaut a screen takes. A screen nothing names —
+/// no monitor description, no connector — takes the default, and so
+/// does a screen nothing was written for.
 ///
 /// Reads the configuration files and lists the layaut store, so it is
 /// asked when a screen appears or the configuration changes, never
@@ -749,9 +796,9 @@ pub fn set_layaut_for_connector(connector: &str, name: &str) {
 /// this one answers quietly, so a caller comparing two screens does
 /// not fill the log.
 #[allow(dead_code)]
-pub fn screen_layaut_name(connector: Option<&str>) -> String {
+pub fn screen_layaut_name(id: &crate::screens::ScreenId) -> String {
     choose_layaut(
-        connector,
+        id,
         &screen_layauts(),
         &current_layaut_name().unwrap_or_else(|| "default".into()),
         &list_layauts(),
@@ -762,15 +809,14 @@ pub fn screen_layaut_name(connector: Option<&str>) -> String {
 /// The layaut a screen takes: the name and the layout itself.
 ///
 /// This is the whole of "one screen, one desktop": a screen the
-/// configuration names by connector takes that layaut, and every
-/// other screen takes the default one. A configuration naming a
-/// layaut this machine does not have is a mistake in a file, never a
-/// reason not to start — the screen falls back to the default and the
-/// log says which screen, which layaut and what it got instead.
-#[allow(dead_code)]
-pub fn screen_layaut(connector: Option<&str>) -> (String, LayoutDef) {
+/// configuration names takes that layaut, and every other screen takes
+/// the default one. A configuration naming a layaut this machine does
+/// not have is a mistake in a file, never a reason not to start — the
+/// screen falls back to the default and the log says which screen,
+/// which layaut and what it got instead.
+pub fn screen_layaut(id: &crate::screens::ScreenId) -> (String, LayoutDef) {
     let chosen = choose_layaut(
-        connector,
+        id,
         &screen_layauts(),
         &current_layaut_name().unwrap_or_else(|| "default".into()),
         &list_layauts(),
@@ -780,6 +826,98 @@ pub fn screen_layaut(connector: Option<&str>) -> (String, LayoutDef) {
     }
     let mut warning = None;
     load_layaut_or_default(&chosen.name, &mut warning)
+}
+
+/// The key of the screen the configuration gives the MAIN SCREEN role
+/// to, if it gives it to any. What the role MEANS is written down in
+/// [`crate::screens::MainScreenDuty`] and nowhere else.
+///
+/// `None` covers both "nothing was said" and an explicit "the display
+/// server's answer, whatever it is" — the two differ in the CASCADE
+/// and not in the value, which is [`Choice`]'s whole business, and by
+/// the time the answer is here the cascade has already happened.
+pub fn main_screen_key() -> Option<String> {
+    conf().main_screen.name().map(str::to_string)
+}
+
+/// Gives the role to one screen. `None` writes [`Choice::Off`] rather
+/// than dropping the field — a user who has said "let the display
+/// server decide" has to outrank a system file naming a screen that is
+/// not on this desk. Taking the setting back altogether — leaving the
+/// question to the rest of the cascade, which is a third answer and not
+/// the same as either — is [`clear_main_screen`].
+///
+/// Read here and written elsewhere: the settings window's SCREENS page
+/// calls this once it exists, and until then the user writes the field
+/// by hand. `allow(dead_code)` says only that, and comes off the day it
+/// is called.
+#[allow(dead_code)]
+pub fn set_main_screen(key: Option<&str>) {
+    let key = match key {
+        None => {
+            update_conf(|c| c.main_screen = Choice::Off);
+            return;
+        }
+        Some(k) => k,
+    };
+    let Some(key) = screen_layaut_key(key) else {
+        eprintln!("nacelle-desktop: '{key}' names no screen \u{2014} the main screen is unchanged");
+        return;
+    };
+    update_conf(|c| c.main_screen = Choice::Named(key));
+}
+
+/// Brings the configuration's screen keys up to date with the monitors
+/// this machine can actually see — see
+/// [`DesktopConf::migrate_screens`], which is the rule and is pure.
+///
+/// Answers whether anything moved. NOTHING IS WRITTEN WHEN NOTHING
+/// MOVED, and that is a promise about more than syscalls: this runs at
+/// every start, and the program installs nothing and makes no
+/// directory until the user changes something. A machine with no
+/// configuration at all must still have none after this.
+///
+/// The document handed to the migration is the USER's own file, which
+/// is what every write through this door gets and for the reason
+/// [`update_conf`] gives. A system file keyed by connector is left
+/// exactly as its administrator wrote it and goes on being read — both
+/// keys resolve, so nothing there is lost either.
+pub fn migrate_screen_identities(live: &[crate::screens::ScreenId]) -> bool {
+    // Asked of the CASCADE first, and only as a question: is there a
+    // socket-keyed entry anywhere that one of today's monitors would
+    // claim? Most machines answer no, and on those the door below is
+    // never opened at all.
+    //
+    // WHICH IS NOT ONLY A SAVING OF SYSCALLS. Opening that door READS
+    // the user's own file, and a file that cannot be read is copied
+    // aside and reported to them in the words "the setting you just
+    // changed has REPLACED it" — see [`rescue_unreadable`], which is
+    // written for the one moment that sentence is true. Nothing here
+    // changes a setting. So a start with nothing to migrate must not
+    // reach that door, or every start on a machine with one broken
+    // bracket in its file would leave a rescue copy and a notice about
+    // a setting nobody touched.
+    let seen = conf();
+    let worth_it = live.iter().any(|id| {
+        let (Some(_), Some(c)) = (&id.edid, &id.connector) else { return false };
+        seen.screens.keys().any(|k| k.eq_ignore_ascii_case(c))
+            || seen.main_screen.name().map(|m| m.trim().eq_ignore_ascii_case(c)).unwrap_or(false)
+    });
+    if !worth_it {
+        return false;
+    }
+    let mut moved = false;
+    update_conf_when(|c| {
+        moved = c.migrate_screens(live);
+        moved
+    });
+    if moved {
+        eprintln!(
+            "nacelle-desktop: per-screen settings written against a socket now name the \
+             monitor on it \u{2014} they follow that monitor to any other socket from here on"
+        );
+    }
+    moved
 }
 
 /// What a retired look's directory bundled as its layout: a symlink
@@ -1992,10 +2130,16 @@ pub fn print_layaut(def: &LayoutDef) -> String {
     nacelle::layout::layaut::print(def)
 }
 
-/// Screen diagonal in inches of the monitor with the given connector
-/// name (EDID bytes 21/22, physical size in cm); 0 = unknown.
+/// Screen diagonal in inches of the monitor with the given display
+/// name, out of the picture size the monitor itself reports; 0 =
+/// unknown.
+///
+/// The reading of the block moved to [`crate::screens::edid`] when the
+/// same bytes started answering a second question — WHICH monitor this
+/// is, not only how big — because two readers of one format is two
+/// chances to read it differently.
 pub fn monitor_diag_inches(monitor_name: &str) -> u32 {
-    // Remembered per connector name. A monitor does not change size
+    // Remembered per display name. A monitor does not change size
     // while it is plugged in, and this was being asked several times a
     // frame: a directory scan of /sys/class/drm and an EDID read, over
     // two thousand of them in half a minute of running.
@@ -2012,32 +2156,16 @@ pub fn monitor_diag_inches(monitor_name: &str) -> u32 {
 }
 
 fn monitor_diag_inches_uncached(monitor_name: &str) -> u32 {
+    // A Wayland compositor may hand winit `DP-1 Dell Inc. U2720Q`; the
+    // socket is the first word, which is what names the file.
     let connector = monitor_name
         .split_whitespace()
         .next()
         .unwrap_or(monitor_name);
-    let suffix = format!("-{connector}");
-    let Some(dir) = std::fs::read_dir("/sys/class/drm")
-        .ok()
-        .and_then(|rd| {
-            rd.flatten().map(|e| e.path()).find(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().ends_with(&suffix))
-                    .unwrap_or(false)
-            })
-        })
-    else {
-        return 0;
-    };
-    let Ok(edid) = std::fs::read(dir.join("edid")) else { return 0 };
-    if edid.len() >= 23 {
-        let w = edid[21] as f32;
-        let h = edid[22] as f32;
-        if w > 0.0 && h > 0.0 {
-            return ((w * w + h * h).sqrt() / 2.54).round() as u32;
-        }
-    }
-    0
+    crate::screens::read_edid(connector)
+        .and_then(|e| e.diagonal_in())
+        .map(|d| d.round() as u32)
+        .unwrap_or(0)
 }
 
 /// Changes the USER's own configuration and writes it back.
@@ -2080,6 +2208,22 @@ fn monitor_diag_inches_uncached(monitor_name: &str) -> u32 {
 /// keeps its power over a file that is merely wrong, which is the case
 /// it was given that power for, and stops at one it cannot even see.
 fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
+    update_conf_when(|c| {
+        f(c);
+        true
+    });
+}
+
+/// The same, for a change that may turn out not to be one.
+///
+/// `f` answers whether it changed anything, and a `false` abandons the
+/// write before a byte is serialised: no file, no directory, no memo,
+/// nothing. The migration at startup is why this exists — it runs on
+/// every machine at every start, and the overwhelming majority of them
+/// have nothing to migrate, so a door that always wrote would install a
+/// configuration file on a machine whose owner has never changed a
+/// setting.
+fn update_conf_when(f: impl FnOnce(&mut DesktopConf) -> bool) {
     let dir = config_dir();
     let path = dir.join(CONF_RON);
     // Seeded from the user's OWN configuration wherever it currently
@@ -2161,7 +2305,12 @@ fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
     if keeps_nothing {
         return;
     }
-    f(&mut doc);
+    // A change that turned out not to be one leaves no trace at all —
+    // see [`update_conf_when`]. Before the text and before the memo,
+    // because both of those commit this program to a document.
+    if !f(&mut doc) {
+        return;
+    }
     // THE BYTES BEFORE THE MEMO, and the order is the whole safety of
     // what follows. Filing the memo commits this program to answering
     // from it until a write settles or drops it; a save that dies
@@ -3098,10 +3247,26 @@ pub fn clear_look_and_feel() {
 }
 
 /// Takes back every per-screen assignment, leaving the default
-/// arrangement alone.
+/// arrangement alone — and leaving the MAIN SCREEN role alone with it,
+/// the role being a different setting about the same screens and not a
+/// layaut. [`clear_main_screen`] is that one.
 #[allow(dead_code)]
 pub fn clear_screen_layauts() {
     update_conf(|c| c.screens.clear());
+}
+
+/// Takes the MAIN SCREEN setting out of the file altogether, which is
+/// the ONE answer [`set_main_screen`] cannot write.
+///
+/// Three states, three ways in: a name and an explicit "the display
+/// server's, whatever it is" are both [`set_main_screen`]'s, and this
+/// is the third — the question handed back to the rest of the cascade,
+/// so that a system file naming a screen is heard again. Removing the
+/// field is what says that, because an empty value would be the `Off`
+/// above and would go on outranking it.
+#[allow(dead_code)]
+pub fn clear_main_screen() {
+    update_conf(|c| c.main_screen = Choice::Inherit);
 }
 
 /// One level of a search path: `<base>/nacelle` and, directly behind
@@ -3632,6 +3797,10 @@ mod tests {
     // A widget KIND: only the tests still name one directly — the
     // interface below speaks in instance identities.
     use crate::widgets::{LayoutMode, Panel};
+    // What a screen is called. The rules below are about screens, and a
+    // test binary has no sockets to plug a monitor into, so every one of
+    // them builds the identity it is talking about.
+    use crate::screens::ScreenId;
 
     fn test_store(dir: &std::path::Path) -> nacelle::layout::LayautStore {
         nacelle::layout::LayautStore::new(nacelle::assets::AssetRoots::new(
@@ -3675,8 +3844,12 @@ mod tests {
         super::set_engine_variant(name);
         flush_writes();
     }
-    fn set_layaut_for_connector(connector: &str, name: &str) {
-        super::set_layaut_for_connector(connector, name);
+    fn set_layaut_for_screen(key: &str, name: &str) {
+        super::set_layaut_for_screen(key, name);
+        flush_writes();
+    }
+    fn set_main_screen(key: Option<&str>) {
+        super::set_main_screen(key);
         flush_writes();
     }
     fn set_layaut_option(name: &str) {
@@ -3934,6 +4107,19 @@ mod tests {
     #[test]
     fn the_user_file_wins_and_the_system_file_fills_the_gaps() {
         fixture_registry();
+        // Reading a cascade SETS the process-wide sentence about broken
+        // files ([`remember_conf_error`]), so this test may not run
+        // beside one that reads a configuration of its own — the reason
+        // spelled out on `a_file_that_does_not_parse_is_said_out_loud_-
+        // and_never_swallowed`, which is where the rule was written and
+        // this one was the only reader of a cascade that had not taken
+        // it. It sets no environment variable, and takes the lock
+        // anyway: what the lock really guards is the process, and a
+        // reader that clears the sentence under another test's feet
+        // fails that test and not its own — which is how it survived
+        // this long, showing up as whichever test happened to be
+        // asserting at the time.
+        let _env = env_lock();
         let base =
             std::env::temp_dir().join(format!("nacelle-conf-cascade-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -6077,7 +6263,7 @@ mod tests {
         set_engine_theme("crimson");
         set_engine_variant(None);
         set_layaut_option("hangar");
-        set_layaut_for_connector("DP-1", "");
+        set_layaut_for_screen("DP-1", "");
         set_sounds_option("quiet");
         set_term_font_size(80);
         set_term_font_family("Fira Code");
@@ -7035,14 +7221,18 @@ mod tests {
             (Some("DP-3"), "console"),
             (None, "console"),
         ] {
-            let got = choose_layaut(connector, &assigned, "console", &installed);
+            let id = match connector {
+                Some(c) => ScreenId::of_connector(c),
+                None => ScreenId::default(),
+            };
+            let got = choose_layaut(&id, &assigned, "console", &installed);
             assert_eq!(got.name, want, "screen {connector:?} takes '{want}'");
             assert!(got.note.is_none(), "nothing to report for {connector:?}");
         }
         // The user typed the connector in another case than RandR says
         // it; it is the same socket and the same screen.
         assert_eq!(
-            choose_layaut(Some("edp-1"), &assigned, "console", &installed).name,
+            choose_layaut(&ScreenId::of_connector("edp-1"), &assigned, "console", &installed).name,
             "panel"
         );
     }
@@ -7061,7 +7251,7 @@ mod tests {
         set_engine_theme("crimson");
         set_layaut_option("console");
 
-        set_layaut_for_connector("DP-1", "cockpit");
+        set_layaut_for_screen("DP-1", "cockpit");
         let c = conf();
         assert_eq!(
             c.screens().get("DP-1").map(String::as_str),
@@ -7076,14 +7266,14 @@ mod tests {
         assert_eq!(c.theme.name(), Some("crimson"));
 
         // Assigning again replaces the entry rather than adding a second.
-        set_layaut_for_connector("DP-1", "hangar");
+        set_layaut_for_screen("DP-1", "hangar");
         let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
         assert_eq!(text.matches("\"DP-1\"").count(), 1, "one entry per screen: {text}");
         assert_eq!(conf().screens().get("DP-1").map(String::as_str), Some("hangar"));
 
         // Clearing writes an explicit off: the assignment is gone, and
         // the entry stays to overrule a system file that makes one.
-        set_layaut_for_connector("DP-1", "");
+        set_layaut_for_screen("DP-1", "");
         assert_eq!(conf().screens.get("DP-1"), Some(&Choice::Off), "an off, not an absence");
         assert!(conf().screens().is_empty(), "and no screen is assigned anything");
 
@@ -7091,7 +7281,7 @@ mod tests {
         assert_eq!(screen_layaut_key("HDMI-A-1").as_deref(), Some("HDMI-A-1"));
         for bad in ["", "Dell Inc. U2720Q", "DP-1]", "screen 2"] {
             assert!(screen_layaut_key(bad).is_none(), "'{bad}' must not become a key");
-            set_layaut_for_connector(bad, "cockpit");
+            set_layaut_for_screen(bad, "cockpit");
         }
         assert_eq!(conf().screens.len(), 1, "and nothing of the sort reached the file");
 
@@ -7109,7 +7299,7 @@ mod tests {
         fixture_registry();
         let assigned = DesktopConf::from_legacy(&parse_kv("Layaut[DP-1]=cockpit\n")).screens();
         let installed = ["default".to_string(), "console".to_string()];
-        let got = choose_layaut(Some("DP-1"), &assigned, "console", &installed);
+        let got = choose_layaut(&ScreenId::of_connector("DP-1"), &assigned, "console", &installed);
         assert_eq!(got.name, "console", "the screen falls back to the default layaut");
         let note = got.note.expect("a fallback must say so");
         assert!(note.contains("DP-1"), "the sentence names the screen: {note}");
@@ -7120,7 +7310,10 @@ mod tests {
         // built from it: only a name the store listed is ever chosen.
         let evil =
             DesktopConf::from_legacy(&parse_kv("Layaut[DP-1]=../../etc/passwd\n")).screens();
-        assert_eq!(choose_layaut(Some("DP-1"), &evil, "console", &installed).name, "console");
+        assert_eq!(
+            choose_layaut(&ScreenId::of_connector("DP-1"), &evil, "console", &installed).name,
+            "console"
+        );
     }
 
     /// The point of keying screens by connector: which monitor comes
@@ -7143,7 +7336,9 @@ mod tests {
         let survey = |order: [&str; 2]| -> Vec<String> {
             order
                 .iter()
-                .map(|c| choose_layaut(Some(c), &assigned, "console", &installed).name)
+                .map(|c| {
+                    choose_layaut(&ScreenId::of_connector(c), &assigned, "console", &installed).name
+                })
                 .collect()
         };
         let monday = survey(["DP-1", "HDMI-A-1"]);
@@ -7155,6 +7350,603 @@ mod tests {
             "each screen keeps its own layaut; only the order of the list changed"
         );
         assert_ne!(monday, tuesday, "the two layauts differ, so the check means something");
+    }
+
+    /// A monitor now, not a socket. The same screen moved from one
+    /// socket to another keeps its layaut, which is the thing a key
+    /// naming the socket could never do — and the whole reason the key
+    /// changed.
+    #[test]
+    fn a_layaut_follows_the_monitor_and_not_the_cable() {
+        fixture_registry();
+        let installed =
+            ["default".into(), "console".into(), "cockpit".into(), "panel".to_string()];
+        let assigned = DesktopConf {
+            screens: [
+                ("edid:DEL-41B2-0123ABCD".to_string(), Choice::Named("cockpit".into())),
+                ("eDP-1".to_string(), Choice::Named("panel".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        }
+        .screens();
+
+        let dell = |socket: &str| ScreenId {
+            edid: Some("DEL-41B2-0123ABCD".into()),
+            connector: Some(socket.to_string()),
+        };
+        for socket in ["DP-1", "HDMI-A-1", "DP-4"] {
+            assert_eq!(
+                choose_layaut(&dell(socket), &assigned, "console", &installed).name,
+                "cockpit",
+                "the Dell keeps its desktop plugged into {socket}"
+            );
+        }
+        // A key naming a SOCKET goes on meaning the socket: whatever is
+        // plugged into the laptop's own panel takes that layaut.
+        assert_eq!(
+            choose_layaut(&ScreenId::of_connector("eDP-1"), &assigned, "console", &installed).name,
+            "panel"
+        );
+        // Another monitor on the socket the Dell used to be on takes
+        // nothing of the Dell's.
+        let other = ScreenId { edid: Some("GSM-5B0F".into()), connector: Some("DP-1".into()) };
+        assert_eq!(choose_layaut(&other, &assigned, "console", &installed).name, "console");
+    }
+
+    /// NOTHING IS LOST BY THE CHANGE OF KEY, before any migration has
+    /// run and whether or not one ever does: a file keyed by connector
+    /// goes on answering for a monitor that now has a name of its own,
+    /// and a monitor's own key is read first when the file holds both.
+    #[test]
+    fn a_file_written_against_a_socket_still_answers_for_the_monitor_on_it() {
+        fixture_registry();
+        let installed =
+            ["default".into(), "console".into(), "cockpit".into(), "hangar".to_string()];
+        let old = DesktopConf::from_legacy(&parse_kv("Layaut[DP-1]=cockpit\n")).screens();
+        let dell = ScreenId {
+            edid: Some("DEL-41B2-0123ABCD".into()),
+            connector: Some("DP-1".into()),
+        };
+        assert_eq!(
+            choose_layaut(&dell, &old, "console", &installed).name,
+            "cockpit",
+            "the socket key answers for the screen on that socket"
+        );
+
+        let both = DesktopConf {
+            screens: [
+                ("DP-1".to_string(), Choice::Named("hangar".into())),
+                ("edid:DEL-41B2-0123ABCD".to_string(), Choice::Named("cockpit".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        }
+        .screens();
+        assert_eq!(
+            choose_layaut(&dell, &both, "console", &installed).name,
+            "cockpit",
+            "a rule about THIS MONITOR beats a rule about the socket it is on"
+        );
+    }
+
+    /// THE MIGRATION, and what it is for: every per-screen assignment
+    /// written before screens were keyed by their monitors has to
+    /// survive, or a user's arrangement quietly becomes nobody's.
+    ///
+    /// Pure, so it says what the rule is rather than what this machine's
+    /// screens happen to be.
+    #[test]
+    fn the_old_screen_map_survives_being_keyed_by_the_monitor() {
+        let mut doc = DesktopConf {
+            screens: [
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+                ("eDP-1".to_string(), Choice::Named("panel".into())),
+                ("HDMI-A-1".to_string(), Choice::Off),
+            ]
+            .into_iter()
+            .collect(),
+            main_screen: Choice::Named("DP-1".into()),
+            layaut: Choice::Named("console".into()),
+            ..DesktopConf::default()
+        };
+        // What the machine can see: the Dell on DP-1 and a nameless
+        // panel on HDMI-A-1 both say who they are; the laptop's own
+        // screen says nothing, and there is nothing on eDP-1 today.
+        let live = [
+            ScreenId {
+                edid: Some("DEL-41B2-0123ABCD".into()),
+                connector: Some("DP-1".into()),
+            },
+            ScreenId { edid: Some("GSM-5B0F".into()), connector: Some("HDMI-A-1".into()) },
+            ScreenId::of_connector("DP-9"),
+        ];
+
+        assert!(doc.migrate_screens(&live), "there was something to move");
+        assert_eq!(
+            doc.screens.get("edid:DEL-41B2-0123ABCD"),
+            Some(&Choice::Named("cockpit".into())),
+            "the assignment moved to the monitor that was on that socket"
+        );
+        assert!(!doc.screens.contains_key("DP-1"), "and it moved rather than being copied");
+        assert_eq!(
+            doc.screens.get("edid:GSM-5B0F"),
+            Some(&Choice::Off),
+            "an explicit off is a setting too and moves whole"
+        );
+        assert_eq!(
+            doc.screens.get("eDP-1"),
+            Some(&Choice::Named("panel".into())),
+            "a socket with nothing plugged in is left exactly as it was"
+        );
+        assert_eq!(
+            doc.main_screen,
+            Choice::Named("edid:DEL-41B2-0123ABCD".into()),
+            "the main screen role travels the same road"
+        );
+        assert_eq!(doc.layaut.name(), Some("console"), "and nothing else in the file is touched");
+
+        // Run twice and nothing happens the second time: a machine with
+        // nothing to move must not be written to.
+        assert!(!doc.migrate_screens(&live), "the same file migrated twice is the same file");
+
+        // AND THE POINT OF ALL OF IT: the Dell keeps its desktop after
+        // somebody moves its cable, which is what the old key could not
+        // survive.
+        let installed = ["default".into(), "console".into(), "cockpit".to_string()];
+        let moved =
+            ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-3".into()) };
+        assert_eq!(choose_layaut(&moved, &doc.screens(), "console", &installed).name, "cockpit");
+    }
+
+    /// TWO OF THE SAME MONITOR, which is the case that costs somebody a
+    /// desktop if the migration is not asked whether a name names one
+    /// screen or two.
+    ///
+    /// The AORUS FO32U2P prints 0x01010101 in the serial field of every
+    /// unit sold, so a pair of them is one identity — and the identity
+    /// is looked up before the socket. Migrating the first one's socket
+    /// entry to that shared name would hand its layaut to BOTH screens,
+    /// and the second one's entry would still be in the file, still
+    /// correct, and never read again.
+    #[test]
+    fn two_of_the_same_monitor_keep_the_desktops_their_sockets_name() {
+        fixture_registry();
+        let mut doc = DesktopConf {
+            screens: [
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+                ("DP-2".to_string(), Choice::Named("hangar".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        };
+        let twin = |socket: &str| ScreenId {
+            edid: Some("GBT-3215-01010101".into()),
+            connector: Some(socket.to_string()),
+        };
+        let live = [twin("DP-1"), twin("DP-2")];
+
+        assert!(
+            !doc.migrate_screens(&live),
+            "a name both screens answer to is a name neither of them may be written under"
+        );
+        assert_eq!(doc.screens.get("DP-1"), Some(&Choice::Named("cockpit".into())));
+        assert_eq!(doc.screens.get("DP-2"), Some(&Choice::Named("hangar".into())));
+        assert!(
+            !doc.screens.keys().any(|k| k.starts_with(crate::screens::EDID_PREFIX)),
+            "and no shared name was written: {:?}",
+            doc.screens
+        );
+
+        // Which is the whole point: both keep the desktop they had.
+        let installed = ["default".into(), "console".into(), "cockpit".into(), "hangar".to_string()];
+        let assigned = doc.screens();
+        assert_eq!(choose_layaut(&live[0], &assigned, "console", &installed).name, "cockpit");
+        assert_eq!(choose_layaut(&live[1], &assigned, "console", &installed).name, "hangar");
+
+        // The role is the same question asked once: "the main screen"
+        // cannot be a name two screens answer to either.
+        let mut role = DesktopConf {
+            main_screen: Choice::Named("DP-2".into()),
+            ..DesktopConf::default()
+        };
+        assert!(!role.migrate_screens(&live));
+        assert_eq!(
+            role.main_screen,
+            Choice::Named("DP-2".into()),
+            "the socket is the only vocabulary that still tells the two apart"
+        );
+
+        // One of them alone is a perfectly ordinary monitor, and this
+        // is what says the refusal above is about the AMBIGUITY and not
+        // about the model.
+        let mut alone = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(alone.migrate_screens(&[twin("DP-1")]));
+        assert_eq!(
+            alone.screens.get("edid:GBT-3215-01010101"),
+            Some(&Choice::Named("cockpit".into()))
+        );
+    }
+
+    /// A RULE ABOUT A SOCKET, written on purpose, into a file that has
+    /// already been migrated. The program must not argue with it.
+    ///
+    /// The socket vocabulary is documented as being good for "whatever
+    /// is plugged in here", and a promise that only holds until the
+    /// next start is not one. So the migration is bounded by the one
+    /// thing that says WHEN a document was written: a document naming a
+    /// monitor anywhere is a document written since monitors could be
+    /// named, and its socket keys are somebody's decision rather than
+    /// the old vocabulary.
+    #[test]
+    fn a_socket_rule_in_a_file_that_names_a_monitor_is_left_alone() {
+        fixture_registry();
+        // Last month's migration gave the LG its own name. Today the
+        // user writes a rule about the socket the Dell hangs off.
+        let mut doc = DesktopConf {
+            screens: [
+                ("edid:GSM-5B0F".to_string(), Choice::Named("hangar".into())),
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        };
+        let live = [
+            ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) },
+            ScreenId { edid: Some("GSM-5B0F".into()), connector: Some("HDMI-A-1".into()) },
+        ];
+
+        assert!(!doc.migrate_screens(&live), "this file has nothing left to migrate");
+        assert_eq!(
+            doc.screens.get("DP-1"),
+            Some(&Choice::Named("cockpit".into())),
+            "the rule about the socket stands: rewriting it would be an argument, not a migration"
+        );
+        assert!(
+            !doc.screens.contains_key("edid:DEL-41B2-0123ABCD"),
+            "and no rule about the Dell was invented from it"
+        );
+
+        // The same bound reached through the ROLE: naming the main
+        // screen by its monitor is naming a monitor.
+        let mut role = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            main_screen: Choice::Named("edid:GSM-5B0F".into()),
+            ..DesktopConf::default()
+        };
+        assert!(!role.migrate_screens(&live));
+        assert_eq!(role.screens.get("DP-1"), Some(&Choice::Named("cockpit".into())));
+
+        // And a document that has never named one is still converted,
+        // which is what the bound is a bound ON.
+        let mut old = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(old.migrate_screens(&live));
+        assert_eq!(
+            old.screens.get("edid:DEL-41B2-0123ABCD"),
+            Some(&Choice::Named("cockpit".into()))
+        );
+        assert!(
+            !old.migrate_screens(&live),
+            "and having named one, it is never converted again"
+        );
+    }
+
+    /// What the migration refuses to do. Each of these is a way of
+    /// losing a setting, and none of them is worth the tidiness.
+    #[test]
+    fn the_migration_never_overwrites_and_never_drops() {
+        // An entry already naming the monitor is the answer, and the
+        // socket entry beside it stays where it is — a file that names
+        // a monitor is past migrating, whichever of the two lines the
+        // reader's eye falls on first.
+        let mut doc = DesktopConf {
+            screens: [
+                ("DP-1".to_string(), Choice::Named("hangar".into())),
+                ("edid:DEL-41B2-0123ABCD".to_string(), Choice::Named("cockpit".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        };
+        let live =
+            [ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) }];
+        assert!(!doc.migrate_screens(&live), "there is nothing to move");
+        assert_eq!(doc.screens.get("edid:DEL-41B2-0123ABCD"), Some(&Choice::Named("cockpit".into())));
+        assert_eq!(
+            doc.screens.get("DP-1"),
+            Some(&Choice::Named("hangar".into())),
+            "the socket entry is left where it is: it may be about the socket"
+        );
+
+        // A monitor that gives no name of its own has nothing to move
+        // to, and its socket entry stays the only thing naming it.
+        let mut silent = DesktopConf {
+            screens: [("eDP-1".to_string(), Choice::Named("panel".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(!silent.migrate_screens(&[ScreenId::of_connector("eDP-1")]));
+        assert_eq!(silent.screens.get("eDP-1"), Some(&Choice::Named("panel".into())));
+
+        // The user typed the connector in another case than the display
+        // server says it. It is the same socket and the same setting.
+        let mut typed = DesktopConf {
+            screens: [("edp-1".to_string(), Choice::Named("panel".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(typed.migrate_screens(&[ScreenId {
+            edid: Some("AUO-1234".into()),
+            connector: Some("eDP-1".into()),
+        }]));
+        assert_eq!(typed.screens.get("edid:AUO-1234"), Some(&Choice::Named("panel".into())));
+        assert!(typed.screens.is_empty() || !typed.screens.contains_key("edp-1"));
+    }
+
+    /// The migration through the door that writes, and the promise it
+    /// has to keep on the machines that have nothing to migrate: a
+    /// program that installs nothing must go on having installed
+    /// nothing after running it.
+    #[test]
+    fn a_machine_with_nothing_to_migrate_is_not_written_to() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("migrate-screens");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let path = root.join(FAMILY_DIR).join(CONF_RON);
+
+        // A machine nobody has configured, with two monitors on it.
+        let live = [
+            ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) },
+            ScreenId::of_connector("eDP-1"),
+        ];
+        assert!(!migrate_screen_identities(&live), "nothing was written under a socket");
+        flush_writes();
+        assert!(!path.exists(), "and so no configuration file was made: {}", path.display());
+
+        // Now the user assigns a layaut the old way, by socket.
+        set_layaut_for_screen("DP-1", "cockpit");
+        assert_eq!(conf().screens().get("DP-1").map(String::as_str), Some("cockpit"));
+        set_main_screen(Some("DP-1"));
+
+        assert!(migrate_screen_identities(&live), "that one has somewhere to go");
+        flush_writes();
+        let after = conf();
+        assert_eq!(
+            after.screens().get("edid:DEL-41B2-0123ABCD").map(String::as_str),
+            Some("cockpit"),
+            "the assignment is now the monitor's"
+        );
+        assert!(!after.screens().contains_key("DP-1"));
+        assert_eq!(after.main_screen.name(), Some("edid:DEL-41B2-0123ABCD"));
+        let text = std::fs::read_to_string(&path).expect("the file the migration wrote");
+        assert!(text.contains("edid:DEL-41B2-0123ABCD"), "and it landed on disk: {text}");
+
+        // A second start has nothing left to do.
+        assert!(!migrate_screen_identities(&live), "run twice, moved once");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// THE DOOR ITSELF: a change that turns out not to be one leaves no
+    /// trace at all.
+    ///
+    /// `update_conf_when` is on the way out of every write this program
+    /// makes — `update_conf` is one line of it — so what it does when
+    /// the change answers "nothing happened" is worth pinning on its
+    /// own rather than through whichever caller happens to ask today.
+    /// No file, no directory, and no memo either: filing the memo would
+    /// hand every later reader a document no disk has ever held.
+    #[test]
+    fn a_change_that_turns_out_not_to_be_one_leaves_no_trace() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("update-when");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        let path = dir.join(CONF_RON);
+
+        update_conf_when(|c| {
+            c.theme = Choice::Named("crimson".into());
+            false
+        });
+        flush_writes();
+        assert!(!path.exists(), "no file: {}", path.display());
+        assert!(!dir.exists(), "and not even the directory: {}", dir.display());
+        assert_eq!(
+            conf().theme.name(),
+            None,
+            "and nothing was remembered either, or the next reader would be \
+             answered from a document that was never written"
+        );
+
+        // The same door with something to write goes all the way to the
+        // disk, which is what says the check above is about the answer
+        // and not about the door being shut.
+        update_conf_when(|c| {
+            c.theme = Choice::Named("crimson".into());
+            true
+        });
+        flush_writes();
+        assert_eq!(conf().theme.name(), Some("crimson"));
+        let text = std::fs::read_to_string(&path).expect("the file the change wrote");
+        assert!(text.contains("crimson"), "{text}");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// THE PRECHECK, and why it is not merely a saving of syscalls.
+    ///
+    /// Opening the write door READS the user's file, and a file that
+    /// cannot be read is copied aside and reported to them in the words
+    /// "the setting you just changed has REPLACED it". A start is not a
+    /// setting. So a machine with one bracket missing from its
+    /// configuration must be able to start every day without collecting
+    /// a rescue copy per start and a notice about a change nobody made.
+    #[test]
+    fn a_start_with_nothing_to_migrate_does_not_rescue_a_broken_file() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("migrate-broken");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        // Somebody's whole configuration, one bracket short — and not a
+        // word in it about any screen.
+        let mine = "(\n    theme: Named(\"crimson\",\n    layaut: Named(\"console\"),\n)\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+
+        let live =
+            [ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) }];
+        assert!(!migrate_screen_identities(&live), "there is nothing to migrate");
+        flush_writes();
+
+        assert_eq!(
+            rescue_copies(&dir),
+            Vec::<String>::new(),
+            "a start makes no rescue copy: nothing was being replaced"
+        );
+        assert_eq!(
+            take_conf_rescued(),
+            None,
+            "and the user is told nothing, there being nothing to tell them"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap(),
+            mine,
+            "their own text is exactly where they left it"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The MAIN SCREEN role written down and taken back. What it means
+    /// is `screens::MainScreenDuty`'s business; this is about the
+    /// setting carrying it.
+    #[test]
+    fn the_main_screen_is_a_setting_and_not_only_the_display_servers_opinion() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("main-screen");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        set_layaut_option("console");
+
+        assert_eq!(main_screen_key(), None, "with nothing said, the display server answers");
+
+        set_main_screen(Some("edid:DEL-41B2-0123ABCD"));
+        assert_eq!(main_screen_key().as_deref(), Some("edid:DEL-41B2-0123ABCD"));
+        assert_eq!(
+            conf().layaut.name(),
+            Some("console"),
+            "the role is its own field and touches nothing else"
+        );
+
+        // A socket names a screen too — a monitor that gives no name of
+        // its own can still be the main one.
+        set_main_screen(Some("HDMI-A-1"));
+        assert_eq!(main_screen_key().as_deref(), Some("HDMI-A-1"));
+
+        // Taking it back is an explicit "whatever the display server
+        // says", which has to beat a system file naming a screen that
+        // is not on this desk — so it is written, not dropped.
+        set_main_screen(None);
+        assert_eq!(conf().main_screen, Choice::Off, "an off, not an absence");
+        assert_eq!(main_screen_key(), None);
+
+        // A key nothing could match a screen to never reaches the file.
+        for bad in ["", "Dell Inc. U2720Q", "edid:", "screen 2"] {
+            set_main_screen(Some(bad));
+            assert_eq!(conf().main_screen, Choice::Off, "'{bad}' must not become the main screen");
+        }
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// THE THIRD ANSWER, which is the one a setter offering a name and
+    /// an off cannot write: the question handed back to the cascade.
+    ///
+    /// An explicit "whatever the display server says" and "nothing was
+    /// said here" look the same on this machine and are opposite
+    /// answers on a machine whose administrator named a screen — the
+    /// first outranks that file, the second lets it through. So taking
+    /// the setting back has to REMOVE the field, and there has to be
+    /// something that does.
+    #[test]
+    fn the_main_screen_setting_can_be_taken_out_of_the_file_altogether() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("main-screen-clear");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        // The machine's own file names a screen this desk may not have.
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(main_screen: Named(\"edid:GSM-5B0F\"))\n",
+        )
+        .unwrap();
+
+        assert_eq!(main_screen_key().as_deref(), Some("edid:GSM-5B0F"), "the system file answers");
+
+        set_main_screen(Some("edid:DEL-41B2-0123ABCD"));
+        assert_eq!(main_screen_key().as_deref(), Some("edid:DEL-41B2-0123ABCD"));
+
+        set_main_screen(None);
+        assert_eq!(conf().main_screen, Choice::Off);
+        assert_eq!(main_screen_key(), None, "an off silences the system file too");
+
+        clear_main_screen();
+        flush_writes();
+        assert_eq!(
+            main_screen_key().as_deref(),
+            Some("edid:GSM-5B0F"),
+            "the rest of the cascade is heard again, which an off could not have allowed"
+        );
+        let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
+        assert!(
+            !text.contains("main_screen"),
+            "and the field is GONE from the user's file rather than emptied: {text}"
+        );
+
+        // The role is its own setting: clearing the assignments leaves
+        // it alone, and clearing it leaves them alone.
+        set_layaut_for_screen("edid:DEL-41B2-0123ABCD", "cockpit");
+        set_main_screen(Some("edid:DEL-41B2-0123ABCD"));
+        clear_screen_layauts();
+        flush_writes();
+        assert!(conf().screens().is_empty(), "the assignments are gone");
+        assert_eq!(
+            main_screen_key().as_deref(),
+            Some("edid:DEL-41B2-0123ABCD"),
+            "and the role is not an assignment"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A configuration cascade with nothing in it, so `GridPadding=` is
