@@ -1081,8 +1081,266 @@ fn safe_component(name: &str) -> Option<String> {
 
 /// The effective configuration: the user's file laid over the system
 /// ones, field by field.
+///
+/// MEMOISED, and that is not a micro-optimisation — it is the whole
+/// difference between a program that reads its settings and one that
+/// reads them forty-six times a second. Measured on 2026-08-18 under
+/// `strace`: 294 opens of `nacelle-desktop.ron` in 89 seconds, 136 of
+/// them a frame apart, because one drawn row asked a question that
+/// walks the cascade (`sound_set_note`, below). Every one of those
+/// asks parsed 1121 bytes of RON twice and knocked on eight paths that
+/// have never existed on this machine.
+///
+/// What is kept is the ANSWER and the metadata of every file it was
+/// built from. A call re-stamps those files — one `statx` each, no
+/// open, no parse — and hands back the same document while nothing has
+/// moved. The stamp is device, inode, length and modification time,
+/// which is what every reader of a file on disk has to go on; two
+/// different documents written into the same inode inside one tick of
+/// the filesystem's clock would be missed, and that is a hand editing
+/// the file twice in the same millisecond. This program's own writes
+/// do not depend on it either way — [`update_conf`] puts what it wrote
+/// straight into the memo, so a setting is answered by its new value
+/// the instant it is changed and not when the bytes reach the disk.
 fn conf() -> DesktopConf {
-    cascade_conf(&conf_dirs())
+    let dirs = config_dirs();
+    let seen = conf_stamps(&dirs);
+    if let Some(doc) = conf_memo_hit(&dirs, &seen) {
+        return doc;
+    }
+    // Read afresh. `conf_dirs` may drop a rung — it parses the user's
+    // own file to decide — and both halves are covered by the stamps
+    // above, which is why they are taken of the FULL search path.
+    let doc = cascade_conf(&conf_dirs());
+    conf_memo_put(&dirs, seen, &doc);
+    doc
+}
+
+/// What a file was, as cheaply as a filesystem will say it.
+///
+/// Not a hash: the point of the memo is to stop reading the bytes, so
+/// the test of "still the same file" may not read them either.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+}
+
+impl Stamp {
+    /// `None` when nothing stands there — which is an ANSWER and not a
+    /// failure, and has to compare equal to itself: eight of the nine
+    /// paths a cascade walks on this machine are empty, and a memo that
+    /// could not remember an absence would re-read on every call.
+    fn of(path: &Path) -> Option<Stamp> {
+        use std::os::unix::fs::MetadataExt;
+        // Following links, exactly as the read does: a configuration
+        // linked in from a dotfiles repository is the file at the end
+        // of the chain, and that is the file whose changes matter.
+        let m = std::fs::metadata(path).ok()?;
+        Some(Stamp { dev: m.dev(), ino: m.ino(), len: m.len(), mtime: (m.mtime(), m.mtime_nsec()) })
+    }
+}
+
+/// Every file the configuration document can be built from, in the
+/// order the cascade would meet them: the carry mark first, then each
+/// directory's `.ron` and the `Key=Value` file behind it.
+///
+/// The list is what the memo watches, so it has to be a SUPERSET of
+/// what a read would touch — never a subset. Both formats are named at
+/// every rung even where only one can win, because which one wins is
+/// itself a thing that changes when a file appears.
+///
+/// WHAT THIS COSTS, under `strace` on the owner's layout (six
+/// directories, so thirteen names): 136 asks of the cascade went from
+/// 816 opens of the document, 1088 absent paths knocked on and 272
+/// parses of RON, down to six opens, eight absent paths and two parses
+/// — and up from 681 stats to 1774. Thirteen stats an ask is the price
+/// of not reading, and it is worth paying because a stat neither
+/// allocates nor parses; the syscall count of the whole exchange fell
+/// by a third. Stamping the DIRECTORIES instead would take it to seven
+/// and would stop noticing a directory that came into existence
+/// mid-session, which is what installing a package looks like.
+///
+/// Those are MEASURED numbers and they have to be repeatable to be
+/// worth quoting: `the_cascade_asked_a_hundred_and_thirty_six_times`
+/// is the probe they were taken from, with the commands in its own
+/// comment. The 1088 is the audit's figure for the cascade's ENOENT
+/// arrived at independently (8 × 136), which is the check on the probe
+/// standing for the real program.
+fn conf_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(1 + dirs.len() * 2);
+    out.push(config_dir().join(CONF_RON_CARRIED));
+    for d in dirs {
+        out.push(d.join(CONF_RON));
+        out.push(d.join(CONF_FILE));
+    }
+    out
+}
+
+fn conf_stamps(dirs: &[PathBuf]) -> Vec<Option<Stamp>> {
+    conf_files(dirs).iter().map(|p| Stamp::of(p)).collect()
+}
+
+/// What a WRITE is built from, which is not what a read hands out.
+///
+/// A save rewrites the user's own rungs and only those: a value that
+/// came from `/etc/xdg` has to stay a system value, or the first
+/// setting anybody changed would freeze that day's defaults into their
+/// home directory. So the two documents are kept apart — [`ConfMemo`]
+/// holds both, and each answers the question it is the answer to.
+#[derive(Clone)]
+struct ConfSeed {
+    /// The user's own rungs merged, with nothing of the system's in it.
+    mine: DesktopConf,
+    /// Whether every one of the user's folders was readable when this
+    /// was built — see [`mark_old_folder_carried`]. Remembered rather
+    /// than assumed, because a save seeded from here does not re-read
+    /// the folder that would have said no.
+    carried: bool,
+}
+
+/// The last answer [`conf`] gave, and what it was built from.
+struct ConfMemo {
+    /// The search path it was built for. A test that moves
+    /// `XDG_CONFIG_HOME` between two calls is asking a different
+    /// question, and must not be answered with the old one.
+    dirs: Vec<PathBuf>,
+    /// The stamps of [`conf_files`], or `None` while a write of this
+    /// program's own is still on its way to the disk: until it lands,
+    /// the files cannot answer for something we already know.
+    seen: Option<Vec<Option<Stamp>>>,
+    doc: DesktopConf,
+    /// Present only when this entry was filed by a SAVE. A read cannot
+    /// fill it — it merges the whole cascade and never holds the user's
+    /// rungs on their own — so a read leaves it empty and the next save
+    /// goes to the disk for its seed, which is what it always did.
+    seed: Option<ConfSeed>,
+    /// Bumped on every store, so the writer thread can tell whether the
+    /// document it has just made durable is still the one being held.
+    serial: u64,
+}
+
+static CONF_MEMO: std::sync::Mutex<Option<ConfMemo>> = std::sync::Mutex::new(None);
+
+/// Whether the memo still stands for this question: the same search
+/// path, and either files that have not moved or a write of ours still
+/// in the air.
+fn conf_memo_stands(m: &ConfMemo, dirs: &[PathBuf], seen: &[Option<Stamp>]) -> bool {
+    m.dirs == dirs && m.seen.as_ref().map_or(true, |had| had.as_slice() == seen)
+}
+
+/// The memoised answer, if it is still an answer to this question.
+fn conf_memo_hit(dirs: &[PathBuf], seen: &[Option<Stamp>]) -> Option<DesktopConf> {
+    let memo = CONF_MEMO.lock().ok()?;
+    let m = memo.as_ref()?;
+    conf_memo_stands(m, dirs, seen).then(|| m.doc.clone())
+}
+
+/// What the last SAVE decided, if it still stands — the document the
+/// next save is built on top of.
+fn conf_memo_seed(dirs: &[PathBuf], seen: &[Option<Stamp>]) -> Option<ConfSeed> {
+    let memo = CONF_MEMO.lock().ok()?;
+    let m = memo.as_ref()?;
+    conf_memo_stands(m, dirs, seen).then(|| m.seed.clone()).flatten()
+}
+
+fn conf_memo_put(dirs: &[PathBuf], seen: Vec<Option<Stamp>>, doc: &DesktopConf) {
+    let Ok(mut memo) = CONF_MEMO.lock() else { return };
+    let serial = memo.as_ref().map_or(0, |m| m.serial).wrapping_add(1);
+    // No seed: this entry was built by READING, and the files it was
+    // built from have moved since the last save — whatever that save
+    // decided is not what stands on the disk any more.
+    *memo = Some(ConfMemo {
+        dirs: dirs.to_vec(),
+        seen: Some(seen),
+        doc: doc.clone(),
+        seed: None,
+        serial,
+    });
+}
+
+/// Puts a document this program has just DECIDED on into the memo,
+/// ahead of the bytes reaching the disk, and answers the serial it was
+/// filed under.
+///
+/// This is what lets the write be durable without the interface waiting
+/// for it. The running program's questions are answered from here from
+/// the moment the setting changes; the file catches up behind it, and
+/// [`conf_memo_settle`] closes the loop when it has.
+fn conf_memo_pending(dirs: &[PathBuf], doc: &DesktopConf, seed: ConfSeed) -> u64 {
+    let Ok(mut memo) = CONF_MEMO.lock() else { return 0 };
+    let serial = memo.as_ref().map_or(0, |m| m.serial).wrapping_add(1);
+    *memo = Some(ConfMemo {
+        dirs: dirs.to_vec(),
+        seen: None,
+        doc: doc.clone(),
+        seed: Some(seed),
+        serial,
+    });
+    serial
+}
+
+/// The write filed under `serial` has landed: stamp the files it wrote
+/// so the memo can be checked against them again.
+///
+/// A serial that has moved on means somebody changed a setting while
+/// this write was in flight, and their document is the one being held —
+/// so this leaves the memo alone and it stays pending until THEIR write
+/// settles. Nothing is lost either way: a memo with no stamps costs one
+/// honest re-read.
+fn conf_memo_settle(serial: u64) {
+    let Ok(mut memo) = CONF_MEMO.lock() else { return };
+    let Some(m) = memo.as_mut() else { return };
+    if m.serial != serial {
+        return;
+    }
+    let dirs = m.dirs.clone();
+    m.seen = Some(conf_files(&dirs).iter().map(|p| Stamp::of(p)).collect());
+}
+
+/// The write filed under `serial` never landed: forget what it decided.
+///
+/// A setting that could not be saved may not go on being answered as
+/// though it had been. Dropping the memo puts the disk back in charge,
+/// so the value springs back to what the file still says — which is
+/// what the user sees beside the sentence [`report_write`] puts up, and
+/// what happened before any of this was on a thread of its own.
+fn conf_memo_forget(serial: u64) {
+    let Ok(mut memo) = CONF_MEMO.lock() else { return };
+    if memo.as_ref().is_some_and(|m| m.serial == serial) {
+        *memo = None;
+    }
+}
+
+/// How many times a configuration file has been READ off the disk since
+/// the program started — one per file that was found and turned into
+/// text, which is what `strace` counts as an `openat` of it.
+///
+/// The instrument this whole memo was built to move: a claim that the
+/// cascade is no longer walked per frame is a number or it is nothing.
+/// A TEST BUILD ONLY, because nothing the shipped program does reads it
+/// — an `allow(dead_code)` saying so on a `pub fn` was the same fact
+/// admitted without acting on it. [`note_conf_file_read`] is what feeds
+/// it, and in a shipped build that is an empty function.
+#[cfg(test)]
+static CONF_FILE_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One configuration file turned into text.
+#[cfg(test)]
+fn note_conf_file_read() {
+    CONF_FILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn note_conf_file_read() {}
+
+/// Read by the tests that count reads, and by nothing the program does
+/// — an instrument, kept beside the thing it measures.
+#[cfg(test)]
+fn conf_file_reads() -> u64 {
+    CONF_FILE_READS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The user's OWN configuration directories, most specific first: the
@@ -1852,10 +2110,24 @@ fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
     // directory forever — the exact trap the XDG arrangement exists to
     // avoid.
     let live = conf_dirs();
-    let mut doc = DesktopConf::default();
+    let dirs = config_dirs();
+    let seen = conf_stamps(&dirs);
+    // What the LAST save decided, if nothing on disk has moved since.
+    //
+    // Not a saving of syscalls but a matter of not losing settings.
+    // The save before this one may still be on its way to the disk —
+    // that is the whole point of the writer thread — and a loop that
+    // read the file now would seed from the document that write is
+    // about to replace. Two presses of a slider a millisecond apart
+    // would then put the first one's value back, and the file would end
+    // up holding whichever write happened to lose the race.
+    let held = conf_memo_seed(&dirs, &seen);
+    let (mut doc, mut carried) = match &held {
+        Some(seed) => (seed.mine.clone(), seed.carried),
+        None => (DesktopConf::default(), true),
+    };
     let mut keeps_nothing = false;
-    let mut carried = true;
-    for d in user_conf_dirs().iter().rev() {
+    for d in user_conf_dirs().iter().rev().filter(|_| held.is_none()) {
         if !live.contains(d) {
             continue;
         }
@@ -1890,14 +2162,40 @@ fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
         return;
     }
     f(&mut doc);
-    let wrote = write_conf(&path, &doc);
-    // After the write and only if it landed: a mark saying the old
-    // folder is in the new file, put down by the write that actually
-    // put it there. A write that failed carried nothing.
-    if wrote.is_ok() && carried {
-        mark_old_folder_carried();
-    }
-    report_write(&path, wrote);
+    // THE BYTES BEFORE THE MEMO, and the order is the whole safety of
+    // what follows. Filing the memo commits this program to answering
+    // from it until a write settles or drops it; a save that dies
+    // between those two acts leaves a document no disk has ever held
+    // being handed to every reader for the rest of the session, with
+    // the file itself no longer consulted — so the user's own editing
+    // of it stops existing as well. Making the text HERE is what leaves
+    // no order in which that can happen: the one failure that belongs
+    // to the caller's thread is taken before there is anything to
+    // strand, and past this line every path through [`write_conf_soon`]
+    // ends at [`do_write_job`], which either settles the memo or drops
+    // it.
+    let text = match conf_text(&doc) {
+        Ok(t) => t,
+        // A document that will not serialise is a bug in this program
+        // rather than a slow disk, and the sentence belongs to the
+        // press that provoked it.
+        Err(e) => return report_write(&path, Err(e)),
+    };
+    // The setting is IN FORCE from here, and the disk catches up behind
+    // it. What the memo is given is not the document about to be
+    // written — that one is the user's own rung alone — but that rung
+    // laid over the system end, which is the answer [`conf`] gives and
+    // therefore the only thing a reader may be handed.
+    //
+    // Filed before the write rather than after it because the write is
+    // the slow half: 0.516 s of `fsync` across seven saves, measured
+    // 2026-08-18, with a single save blocking the event loop for 0.35 s.
+    // Nothing about the running program has to wait for a disk to
+    // confirm what the user has already been told on screen.
+    let effective = cascade_conf_over(&live, Some((dir.as_path(), &doc)));
+    let seed = ConfSeed { mine: doc.clone(), carried };
+    let serial = conf_memo_pending(&dirs, &effective, seed);
+    write_conf_soon(&path, text, carried, serial);
 }
 
 /// The last write failure said out loud, so a slider held down is one
@@ -2140,7 +2438,15 @@ const CONF_HEADER: &str = "\
 ///   [`follow_link`];
 /// * the temporary was one fixed name shared by every process — see
 ///   [`claim_tmp`].
-fn write_conf(path: &Path, doc: &DesktopConf) -> std::io::Result<()> {
+///
+/// It runs on the WRITER THREAD and not on the one that changed the
+/// setting, which is the whole of the 2026-08-18 measurement: the two
+/// flushes below cost 0.516 s over seven saves, all of it on the event
+/// loop, and the worst single save held the interface for 0.35 s (277 ms
+/// on the file, 75 ms on the directory, back to back). Nothing about
+/// the ORDER changed — see [`write_conf_soon`] for what moved and what
+/// happens to a write the process does not live to finish.
+fn write_conf(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     // Through the link before anything else, so that every path below —
     // the backup, the temporary, the rename and the directory flush —
@@ -2167,7 +2473,6 @@ fn write_conf(path: &Path, doc: &DesktopConf) -> std::io::Result<()> {
             eprintln!("nacelle-desktop: cannot keep a copy of {}: {e}", path.display());
         }
     }
-    let text = conf_text(doc)?;
     let (tmp, mut f) = claim_tmp(path)?;
     // A temporary left behind under a name this function may hand out
     // again is a file the next write appends its luck to, so every way
@@ -2178,18 +2483,321 @@ fn write_conf(path: &Path, doc: &DesktopConf) -> std::io::Result<()> {
         return Err(e);
     }
     let _ = f.sync_all();
+    // The instrument, and only in a test build — see [`WriteStep`].
+    #[cfg(test)]
+    note_write_step(WriteStep::SyncFile);
     drop(f);
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    #[cfg(test)]
+    note_write_step(WriteStep::Rename);
     // The directory entry, not the file: what is being made durable
     // here is the rename.
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
-    remember_written(path, &text);
+    #[cfg(test)]
+    note_write_step(WriteStep::SyncDir);
+    remember_written(path, text);
     Ok(())
+}
+
+/// The document as the file carries it: the header this program writes
+/// over every save, then the fields.
+///
+
+/// One save, waiting its turn on the durable writer.
+struct WriteJob {
+    path: PathBuf,
+    text: String,
+    /// Whether this write is the one that carries the user's old-named
+    /// folder across — see [`mark_old_folder_carried`]. The mark may
+    /// only be put down by a write that landed, so the decision travels
+    /// with the job and is acted on where the result is known.
+    carry: bool,
+    /// Which memo entry these bytes belong to, so that a write landing
+    /// after a LATER setting was changed does not stamp the memo with
+    /// files that no longer say what it holds — see [`conf_memo_settle`].
+    serial: u64,
+}
+
+/// The queue, and whether the writer is in the middle of a job.
+///
+/// `busy` is not derivable from the queue: a job taken out of it is not
+/// finished, and [`flush_writes`] promises that when it returns the
+/// disk carries everything that was asked for.
+#[derive(Default)]
+struct WriteDesk {
+    queue: std::collections::VecDeque<WriteJob>,
+    busy: bool,
+    /// Set once the thread exists, so it is spawned by the first save
+    /// and not by a program that never changes a setting.
+    running: bool,
+}
+
+static WRITE_DESK: std::sync::Mutex<Option<WriteDesk>> = std::sync::Mutex::new(None);
+static WRITE_BELL: std::sync::Condvar = std::sync::Condvar::new();
+
+/// The desk, whether or not somebody panicked while holding it.
+///
+/// Poisoning is PERMANENT and process-wide: one panic under this lock
+/// and every `lock()` for the rest of the session answers `Err`. Taking
+/// that answer at face value cost the user everything they changed
+/// afterwards — the save was declined without a word, and the memo
+/// already filed for it went on handing that document to every reader
+/// while the file itself was never consulted again. Settings stopped
+/// being saved and hand-edits stopped being read, and nothing on screen
+/// said why.
+///
+/// Refusing is only right where a panic can leave a half-made thing
+/// behind, and nothing here can be half made: the only work done under
+/// this lock is a push, a pop, a drain and two flags, with nothing that
+/// unwinds standing between any of them. So the contents are as good
+/// after somebody else's panic as before it, and this takes them.
+fn lock_desk() -> std::sync::MutexGuard<'static, Option<WriteDesk>> {
+    WRITE_DESK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Sleeps at the desk until somebody rings, for the same reason
+/// [`lock_desk`] takes a poisoned lock: a wait that gave up on a panic
+/// elsewhere would strand the queue it was waiting on.
+fn wait_at_desk(
+    desk: std::sync::MutexGuard<'static, Option<WriteDesk>>,
+) -> std::sync::MutexGuard<'static, Option<WriteDesk>> {
+    WRITE_BELL.wait(desk).unwrap_or_else(|e| e.into_inner())
+}
+
+/// Hands a save to the durable writer and returns at once.
+///
+/// THE ORDER ON DISK IS UNCHANGED — exclusive temporary, write, flush
+/// the file, rename, flush the directory — and so is everything that
+/// order was for: a machine losing power mid-save has either the old
+/// file or the new one. What changed is who waits for it. The 2026-08-18
+/// `strace` found all fourteen `fsync` calls of a session on the event
+/// loop, 0.516 s of them, one save alone holding the interface for
+/// 0.35 s.
+///
+/// One thread and one queue, so two saves land in the order they were
+/// made. A queue behind a lock rather than a channel because the desk
+/// also has to answer "is there anything left", which is what
+/// [`flush_writes`] is.
+///
+/// **A program that stops before its writes do.** The event loop calls
+/// [`flush_writes`] on the way out, so an ordinary exit finishes every
+/// save that was asked for. A process that is KILLED — `SIGTERM` from a
+/// session manager at logout is the ordinary way — loses whatever is
+/// still queued.
+///
+/// The WINDOW in which that can happen is the same window as before
+/// this thread existed, and it is worth being exact about why: a save
+/// is lost to a kill from the moment it is asked for until its rename
+/// lands, and the rename waits on the same `fsync` either way. What
+/// used to fill that window was a frozen interface; what fills it now
+/// is an interface that has already shown the new value. So the change
+/// is not a longer exposure but a briefly OPTIMISTIC one — the user is
+/// told at 0 ms what used to be true at 350 ms — and a second save
+/// arriving inside it queues behind the first rather than replacing it,
+/// so a burst of distinct settings is exposed for as long as the burst
+/// takes to drain. (Measured 2026-08-18: no control feeds the queue
+/// faster than that; a dragged slider saves on release and not per
+/// frame.) A handler that flushed on `SIGTERM` would close it, and
+/// winit delivers no such event — the honest place for that is the
+/// signal work, not here.
+///
+/// What cannot happen either way is half of one: the bytes reach a
+/// temporary of this write's own and the rename is atomic, so the file
+/// at the user's path is one whole document or the other, never a
+/// mixture, and a temporary that was never renamed is litter rather
+/// than a configuration.
+///
+/// TEXT and not a document, because the one failure a save can have on
+/// the caller's own thread — a document that will not serialise — is
+/// taken by [`update_conf`] BEFORE it files the memo. Past this point
+/// every path ends at [`do_write_job`], which is what resolves the memo
+/// either way; a `return` from here that skipped it would pin the memo
+/// on a write that never happened.
+fn write_conf_soon(path: &Path, text: String, carry: bool, serial: u64) {
+    let job = WriteJob { path: path.to_path_buf(), text, carry, serial };
+    let mut desk = lock_desk();
+    let d = desk.get_or_insert_with(WriteDesk::default);
+    d.queue.push_back(job);
+    if !d.running {
+        d.running = true;
+        // Named, because a thread with no name is what the same audit
+        // could not identify twice over.
+        let spawned = std::thread::Builder::new()
+            .name("nacelle-conf-write".into())
+            .spawn(write_desk_loop);
+        if spawned.is_err() {
+            // No thread to be had: the saves still have to happen, and
+            // a blocked interface is better than a lost setting.
+            d.running = false;
+            let jobs: Vec<WriteJob> = d.queue.drain(..).collect();
+            drop(desk);
+            for job in jobs {
+                do_write_job(job);
+            }
+            return;
+        }
+    }
+    drop(desk);
+    WRITE_BELL.notify_all();
+}
+
+/// Says the writer is gone, however it went.
+///
+/// The failure this exists for is a HANG AT QUIT: the event loop waits
+/// for the desk to empty on the way out, and a writer that unwound out
+/// of its loop would leave `busy` set and nobody to clear it. So the
+/// state is put back by a destructor, which runs on the way out of a
+/// panic as well — the next save spawns a fresh writer and the queue is
+/// drained by that one instead.
+struct WriterGone;
+
+impl Drop for WriterGone {
+    fn drop(&mut self) {
+        {
+            let mut desk = lock_desk();
+            if let Some(d) = desk.as_mut() {
+                d.busy = false;
+                d.running = false;
+            }
+        }
+        WRITE_BELL.notify_all();
+    }
+}
+
+/// The durable writer: one job at a time, in the order they were made.
+fn write_desk_loop() {
+    let _gone = WriterGone;
+    loop {
+        let job = {
+            let mut desk = lock_desk();
+            loop {
+                let Some(d) = desk.as_mut() else { return };
+                if let Some(job) = d.queue.pop_front() {
+                    d.busy = true;
+                    break job;
+                }
+                // Nothing to do: say so — `flush_writes` may be waiting
+                // on exactly this — and sleep until somebody rings.
+                d.busy = false;
+                WRITE_BELL.notify_all();
+                desk = wait_at_desk(desk);
+            }
+        };
+        do_write_job(job);
+        {
+            let mut desk = lock_desk();
+            if let Some(d) = desk.as_mut() {
+                d.busy = false;
+            }
+        }
+        WRITE_BELL.notify_all();
+    }
+}
+
+/// One job, start to finish, wherever it is being run.
+fn do_write_job(job: WriteJob) {
+    let wrote = write_conf(&job.path, &job.text);
+    // After the write and only if it landed: a mark saying the old
+    // folder is in the new file, put down by the write that actually
+    // put it there. A write that failed carried nothing.
+    if wrote.is_ok() && job.carry {
+        mark_old_folder_carried();
+    }
+    if wrote.is_ok() {
+        // The files now say what the memo already held, so the memo may
+        // go back to checking itself against them.
+        conf_memo_settle(job.serial);
+    } else {
+        conf_memo_forget(job.serial);
+    }
+    report_write(&job.path, wrote);
+}
+
+/// Waits until every save asked for so far is on the disk.
+///
+/// Called on the way out of the event loop, which is what turns "the
+/// interface does not wait" into "and nothing is lost by that". A test
+/// calls it for the same reason: an assertion about a file is an
+/// assertion about a write that has finished.
+pub fn flush_writes() {
+    let mut desk = lock_desk();
+    loop {
+        let Some(d) = desk.as_ref() else { return };
+        if d.queue.is_empty() && !d.busy {
+            return;
+        }
+        // Waiting on a writer that is not there is a program that will
+        // not quit, and quitting matters more than the last save: this
+        // gives up out loud rather than hanging the desktop on its way
+        // down. Only reachable through [`WriterGone`], which is to say
+        // through a panic in the writer.
+        if !d.running {
+            // The lock goes back BEFORE the sentence, and that is not
+            // tidiness. `eprintln!` panics when the write fails, and a
+            // closed stderr is the ordinary state of a desktop session;
+            // a panic here with the desk held used to poison it, after
+            // which every save for the rest of the session was declined
+            // in silence. The sentence is worth saying. It is not worth
+            // the lock.
+            let left = d.queue.len();
+            drop(desk);
+            eprintln!(
+                "nacelle-desktop: {left} settings writes could not be finished \u{2014} \
+                 the writer is gone"
+            );
+            return;
+        }
+        desk = wait_at_desk(desk);
+    }
+}
+
+/// THE INSTRUMENT ON A SAVE — a test build and no other.
+///
+/// What this module changed on 2026-08-18 is not visible in any value
+/// the program computes: the order of the three durable steps and the
+/// thread they ran on ARE the fix, and a test that could only read the
+/// finished file would pass just as well on the arrangement that held
+/// the interface for a third of a second. So the steps are written
+/// down as they happen.
+///
+/// Behind `cfg(test)` rather than behind an `allow(dead_code)`, which
+/// is the same statement made honestly: nothing the shipped program
+/// does reads any of this, and a mutex, a thread id and a `Vec` push
+/// three times per save are not a cost a user should carry for a test.
+/// The three lines in [`write_conf`] that feed it carry the same
+/// attribute; they compile to nothing at all.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WriteStep {
+    SyncFile,
+    Rename,
+    SyncDir,
+}
+
+/// What the last save did and where. Three enum values and a thread
+/// id, rewritten seven times in a session.
+#[cfg(test)]
+static LAST_WRITE: std::sync::Mutex<Vec<(WriteStep, std::thread::ThreadId)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_write_step(step: WriteStep) {
+    let Ok(mut log) = LAST_WRITE.lock() else { return };
+    if step == WriteStep::SyncFile {
+        log.clear();
+    }
+    log.push((step, std::thread::current().id()));
+}
+
+/// The steps the last save took, with the thread that took them.
+#[cfg(test)]
+fn last_write_steps() -> Vec<(WriteStep, std::thread::ThreadId)> {
+    LAST_WRITE.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 /// The file a name finally stands for, links and all.
@@ -2383,6 +2991,13 @@ fn is_generated_under(text: &str, headers: &[&str]) -> bool {
 }
 
 /// The bytes of a written configuration: the header, then [`conf_body`].
+///
+/// Called on the CALLER's thread, before the write is handed on, because
+/// it is the one part of a save that can fail there — a document that
+/// will not serialise is a bug in this program, not a slow disk — and
+/// because the writer is handed TEXT: a `DesktopConf` crossing a thread
+/// boundary would be cloned for no reason, and the bytes are what is
+/// being made durable.
 ///
 /// One function because two callers must agree forever — [`write_conf`]
 /// produces this and [`is_generated`] recognises it — and a difference
@@ -2696,9 +3311,29 @@ fn warn_once_about_legacy(
 /// test hands it two temporary ones and no process-wide state is
 /// touched.
 fn cascade_conf(dirs: &[PathBuf]) -> DesktopConf {
+    cascade_conf_over(dirs, None)
+}
+
+/// [`cascade_conf`], with one rung's document HELD rather than read.
+///
+/// The write path is the only caller with something to hold: it has
+/// just decided what the user's own file is going to say, and the disk
+/// does not carry those bytes yet — the durable write is on its way to
+/// another thread. Every other rung is read exactly as it always was,
+/// and everything a full read reports is still reported, which is the
+/// reason this is the same function and not a second copy of it: a
+/// broken file at the system end has to be named whether or not the
+/// user has just changed a setting.
+fn cascade_conf_over(dirs: &[PathBuf], held: Option<(&Path, &DesktopConf)>) -> DesktopConf {
     let mut out = DesktopConf::default();
     let mut bad: Option<String> = None;
     for dir in dirs.iter().rev() {
+        if let Some((at, doc)) = held {
+            if dir == at {
+                out = doc.clone().over(out);
+                continue;
+            }
+        }
         match read_conf_dir(dir) {
             Ok(Some(doc)) => out = doc.over(out),
             Ok(None) => {}
@@ -2749,6 +3384,7 @@ fn read_conf_dir(dir: &Path) -> Result<Option<DesktopConf>, String> {
     let ron = dir.join(CONF_RON);
     match std::fs::read_to_string(&ron) {
         Ok(text) => {
+            note_conf_file_read();
             return match ron_options().from_str::<DesktopConf>(&text) {
                 Ok(doc) => {
                     warn_once_about_dead_conf(dir);
@@ -2784,6 +3420,7 @@ fn read_conf_dir(dir: &Path) -> Result<Option<DesktopConf>, String> {
     }
     let legacy = dir.join(CONF_FILE);
     let Ok(text) = std::fs::read_to_string(&legacy) else { return Ok(None) };
+    note_conf_file_read();
     warn_once_about_conf_format(&legacy);
     Ok(Some(DesktopConf::from_legacy(&parse_kv(&text))))
 }
@@ -2965,6 +3602,33 @@ fn find_file(dir: &Path, ext: &str) -> Option<PathBuf> {
 
 
 
+/// Serialises every test that writes an XDG variable — IN THIS CRATE,
+/// not in this module.
+///
+/// `std::env::set_var` is PROCESS-wide while `cargo test` runs its
+/// tests on many threads: one test pointing XDG_CONFIG_HOME at its own
+/// directory silently redirected another test's `resolve()` half way
+/// through, and the theme-switch test read somebody else's
+/// configuration and saw the wrong accent. Nothing about that was
+/// visible in the failure — the colour was simply not the one the theme
+/// names. Per-PID directories are not enough; the variable itself is
+/// the shared thing.
+///
+/// It lives out here rather than inside `mod tests` because the
+/// variable it guards is not this module's either. A settings-window
+/// test that opens a page reaches [`active_sounds_dir`] and so reads
+/// the same environment, and a second lock would guard nothing: one
+/// process, one variable, one lock.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // A poisoned lock only means some other test panicked while holding
+    // it; the variable it set is being overwritten anyway.
+    L.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     // A widget KIND: only the tests still name one directly — the
@@ -2979,6 +3643,80 @@ mod tests {
     }
 
     use super::*;
+
+    // EVERY SETTER THIS MODULE DRIVES WAITS FOR THE DISK.
+    //
+    // A save is made durable on a thread of its own — see
+    // [`super::write_conf_soon`] — so the interface never waits for an
+    // `fsync`. That is a promise about the INTERFACE and about nothing
+    // else: a test that changes a setting and then reads the file is
+    // reading a write that may still be in the air, and the ones that
+    // pass anyway pass by winning a race, which is worse than failing.
+    //
+    // So the writers are shadowed here rather than a `flush_writes` line
+    // being sprinkled through fifty assertions. Each wrapper calls the
+    // real one and then waits; the behaviour under test is the shipped
+    // behaviour, with the one thing a test cannot see — "the bytes have
+    // landed" — made visible. A test that wants the OTHER half, that the
+    // running program answers before the disk does, calls `super::` by
+    // name and says so: `a_save_is_made_durable_off_the_thread_that_-
+    // asked_for_it`, `a_second_save_is_built_on_the_first_and_not_on_-
+    // the_disk` and `a_panic_at_the_desk_does_not_cost_the_next_save`.
+    // Named in prose rather than in a doc link because this is a `//`
+    // block on an item that has none, and a link nothing resolves is a
+    // promise of a test that need not exist.
+    //
+    // Shadowing works because a glob import loses to an item declared in
+    // the module, which is what makes this one block instead of an edit
+    // at every call site.
+    fn set_engine_theme(name: &str) {
+        super::set_engine_theme(name);
+        flush_writes();
+    }
+    fn set_engine_variant(name: Option<&str>) {
+        super::set_engine_variant(name);
+        flush_writes();
+    }
+    fn set_layaut_for_connector(connector: &str, name: &str) {
+        super::set_layaut_for_connector(connector, name);
+        flush_writes();
+    }
+    fn set_layaut_option(name: &str) {
+        super::set_layaut_option(name);
+        flush_writes();
+    }
+    fn set_sounds_option(name: &str) {
+        super::set_sounds_option(name);
+        flush_writes();
+    }
+    fn set_sound_volume(percent: u32) {
+        super::set_sound_volume(percent);
+        flush_writes();
+    }
+    fn set_blur_radius(percent: u32) {
+        super::set_blur_radius(percent);
+        flush_writes();
+    }
+    fn set_blur_opacity(percent: u32) {
+        super::set_blur_opacity(percent);
+        flush_writes();
+    }
+    fn set_grid_padding(n: u32) {
+        super::set_grid_padding(n);
+        flush_writes();
+    }
+    fn set_term_font_size(percent: u32) {
+        super::set_term_font_size(percent);
+        flush_writes();
+    }
+    fn set_term_font_family(name: &str) {
+        super::set_term_font_family(name);
+        flush_writes();
+    }
+    fn clear_look_and_feel() {
+        super::clear_look_and_feel();
+        flush_writes();
+    }
 
     /// The path a click in the settings panel actually takes: write Theme=,
     /// re-resolve, and the colours the whole interface draws with are the new
@@ -3596,6 +4334,288 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// How many frames a claim about "not once a frame" is worth
+    /// making. Sixty is a second of the storm the 2026-08-18 `strace`
+    /// caught: 136 walks of the cascade in 2.2 s, one per frame, each
+    /// of them 1121 bytes of RON parsed twice.
+    const FRAMES: u32 = 60;
+
+    /// A configuration directory with a file in it, and the environment
+    /// pointed at it. Answers the directory.
+    fn conf_root(tag: &str, body: &str) -> PathBuf {
+        let root = scratch(tag);
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        // A system end that exists as a NAME and not as a directory,
+        // which is the ordinary machine: the eight paths the cascade
+        // knocked on sixty times a second were all of them absent.
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).expect("the scratch tree must be writable");
+        std::fs::write(dir.join(CONF_RON), body).expect("the fixture must be writable");
+        dir
+    }
+
+    fn conf_root_done(dir: &Path) {
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
+    }
+
+    /// The whole of nuisance number 2 from the 2026-08-18 audit: a
+    /// desktop that reads its settings file every frame.
+    ///
+    /// Measured there: 294 opens of `nacelle-desktop.ron` in 89 seconds,
+    /// 136 of them 16-17 ms apart. The question came from a row of the
+    /// settings window and the answer walked the cascade — parse, eight
+    /// absent paths, parse again — with nothing on the disk having moved
+    /// between one frame and the next.
+    ///
+    /// So the assertion is a COUNT and not a description: the first ask
+    /// reaches the disk, and sixty more do not reach it at all.
+    #[test]
+    fn the_configuration_is_read_once_and_not_once_a_frame() {
+        let _env = env_lock();
+        let dir = conf_root("conf-per-frame", "(theme: Named(\"crimson\"))\n");
+
+        let base = conf_file_reads();
+        assert_eq!(conf().theme.name(), Some("crimson"), "the fixture must be readable");
+        let first = conf_file_reads() - base;
+        assert!(first > 0, "the first ask has to reach the disk, and read {first} files");
+
+        let settled = conf_file_reads();
+        for _ in 0..FRAMES {
+            assert_eq!(
+                conf().theme.name(),
+                Some("crimson"),
+                "the answer changed with nothing on the disk changing"
+            );
+        }
+        assert_eq!(
+            conf_file_reads(),
+            settled,
+            "{FRAMES} frames cost {} more reads of a file nothing had touched",
+            conf_file_reads() - settled
+        );
+
+        conf_root_done(&dir);
+    }
+
+    /// And the memo is not a one-way door: a file edited by hand, by a
+    /// second copy of this program or by anything else answers on the
+    /// next ask.
+    ///
+    /// This is the half that makes the count above safe to want. A cache
+    /// with no invalidation is the settings window's Apply button doing
+    /// nothing, which the toolkit has written down as the worse failure
+    /// of the two (`HostApi::settings_epoch`).
+    #[test]
+    fn a_file_changed_behind_the_programs_back_is_read_again() {
+        let _env = env_lock();
+        let dir = conf_root("conf-changed", "(theme: Named(\"crimson\"))\n");
+        assert_eq!(conf().theme.name(), Some("crimson"));
+
+        std::fs::write(dir.join(CONF_RON), "(theme: Named(\"azure\"))\n").unwrap();
+        assert_eq!(
+            conf().theme.name(),
+            Some("azure"),
+            "the file was rewritten and the answer stayed on the old one"
+        );
+
+        // Including a file that goes AWAY: absence is an answer too, and
+        // a memo that only watched the files it found would go on
+        // reciting a document the user deleted.
+        std::fs::remove_file(dir.join(CONF_RON)).unwrap();
+        assert_eq!(
+            conf().theme.name(),
+            None,
+            "the file was deleted and the answer stayed on what it said"
+        );
+
+        conf_root_done(&dir);
+    }
+
+    /// Nuisance number 4: the two `fsync` calls of a save ran on the
+    /// event loop — 0.516 s of them over seven saves, one save alone
+    /// holding the interface for 0.35 s.
+    ///
+    /// What may NOT change is the order, which is the whole of the
+    /// atomicity: the bytes are flushed before the rename publishes
+    /// them, and the directory after it. So the test asserts both — the
+    /// order, and that no step of it happened on the thread that asked.
+    #[test]
+    fn a_save_is_made_durable_off_the_thread_that_asked_for_it() {
+        let _env = env_lock();
+        let dir = conf_root("conf-fsync-thread", "(theme: Named(\"crimson\"))\n");
+
+        // `super::`, because the wrapper at the head of this module is
+        // exactly what this test is about: the wait is done by hand.
+        super::set_engine_theme("azure");
+        flush_writes();
+
+        let steps = last_write_steps();
+        assert_eq!(
+            steps.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![WriteStep::SyncFile, WriteStep::Rename, WriteStep::SyncDir],
+            "the order that makes a save atomic is not the order it was taken in"
+        );
+        let asked_on = std::thread::current().id();
+        for (step, ran_on) in &steps {
+            assert_ne!(
+                *ran_on, asked_on,
+                "{step:?} ran on the thread that changed the setting"
+            );
+        }
+        assert!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap().contains("azure"),
+            "the setting has to be IN the file once the wait is over"
+        );
+
+        conf_root_done(&dir);
+    }
+
+    /// And the setting is in force before its bytes are — which is what
+    /// makes the write above safe to hand to another thread.
+    ///
+    /// The trap this closes is not a slow interface but a LOST SETTING.
+    /// A save seeds from the user's own file; with the write still in
+    /// the air, a second save reading that file would seed from the
+    /// document the first one is about to replace, and whichever write
+    /// finished last would decide what the user ends up with. Two
+    /// presses of a slider are a millisecond apart.
+    #[test]
+    fn a_second_save_is_built_on_the_first_and_not_on_the_disk() {
+        let _env = env_lock();
+        let dir = conf_root("conf-two-saves", "(theme: Named(\"crimson\"))\n");
+
+        super::set_engine_theme("azure");
+        // In force at once: no reader of the running program waits for
+        // a disk to confirm what the window already shows.
+        assert_eq!(
+            conf().theme.name(),
+            Some("azure"),
+            "the setting was not in force until the bytes landed"
+        );
+        super::set_sound_volume(42);
+        flush_writes();
+
+        let text = std::fs::read_to_string(dir.join(CONF_RON)).unwrap();
+        assert!(
+            text.contains("azure"),
+            "the second save was built on the file the first had not written yet, \
+             and the theme went with it: {text}"
+        );
+        assert!(text.contains("42"), "the second save is in the file too: {text}");
+
+        conf_root_done(&dir);
+    }
+
+    /// A panic ANYWHERE near the desk used to cost the user every
+    /// setting they changed after it.
+    ///
+    /// Poisoning is permanent and process-wide, and the two places that
+    /// reached for the desk read `Err` as "nothing to do here": the job
+    /// was dropped without a word, and the memo already filed for it
+    /// went on handing that document to every reader while the file
+    /// itself was never opened again. Settings stopped being saved and
+    /// hand-edits stopped being read, from that moment until the
+    /// desktop was restarted, with nothing on screen to connect it to.
+    ///
+    /// The panic is not hypothetical: `flush_writes` says its one
+    /// sentence with `eprintln!`, which panics when stderr will not
+    /// take it, and it used to say it holding the desk.
+    ///
+    /// Two assertions, because the loss had two halves — the file that
+    /// was not written, and the reader that was answered anyway.
+    #[test]
+    fn a_panic_at_the_desk_does_not_cost_the_next_save() {
+        let _env = env_lock();
+        let dir = conf_root("conf-desk-poison", "(theme: Named(\"crimson\"))\n");
+        // Nothing of anybody else's still in the air: the fixture below
+        // strands whatever is queued at the moment it fires, and that
+        // is meant to be this test's business alone.
+        flush_writes();
+
+        // Exactly what a panic inside `flush_writes`'s own sentence
+        // did. The panic message this prints belongs to the fixture.
+        let _ = std::thread::spawn(|| {
+            let _held = lock_desk();
+            panic!("a fixture panicking with the desk held");
+        })
+        .join();
+        assert!(WRITE_DESK.is_poisoned(), "the fixture poisoned nothing, so this proves nothing");
+
+        super::set_engine_theme("azure");
+        flush_writes();
+        assert!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap().contains("azure"),
+            "the save was dropped on the floor because somebody else had panicked"
+        );
+
+        // And the memo is not left standing for a write that never
+        // happened: the disk is still in charge of the answer.
+        std::fs::write(dir.join(CONF_RON), "(theme: Named(\"ochre\"))\n").unwrap();
+        assert_eq!(
+            conf().theme.name(),
+            Some("ochre"),
+            "the memo went on answering for a document the disk had never carried"
+        );
+
+        // Put the flag down again so the rest of the suite runs against
+        // the ordinary state rather than the cured one.
+        WRITE_DESK.clear_poison();
+        conf_root_done(&dir);
+    }
+
+    /// THE OTHER HALF OF THE MEASUREMENT — an instrument, not an
+    /// assertion about a value.
+    ///
+    /// The figures quoted in [`conf_files`] have two provenances, and
+    /// only one of them was ever in this repository. The counter half
+    /// (`the_settings_file_is_read_once_and_not_once_a_frame`) is here
+    /// and repeatable. The `strace` half — 816 opens of the document
+    /// and 1088 absent paths knocked on before, six and eight after,
+    /// over 136 asks — came from a probe that was never committed, so
+    /// a reader had to take it on trust. This is that probe.
+    ///
+    /// Ignored by default because it measures rather than asserts, and
+    /// because it reads the ambient XDG layout on purpose: the numbers
+    /// are of a MACHINE, and the owner's has six configuration
+    /// directories and therefore thirteen names to stamp. To repeat it:
+    ///
+    /// ```text
+    /// cargo test --offline --no-run
+    /// strace -f -e trace=openat,statx -o /tmp/cfg.log \
+    ///     target/debug/deps/nacelle_desktop-<hash> \
+    ///     --ignored --test-threads=1 --exact \
+    ///     config::tests::the_cascade_asked_a_hundred_and_thirty_six_times
+    /// grep -c '"[^"]*nacelle-desktop.ron", O_RDONLY' /tmp/cfg.log   # opens
+    /// grep -c 'ENOENT' /tmp/cfg.log                                 # absent
+    /// ```
+    ///
+    /// The BEFORE column is the same run with the memo taken out of
+    /// [`conf`] — the one line `if let Some(doc) = conf_memo_hit(...)`
+    /// — which is the change being measured and nothing else.
+    ///
+    /// It does assert one thing, and it is the property the numbers are
+    /// about rather than any particular number: asking a second time
+    /// costs nothing, so the count does not grow with the asking.
+    #[test]
+    #[ignore = "an instrument: run it alone, under a syscall tracer"]
+    fn the_cascade_asked_a_hundred_and_thirty_six_times() {
+        let _env = env_lock();
+        let base = conf_file_reads();
+        for _ in 0..136 {
+            let _ = conf();
+        }
+        let first = conf_file_reads() - base;
+        for _ in 0..136 {
+            let _ = conf();
+        }
+        let second = conf_file_reads() - base - first;
+        println!("136 asks: {first} reads off the disk; 136 more: {second}");
+        assert_eq!(second, 0, "the cascade is still being read once per ask");
     }
 
     /// A directory of this test's own, emptied first.
@@ -5163,25 +6183,6 @@ mod tests {
     /// process-wide registry is fixed by the first call *or the first
     /// read*, so one test resolving a layout before the staging would
     /// freeze it empty for all the others.
-    /// Serialises every test that writes an XDG variable.
-    ///
-    /// `std::env::set_var` is PROCESS-wide while `cargo test` runs its
-    /// tests on many threads: one test pointing XDG_CONFIG_HOME at its
-    /// own directory silently redirected another test's `resolve()`
-    /// half way through, and the theme-switch test read somebody else's
-    /// configuration and saw the wrong accent. Nothing about that was
-    /// visible in the failure — the colour was simply not the one the
-    /// theme names. Per-PID directories are not enough; the variable
-    /// itself is the shared thing.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        // A poisoned lock only means some other test panicked while
-        // holding it; the variable it set is being overwritten anyway.
-        L.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     fn fixture_registry() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {

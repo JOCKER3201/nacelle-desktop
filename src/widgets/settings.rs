@@ -3529,14 +3529,23 @@ fn clears_sounds(s: &Settings) -> String {
 
 /// Which sound set is in use, and whether it was found at all: silence
 /// with no explanation is the one thing worth spelling out here.
-fn sound_set_note(_: &Settings) -> String {
-    match config::active_sounds_dir() {
-        Some(dir) => format!(
-            "SET: {}",
-            dir.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_uppercase()
-        ),
-        None => "NO SOUND SET SELECTED".to_string(),
-    }
+///
+/// A FIELD and not a question, and the difference is the whole of the
+/// 2026-08-18 `strace` finding. `Text::Of` is evaluated on the row it
+/// belongs to, every frame the page is drawn; the answer used to come
+/// from [`config::active_sounds_dir`], which walks the configuration
+/// cascade and then the asset roots. With this page open that was 1121
+/// bytes of RON parsed twice, eight paths knocked on and two directory
+/// stats — forty-six times a second, for a sentence that changes when
+/// the user chooses a different sound set and at no other moment.
+///
+/// So it is worked out where every other answer on a page is worked
+/// out: on the way in ([`Settings::refresh_sound_set`]). What that
+/// trades away is noticing a set INSTALLED while the page stands open,
+/// which is the same staleness the three lists on LOOK AND FEEL have
+/// always had and for the same reason.
+fn sound_set_note(s: &Settings) -> String {
+    s.sound_set.clone()
 }
 
 // ------------------------------------------------------------------ lengths
@@ -3805,6 +3814,9 @@ pub struct Settings {
     current_look: Option<String>,
     current_layaut: Option<String>,
     current_sounds: Option<String>,
+    /// The sentence SOUND LEVELS closes with, worked out when the page
+    /// is entered rather than while it is drawn — see [`sound_set_note`].
+    sound_set: String,
     /// Font view state, indexed by section (0 = Term, 1 = Ui).
     families: [Vec<String>; 2],
     cur_family: [Option<String>; 2],
@@ -4139,6 +4151,7 @@ impl Settings {
             current_look: None,
             current_layaut: None,
             current_sounds: None,
+            sound_set: String::new(),
             families: [Vec::new(), Vec::new()],
             cur_family: [None, None],
             cur_weight: [None, None],
@@ -5588,6 +5601,10 @@ impl Settings {
                 self.sound_volume = vol;
                 self.sound_typing = typing;
                 self.sound_ambient = ambient;
+                // The page's closing sentence, on the way in with the
+                // rest of its state: the row that shows it is drawn
+                // every frame and may not ask the disk (`sound_set_note`).
+                self.refresh_sound_set();
                 self.go(View::SoundLevels);
             }
             Act::OpenBlur => {
@@ -6045,6 +6062,24 @@ impl Settings {
         self.current_sounds = Some(
             config::current_sounds_name().unwrap_or_else(|| "default".to_string()),
         );
+        self.refresh_sound_set();
+    }
+
+    /// The sentence SOUND LEVELS closes with, asked of the disk HERE
+    /// and nowhere else — see [`sound_set_note`] for why that matters.
+    ///
+    /// Two questions in one, and the second is why the name alone will
+    /// not do: `sounds:` says which set was chosen, and only the asset
+    /// roots say whether it is installed. A desktop that is silent
+    /// because the set it names is not there has to be able to say so.
+    fn refresh_sound_set(&mut self) {
+        self.sound_set = match config::active_sounds_dir() {
+            Some(dir) => format!(
+                "SET: {}",
+                dir.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_uppercase()
+            ),
+            None => "NO SOUND SET SELECTED".to_string(),
+        };
     }
 
     /// Decision §2a: everything to do with look and feel, cleared in
@@ -10163,6 +10198,64 @@ mod tests {
             (b.color_hdr, b.color_space.clone(), b.names(ListId::Spaces).to_vec()),
             "being told the same offer twice moved the page"
         );
+    }
+
+    /// The row that set the 2026-08-18 storm going: SOUND LEVELS closes
+    /// with a line naming the set in use, and it used to work that line
+    /// out by asking the disk — the configuration cascade and then the
+    /// asset roots, on every frame the page was drawn.
+    ///
+    /// `Text::Of` is evaluated where the row is DRAWN, so a provider
+    /// that touches a file touches it sixty times a second. This is the
+    /// shape of the guard: the provider is a function of the window's
+    /// own state and of nothing else, and what fills that state is the
+    /// door onto the page.
+    ///
+    /// The second half opens the page, and opening it is the ONE place
+    /// allowed to ask the disk — so the disk it asks has to belong to
+    /// this test. The lock is the crate's, not this module's: XDG
+    /// variables are process-wide, `cargo test` runs on many threads,
+    /// and a second lock beside the one in `config` would guard
+    /// nothing.
+    #[test]
+    fn the_sound_pages_closing_line_is_not_a_question_for_the_disk() {
+        let _env = config::env_lock();
+        let root = std::env::temp_dir()
+            .join(format!("nacelle-sound-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the scratch tree must be writable");
+        for (var, at) in [
+            ("XDG_CONFIG_HOME", root.clone()),
+            ("XDG_CONFIG_DIRS", root.join("etc")),
+            ("XDG_DATA_HOME", root.clone()),
+            ("XDG_DATA_DIRS", root.join("share")),
+        ] {
+            std::env::set_var(var, at);
+        }
+
+        let mut s = furnished();
+        s.sound_set = "SET: SOMETHING NOBODY HAS INSTALLED".to_string();
+        assert_eq!(
+            sound_set_note(&s),
+            "SET: SOMETHING NOBODY HAS INSTALLED",
+            "the closing line came from somewhere other than the window's own state, \
+             which on a drawn row means it came from the disk"
+        );
+
+        // And the door is what fills it, so the sentence is right when
+        // the page arrives rather than right by the time it is drawn.
+        s.sound_set.clear();
+        s.view = View::LookFeel;
+        assert!(!s.perform(Act::OpenSoundLevels, 0.0));
+        assert!(
+            !s.sound_set.is_empty(),
+            "the page opened with nothing to say about its own sound set"
+        );
+
+        for var in ["XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS"] {
+            std::env::remove_var(var);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A window with enough in it to draw every page: three names in
