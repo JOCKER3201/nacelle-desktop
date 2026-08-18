@@ -7012,13 +7012,20 @@ impl Settings {
         for (r, s) in plates {
             ctx.dl.rect_outline(r.x, r.y, r.w, r.h, st.edge_width, col(st.edge));
             let ty = center_y(ctx, r, f);
+            // The same cap an ENABLED plate would carry. This form draws
+            // its own inscription rather than going through
+            // `button::draw` — it wants the Disabled rung and no plate —
+            // so it has to ask the object what the label says, or a
+            // theme's case transform would apply to a row the page has
+            // turned on and not to the same row turned off.
+            let cap = nacelle::object::button::cap_of(&s);
             ctx.dl.text_center(
                 ctx.fonts,
                 f.face,
                 f.px,
                 r.cx(),
                 ty,
-                &s,
+                &cap,
                 col(st.text),
                 f.track,
             );
@@ -7055,6 +7062,18 @@ impl Settings {
     /// lengths in three equal boxes would put most of the ink in the
     /// widest one. The row is centred as a whole, `settings.bar_gap`
     /// between plates; no length here is this file's.
+    ///
+    /// The plate's own width comes from the OBJECT
+    /// ([`nacelle::object::button::plate_w`]) and not from this file's
+    /// reading of the object's keys. It used to be spelled out here —
+    /// `fonts.measure(...) + 2 * button.pad_x`, floored at
+    /// `button.min_w` — which was a private copy of the button's rule
+    /// and drifted from it the moment `button::draw` learned to apply
+    /// `type.<button.role>.case`: the plate was sized on the label as
+    /// this file spells it, and the cap was drawn in the case the theme
+    /// asks for. Under a master saying `upper` and a source full of
+    /// capitals the two agree by luck. Asking the object is how they go
+    /// on agreeing when either of those stops being true.
     fn bar_plates(
         &self,
         ctx: &mut Ctx,
@@ -7062,20 +7081,14 @@ impl Settings {
         rc: RowCtx,
     ) -> Vec<(Rect, Cow<'static, str>, Act)> {
         static BAR_GAP: OnceLock<TokenId> = OnceLock::new();
-        static PAD_X: OnceLock<TokenId> = OnceLock::new();
-        static MIN_W: OnceLock<TokenId> = OnceLock::new();
-        let th = theme::resolved();
-        let gap = th.px(tok(&BAR_GAP, "settings.bar_gap"));
-        let pad = th.px(tok(&PAD_X, "button.pad_x"));
-        let min_w = th.px(tok(&MIN_W, "button.min_w"));
-        let f = role_button(ctx);
+        let gap = theme::resolved().px(tok(&BAR_GAP, "settings.bar_gap"));
         // Resolved before anything is drawn: a label may be read from
         // the window, and the window cannot be borrowed while it draws.
         let labels: Vec<Cow<'static, str>> =
             items.iter().map(|(t, _)| self.text_of(*t)).collect();
         let widths: Vec<f32> = labels
             .iter()
-            .map(|s| (ctx.fonts.measure(f.face, f.px, s, f.track) + 2.0 * pad).max(min_w))
+            .map(|s| nacelle::object::button::plate_w(ctx, s))
             .collect();
         let total: f32 =
             widths.iter().sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
@@ -12582,12 +12595,16 @@ mod tests {
         let gap = th.px(theme::id("settings.bar_gap").expect("the master declares it"));
         let min_w = th.px(theme::id("button.min_w").expect("the master declares it"));
         let pad = th.px(theme::id("button.pad_x").expect("the master declares it"));
-        let f = role_button(&ctx);
         for (i, (r, label, act)) in plates.iter().enumerate() {
             assert!(*act == EDITOR_BAR_ITEMS[i].1, "the bar reordered its verbs");
             assert!((r.y - band.y).abs() < 0.01, "a plate left the row");
+            // Measured on the CAP — the run `button::draw` will actually
+            // put on the plate, which is the label under
+            // `type.<button.role>.case`. Reading `fonts.measure` on the
+            // label as this file spells it was the seam: the bar sized
+            // its plates for one string and the object drew another.
             let wanted =
-                (ctx.fonts.measure(f.face, f.px, label, f.track) + 2.0 * pad).max(min_w);
+                (nacelle::object::button::cap_width(&mut ctx, label) + 2.0 * pad).max(min_w);
             assert!(
                 (r.w - wanted).abs() < 0.01,
                 "plate {i} is {} px wide, its own word wants {wanted} px",
@@ -12606,6 +12623,97 @@ mod tests {
             "the bar is not centred: {} px on the left, {} px on the right",
             first.x - content.x,
             content.right() - last.right()
+        );
+        viewport_home();
+    }
+
+    /// A plate is sized for the run the OBJECT will draw on it, not for
+    /// the string this file spells.
+    ///
+    /// The two parted company when `button::draw` learned to apply
+    /// `type.<button.role>.case`: the bar went on measuring its own
+    /// literal and the button went on drawing the transform of it. Under
+    /// the shipped master the two agree by luck — `upper` applied to
+    /// `"SAVE"` is `"SAVE"` — so the defect is invisible today and
+    /// arrives the moment either the master or one literal changes,
+    /// which is the whole point of the token existing. The theme below
+    /// makes them disagree on purpose.
+    #[test]
+    fn a_plate_is_sized_for_the_cap_the_button_will_draw() {
+        let _g = crate::widgets::theme_test_lock();
+        // Every verb in this bar is written in capitals, so a role that
+        // lower-cases makes the DRAWN run narrower than the spelling.
+        let _t = crate::widgets::Themed::new("bar-case-lower", "[type]\nbutton.case = lower\n");
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        let s = furnished();
+        let band = Rect::new(content.x, content.y, content.w, m.btn_h);
+        let rc = RowCtx { content, band, label_w: 0.0, value_w: 0.0, m };
+        let plates = s.bar_plates(&mut ctx, &EDITOR_BAR_ITEMS, rc);
+
+        let th = theme::resolved();
+        let min_w = th.px(theme::id("button.min_w").expect("the master declares it"));
+        let pad = th.px(theme::id("button.pad_x").expect("the master declares it"));
+        let f = role_button(&ctx);
+        // A plate this theme sizes differently from the way the old
+        // reading would have. Without one the assertion below passes on
+        // a bar that never exercised the difference.
+        let mut told_apart = 0;
+        for (i, (r, label, _)) in plates.iter().enumerate() {
+            let spelled =
+                (ctx.fonts.measure(f.face, f.px, label, f.track) + 2.0 * pad).max(min_w);
+            let drawn =
+                (nacelle::object::button::cap_width(&mut ctx, label) + 2.0 * pad).max(min_w);
+            assert!(
+                (r.w - drawn).abs() < 0.01,
+                "plate {i} ({label}) is {} px wide; the cap it will carry wants {drawn} px \
+                 and the spelling it was written in wants {spelled} px",
+                r.w
+            );
+            if (spelled - drawn).abs() > 0.01 {
+                told_apart += 1;
+            }
+        }
+        assert!(
+            told_apart > 0,
+            "no plate in this bar tells the spelled width from the drawn one, \
+             so this test would pass on a bar that ignores the case token"
+        );
+        viewport_home();
+    }
+
+    /// The DISABLED form of a bar carries the same cap the live one does.
+    ///
+    /// It writes its own inscription — it wants the ladder's Disabled
+    /// rung and no plate under it — so it is the one place in this window
+    /// where a button's label reaches the screen BESIDE `button::draw`
+    /// instead of through it. Reading the raw literal there would apply a
+    /// theme's case transform to a row the page has turned on and not to
+    /// the same row turned off: one control, two spellings, depending on
+    /// whether you may press it.
+    #[test]
+    fn a_disabled_plate_is_inscribed_with_the_cap_a_live_one_would_draw() {
+        let _g = crate::widgets::theme_test_lock();
+        let _t =
+            crate::widgets::Themed::new("disabled-case-lower", "[type]\nbutton.case = lower\n");
+        let runs = crate::widgets::drawn_text(1080.0, 0.0, 1.0, |ctx| {
+            let mut s = furnished();
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(ctx, content);
+            let band = Rect::new(content.x, content.y, content.w, m.btn_h);
+            let rc = RowCtx { content, band, label_w: 0.0, value_w: 0.0, m };
+            s.draw_disabled(ctx, &Ctrl::Bar { items: &EDITOR_BAR_ITEMS }, rc);
+        });
+        let words: Vec<&str> = runs.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            words,
+            ["save", "save as", "cancel"],
+            "a disabled bar was inscribed with the literals this file spells, \
+             not with the caps type.button.case makes of them"
         );
         viewport_home();
     }
