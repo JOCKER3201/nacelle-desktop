@@ -785,12 +785,28 @@ impl Screen {
             // The bake reads the resolved theme once at entry; a swap
             // mid-bake re-kicks on the next frame's epoch check. A stale
             // worker's send fails into a dropped receiver, silently.
-            std::thread::spawn(move || {
+            let baker = crate::threads::spawn(crate::threads::PLATE, move || {
                 let _ = tx.send((
                     nacelle::theme::plate::bake_backdrop(pw, ph),
                     nacelle::theme::plate::bake_overlay(pw, ph),
                 ));
             });
+            if baker.is_err() {
+                // No worker means no plate will ever arrive on that
+                // receiver, so drop it and draw without one — the screen
+                // keeps its previous plate, or none at all.
+                //
+                // The KEY stays claimed on purpose. Clearing it too would
+                // make the next frame ask again, and the next, sixty times
+                // a second: the only reasons `spawn` fails are EAGAIN and
+                // ENOMEM, neither of which passes because a frame went by,
+                // and each retry costs a 2 MiB stack mapping and a clone
+                // before it fails. So a failed bake is spent, not retried
+                // — the next theme swap or resize moves the key, and that
+                // is when a machine which has since found room tries
+                // again.
+                self.plate_rx = None;
+            }
         }
         let Some((back, over)) = self.plate_rx.as_ref().and_then(|rx| rx.try_recv().ok())
         else {

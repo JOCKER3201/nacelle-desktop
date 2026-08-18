@@ -50,6 +50,43 @@ pub fn install(display: Option<RawDisplayHandle>) {
 /// the compositor refuses (or a missing `zwp_primary_selection_v1` —
 /// gamescope often has none) fails SILENTLY, which is the documented
 /// contract: primary is a nicety, never an error dialog.
+///
+/// # What that worker costs, and why nothing here fixes it
+///
+/// The strace audit of 2026-08-18 measured the worker waking 281 times a
+/// second across a 88-second run in which the clipboard was never used —
+/// 196 048 syscalls, second only to the event loop and the telemetry
+/// sweep. The cause was traced through the dependency chain and it is not
+/// in this file; the whole of it is in code we do not own:
+///
+/// * **The wake-ups.** All 41 139 of the worker's `recvmsg` calls are on
+///   fd 3 — winit's `wayland-0` socket, the same one the event loop reads.
+///   That sharing is deliberate (see the SAFETY note above: it is the only
+///   way the store gets an input serial), and it means every batch the
+///   compositor sends — two screens' frame callbacks, sixty times a second
+///   — makes the socket readable for BOTH pollers. The worker wakes, reads
+///   its share of the stream, finds nothing addressed to its own queue and
+///   sleeps again. Nothing short of a second connection changes that, and
+///   a second connection is the thing that breaks the serial.
+/// * **The idle re-arm.** 24 975 `timerfd_settime` calls, every one of
+///   them disarming an already disarmed timer (`it_value = {0,0}`), plus
+///   two `epoll_ctl` and one `read` per turn. That is `polling` 3.11.0,
+///   `src/epoll.rs:180-203`: it sets the timerfd and re-registers interest
+///   unconditionally on every `wait`, INCLUDING the `None` deadline this
+///   worker always passes. calloop 0.14 sits on `polling`, sctk 0.20 sits
+///   on calloop, smithay-clipboard 0.7 sits on sctk. Roughly 100 000 of
+///   the worker's syscalls — half of its whole footprint — are this
+///   bookkeeping, and every one of them is behind three crates of ours.
+///
+/// So the honest answer is that the idle work cannot be taken off without
+/// either patching `polling` or changing how the clipboard is dispatched.
+/// The real fix, when it is worth doing, is the second one: dispatch the
+/// clipboard's queue from the event loop the program already runs instead
+/// of from a thread of its own, which needs an API smithay-clipboard 0.7
+/// does not offer. Making the worker LAZY — built on the first copy rather
+/// than at startup — would zero the cost for a session that never copies,
+/// but a queue born after the fact has no keyboard-enter serial yet, so
+/// the first store could be refused. Neither is a change to make quietly.
 struct WaylandClipboard(smithay_clipboard::Clipboard);
 
 impl ClipboardBackend for WaylandClipboard {

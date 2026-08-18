@@ -207,59 +207,57 @@ impl Audio {
 
         // A dedicated writer thread. Blocking writes pace themselves
         // against the card's clock, so no timer of our own is needed.
-        let writer = std::thread::Builder::new()
-            .name("nacelle-desktop-audio".into())
-            .spawn(move || {
-                let pcm = pcm;
-                let frames = PERIOD_FRAMES as usize;
-                let ch = CHANNELS as usize;
-                let mut buf = vec![0.0f32; frames * ch];
-                let mut pcm16 = vec![0i16; frames * ch];
-                while !s.load(Ordering::Relaxed) {
-                    match m.lock() {
-                        Ok(mut mix) => mix.fill(&mut buf, ch),
-                        // Never send stale memory to the card: that is
-                        // what a burst of noise sounds like.
-                        Err(_) => buf.iter_mut().for_each(|v| *v = 0.0),
+        let writer = crate::threads::spawn(crate::threads::AUDIO, move || {
+            let pcm = pcm;
+            let frames = PERIOD_FRAMES as usize;
+            let ch = CHANNELS as usize;
+            let mut buf = vec![0.0f32; frames * ch];
+            let mut pcm16 = vec![0i16; frames * ch];
+            while !s.load(Ordering::Relaxed) {
+                match m.lock() {
+                    Ok(mut mix) => mix.fill(&mut buf, ch),
+                    // Never send stale memory to the card: that is
+                    // what a burst of noise sounds like.
+                    Err(_) => buf.iter_mut().for_each(|v| *v = 0.0),
+                }
+                if !float {
+                    for (o, i) in pcm16.iter_mut().zip(buf.iter()) {
+                        *o = (i.clamp(-1.0, 1.0) * 32767.0) as i16;
                     }
-                    if !float {
-                        for (o, i) in pcm16.iter_mut().zip(buf.iter()) {
-                            *o = (i.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        }
-                    }
-                    let base: *const c_void = if float {
-                        buf.as_ptr() as *const c_void
-                    } else {
-                        pcm16.as_ptr() as *const c_void
-                    };
-                    let bytes_per_frame = if float { 4 * ch } else { 2 * ch };
+                }
+                let base: *const c_void = if float {
+                    buf.as_ptr() as *const c_void
+                } else {
+                    pcm16.as_ptr() as *const c_void
+                };
+                let bytes_per_frame = if float { 4 * ch } else { 2 * ch };
 
-                    let mut done = 0usize;
-                    while done < frames {
-                        let ptr = unsafe { (base as *const u8).add(done * bytes_per_frame) };
-                        let n = unsafe {
-                            (a.writei)(pcm.0, ptr as *const c_void, (frames - done) as Ulong)
-                        };
-                        if n < 0 {
-                            // Underrun or a suspended device: recover
-                            // once, and give up on this period if the
-                            // card will not come back.
-                            if unsafe { (a.recover)(pcm.0, n as c_int, 1) } < 0 {
-                                break;
-                            }
-                        } else if n == 0 {
+                let mut done = 0usize;
+                while done < frames {
+                    let ptr = unsafe { (base as *const u8).add(done * bytes_per_frame) };
+                    let n = unsafe {
+                        (a.writei)(pcm.0, ptr as *const c_void, (frames - done) as Ulong)
+                    };
+                    if n < 0 {
+                        // Underrun or a suspended device: recover
+                        // once, and give up on this period if the
+                        // card will not come back.
+                        if unsafe { (a.recover)(pcm.0, n as c_int, 1) } < 0 {
                             break;
-                        } else {
-                            done += n as usize;
                         }
+                    } else if n == 0 {
+                        break;
+                    } else {
+                        done += n as usize;
                     }
                 }
-                unsafe {
-                    (a.drain)(pcm.0);
-                    (a.close)(pcm.0);
-                }
-            })
-            .ok()?;
+            }
+            unsafe {
+                (a.drain)(pcm.0);
+                (a.close)(pcm.0);
+            }
+        })
+        .ok()?;
 
         Some(Audio {
             mixer,
