@@ -4551,11 +4551,12 @@ impl Settings {
                 "NEON".to_string(),
             ],
             current_border: None,
-            background_kinds: vec![
-                "SOLID".to_string(),
-                "BLUR".to_string(),
-                "FROSTED GLASS".to_string(),
-            ],
+            // BLUR and FROSTED GLASS are pulled for now: both sampled a
+            // static magenta behind the settings modal (the blur base read
+            // uninitialised) while SOLID stayed correct, so the two glass
+            // modes leave the list until the blur path is rewritten. SOLID
+            // is the only background the editor offers meanwhile.
+            background_kinds: vec!["SOLID".to_string()],
             current_background: None,
             // The glass tint's placeholder is the IDENTITY MULTIPLY —
             // full brightness, no saturation — and it is not a colour
@@ -5705,6 +5706,14 @@ impl Settings {
         let rank_px = px("elev.panel.glass.rank");
         let rank = rank_px.round() as u32;
         let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
+        // The kind read straight off the rank and the wash. BLUR and
+        // FROSTED GLASS are no longer OFFERED (`background_kinds` lists only
+        // SOLID until the blur path is rewritten), but the reading stands:
+        // the machinery that round-trips a rank-bearing theme is kept whole
+        // for that rewrite, and a theme carrying one opens showing its own
+        // amounts. The dropdown simply has no row to mark for a kind it does
+        // not offer — `current_row` answers `None` there, by design — so the
+        // editor cannot SELECT blur, which is what pulling it means.
         self.current_background = Some(
             match (rank, wash_a > 0.0) {
                 (0, _) => "SOLID",
