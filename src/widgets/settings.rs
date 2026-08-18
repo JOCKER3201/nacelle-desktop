@@ -1703,7 +1703,7 @@ fn border_lit(s: &Settings) -> bool {
 /// that ground would be hiding it because we do not know rather than
 /// because there is nothing to ask.
 fn corner_sized(s: &Settings) -> bool {
-    let _ = s; true
+    !matches!(s.current_corner.as_deref(), Some("SQUARE"))
 }
 
 /// The word BASIC's CORNER SIZE row is showing, DERIVED from the radii
