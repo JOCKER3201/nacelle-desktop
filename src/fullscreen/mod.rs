@@ -82,15 +82,73 @@
 //! later by protocols from the same crate (`ext-workspace-v1` for
 //! boards) or by the compositor of our own. Under bare KWin they are
 //! filled in by the EWMH backend, for X11 clients only.
+//!
+//! # Where this belongs, and why it is not there yet
+//!
+//! `CLAUDE.md`: "JEDEN MODEL OKNA … Zachowania okien mieszkają w
+//! libnacelle i działają globalnie — nie w nacelle-desktop". The
+//! vocabulary below — [`Verb`], [`Act`], [`Window`], [`State`],
+//! [`Place`], [`Icon`], [`Outcome`], [`Names`], [`Backend`] — is what a
+//! window can be asked for, and it has to be one list whether the
+//! window is somebody else's or `nacelle::object::winframe`'s own. It
+//! is written to move: this file names no type from this crate, and
+//! the only things in the module that touch `winit`, `x11rb` or
+//! `wayland-client` are the two carriers and [`host`] — the three files
+//! that would stay behind, because "which compositor is this" and
+//! "which window is ours" are the desktop's questions, not the
+//! toolkit's.
+//!
+//! It has not moved, and the reason is mechanical rather than
+//! considered: this fleet has a worktree of `nacelle-desktop` only, and
+//! consuming a new libnacelle module means moving the pin in
+//! `Cargo.lock` — a file another fleet is holding. The move is written
+//! down as a debt in the report that comes with this branch, with the
+//! order it has to happen in (libnacelle first, then the pin, then this
+//! crate).
 
 #![allow(dead_code)] // The call site is `main.rs`, held by another fleet.
+                     // The moment `Connector` is built there, this line
+                     // comes off in the same commit — a blanket `allow`
+                     // over 2500 lines hides the code that really is
+                     // dead, including whatever is added later.
 
 use std::collections::HashMap;
 
+pub mod host;
 pub mod wayland;
 pub mod x11;
 
 pub use x11::Fullscreen;
+
+/// Which window is nacelle's own — told in the terms each carrier
+/// speaks, because "our window" is not one number.
+///
+/// A carrier that is not told puts the desktop in the list of windows a
+/// person can switch to, and under [`x11::Policy::Enlarge`] tells it to
+/// go fullscreen as well. On a Wayland session there is no X11 window
+/// and nothing to tell; on an X11 session, or with
+/// `WINIT_UNIX_BACKEND=x11`, there is.
+///
+/// The Wayland carrier has no field here and cannot have one:
+/// `ext-foreign-toplevel-list-v1` mints its identifiers in the
+/// compositor and gives a client no way to ask which one is its own. So
+/// on a compositor that advertises the list, our own toplevel is in it
+/// — said out loud rather than papered over with a guess at our title
+/// or our app id. The compositor of our own, the third seat, holds the
+/// list itself and needs nobody to tell it which window is the desktop.
+///
+/// [`Host::of`] reads both out of a winit window; it is the one thing
+/// in this module that knows what a window library is, and it lives in
+/// [`host`] so that it stays behind when the rest moves to libnacelle.
+#[derive(Clone, Copy, Debug)]
+pub struct Host {
+    /// winit's own Wayland display pointer — the same one `wl_color` is
+    /// handed. None on an X11 session.
+    pub wayland_display: Option<*mut std::ffi::c_void>,
+    /// nacelle's own X11 window, under XWayland or on an X11 session.
+    /// None where the window is not an X11 one.
+    pub x11_window: Option<u32>,
+}
 
 /// A window's identity for as long as it is mapped.
 ///
@@ -276,6 +334,11 @@ pub struct Window {
     /// None where the carrier cannot say — not "board zero".
     pub board: Option<u32>,
     pub state: State,
+    /// Where the window is. Kept current in [`Backend::windows`], and
+    /// deliberately **not** part of what moves the epoch — see
+    /// [`reads_differently`]. Anything laid out from these numbers has
+    /// to read them every frame; it cannot memoise on
+    /// [`Connector::epoch`].
     pub place: Option<Place>,
 }
 
@@ -290,6 +353,45 @@ impl Window {
             place: None,
         }
     }
+
+    /// Whether two readings of one window say the same thing —
+    /// geometry excluded. See [`reads_differently`] for why.
+    pub fn reads_same(&self, other: &Window) -> bool {
+        // Destructured, not compared field by field, on purpose: a
+        // field added to `Window` stops this compiling until somebody
+        // has decided which side of the line it belongs on. A silent
+        // `&&` chain would simply stop noticing it.
+        let Window { id, title, app, board, state, place: _ } = self;
+        let Window { id: id2, title: title2, app: app2, board: board2, state: state2, place: _ } =
+            other;
+        id == id2 && title == title2 && app == app2 && board == board2 && state == state2
+    }
+}
+
+/// Whether a list just read says anything the last one did not.
+///
+/// **Geometry is not news, and that is the whole point of this
+/// function.** A window being dragged sends a `ConfigureNotify` per
+/// frame, so its rectangle really is different sixty times a second —
+/// and comparing whole [`Window`] values, geometry included, would move
+/// [`Connector::epoch`] on every one of those frames. Everything
+/// memoising on the epoch would then rebuild sixty times a second while
+/// somebody drags a window, which is the exact shape that pinned this
+/// program's CPU at 100 % once already: `theme::epoch()` answered
+/// "which bake is published", it alternated every frame on two screens
+/// of unequal height, and the font system re-read every font on disk
+/// for it (`.gap-program/usterka-cpu-desktop.md`; 100,7 % → 10,6 %).
+///
+/// What is lost by the exclusion is stated where it can be seen:
+/// [`Window::place`] is still current in [`Backend::windows`], it just
+/// does not announce itself. A reader that draws from geometry reads it
+/// every frame — which it would have to do anyway, since a rectangle
+/// that moves every frame cannot be memoised on anything.
+///
+/// One rule, shared by both carriers, so "what counts as news" is
+/// answered in one place rather than once per protocol.
+pub fn reads_differently(now: &[Window], before: &[Window]) -> bool {
+    now.len() != before.len() || now.iter().zip(before).any(|(a, b)| !a.reads_same(b))
 }
 
 /// Whoever actually talks to a compositor.
@@ -315,7 +417,13 @@ pub trait Backend {
 
     /// Fetched on demand, not on every poll: EWMH icons are megabytes
     /// of pixels sitting on a window property.
-    fn icon(&mut self, id: WindowId) -> Option<Icon>;
+    ///
+    /// `want` is the size the caller is about to draw at, in pixels,
+    /// and it decides which of the sizes an application shipped comes
+    /// back. It is an argument and not a constant here because it is an
+    /// appearance value: it comes from the row height in the theme, and
+    /// a number picked in Rust is a number no theme can change.
+    fn icon(&mut self, id: WindowId, want: u32) -> Option<Icon>;
 
     fn act(&mut self, act: Act) -> Outcome;
 }
@@ -376,15 +484,25 @@ impl Connector {
     /// (KWin 6.7.4, measured) falling through to EWMH is the difference
     /// between seeing the X11 clients and seeing nothing.
     ///
-    /// `wayland_display` is winit's own display pointer, the same one
-    /// `wl_color` is handed.
-    pub fn start(wayland_display: Option<*mut std::ffi::c_void>) -> Option<Connector> {
-        if let Some(d) = wayland_display {
+    /// The call site, when `main.rs` is free, is
+    /// `Connector::start(Host::of(&screens[0].window))` — the window,
+    /// not the display pointer `main.rs` already has to hand. Passing
+    /// [`Host::nobody`] there compiles and puts the desktop in its own
+    /// window list.
+    ///
+    /// [`Host`] is nacelle's own window, and it is an argument rather
+    /// than something a carrier could work out: the EWMH carrier reads
+    /// `_NET_CLIENT_LIST`, our own window is in it on an X11 session
+    /// like anybody else's, and a desktop that lists itself is a row
+    /// that switches to the thing you are already looking at.
+    pub fn start(host: Host) -> Option<Connector> {
+        if let Some(d) = host.wayland_display {
             if let Some(b) = wayland::Toplevels::start(d) {
                 return Some(Connector::over(Box::new(b)));
             }
         }
-        x11::Ewmh::start(x11::Policy::Observe, None).map(|b| Connector::over(Box::new(b)))
+        x11::Ewmh::start(x11::Policy::Observe, host.x11_window)
+            .map(|b| Connector::over(Box::new(b)))
     }
 
     pub fn over(back: Box<dyn Backend>) -> Connector {
@@ -399,7 +517,8 @@ impl Connector {
     }
 
     /// What to compare against last frame's. Never a clock, never a
-    /// counter of polls.
+    /// counter of polls — and never a window merely moving, which
+    /// happens every frame of every drag ([`reads_differently`]).
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -416,8 +535,10 @@ impl Connector {
         self.back.can(verb)
     }
 
-    pub fn icon(&mut self, id: WindowId) -> Option<Icon> {
-        self.back.icon(id)
+    /// `want` is the size it is about to be drawn at, which the theme
+    /// answers and this seam does not.
+    pub fn icon(&mut self, id: WindowId, want: u32) -> Option<Icon> {
+        self.back.icon(id, want)
     }
 
     pub fn act(&mut self, act: Act) -> Outcome {
@@ -473,7 +594,7 @@ mod tests {
         fn windows(&self) -> &[Window] {
             &self.list
         }
-        fn icon(&mut self, _: WindowId) -> Option<Icon> {
+        fn icon(&mut self, _: WindowId, _: u32) -> Option<Icon> {
             None
         }
         fn act(&mut self, act: Act) -> Outcome {
@@ -482,6 +603,54 @@ mod tests {
             }
             Outcome::Sent
         }
+    }
+
+    /// A carrier shaped like the real ones: it re-reads a whole list
+    /// every poll and answers news through [`reads_differently`],
+    /// which is what both `Ewmh::poll` and `Toplevels::poll` do.
+    ///
+    /// [`Toy`] cannot stand in for this — it is handed the answer — so
+    /// nothing riding on it can say whether a list that came back with
+    /// one rectangle moved counts as a change.
+    struct Carrier {
+        script: Vec<Vec<Window>>,
+        snapshot: Vec<Window>,
+    }
+
+    impl Backend for Carrier {
+        fn carrier(&self) -> &'static str {
+            "carrier"
+        }
+        fn can(&self, _: Verb) -> bool {
+            true
+        }
+        fn blind_spot(&self) -> Option<&'static str> {
+            None
+        }
+        fn poll(&mut self) -> bool {
+            if self.script.is_empty() {
+                return false;
+            }
+            let before = std::mem::replace(&mut self.snapshot, self.script.remove(0));
+            reads_differently(&self.snapshot, &before)
+        }
+        fn windows(&self) -> &[Window] {
+            &self.snapshot
+        }
+        fn icon(&mut self, _: WindowId, _: u32) -> Option<Icon> {
+            None
+        }
+        fn act(&mut self, _: Act) -> Outcome {
+            Outcome::Sent
+        }
+    }
+
+    fn window(title: &str, at: i32) -> Window {
+        let mut w = Window::new(WindowId(1));
+        w.title = title.to_string();
+        w.app = "org.kde.dolphin".to_string();
+        w.place = Some(Place { x: at, y: at, w: 800, h: 600 });
+        w
     }
 
     /// **An epoch that moves when nothing happened is the bug that
@@ -523,16 +692,117 @@ mod tests {
         assert_eq!(c.epoch(), 1, "silence after news counted as news");
     }
 
-    /// **A verb the carrier says no to must also do nothing when
-    /// asked.**
+    /// **Dragging a window must not move the epoch, for as long as the
+    /// drag lasts.**
     ///
-    /// The two are read by two different callers — `can` by whatever
-    /// decides whether to draw the control, `act` by the click — and
-    /// they are allowed to be written in two places, so only this holds
-    /// them together. A carrier that says no and then quietly obeys is
-    /// a control the interface has greyed out for no reason; one that
-    /// says yes and answers `Unsupported` is the button that does
-    /// nothing, which is the failure this whole seam exists to prevent.
+    /// This is the example the epoch's own comment gives itself, and
+    /// until this test existed nothing checked it: the carriers
+    /// compared whole [`Window`] values, [`Window::place`] included, so
+    /// a window under the pointer — a fresh rectangle per frame, per
+    /// `ConfigureNotify` — moved the epoch on every single frame. Every
+    /// reader memoising on that number would have rebuilt sixty times a
+    /// second for as long as somebody held the mouse down.
+    ///
+    /// A hundred frames and not one, because an epoch that ticks every
+    /// other frame passes a one-frame test.
+    #[test]
+    fn a_hundred_frames_of_dragging_do_not_move_the_epoch() {
+        let script: Vec<Vec<Window>> = (0..100).map(|i| vec![window("Files", i)]).collect();
+        let start = vec![window("Files", 0)];
+        let mut c = Connector::over(Box::new(Carrier { script, snapshot: start }));
+        for _ in 0..100 {
+            c.poll();
+        }
+        assert_eq!(
+            c.epoch(),
+            0,
+            "a hundred frames of a window being dragged moved the epoch — \
+             everything memoising on it rebuilds for as long as the drag lasts"
+        );
+        assert_eq!(
+            c.windows()[0].place,
+            Some(Place { x: 99, y: 99, w: 800, h: 600 }),
+            "the rectangle handed to the interface went stale — it is silent, \
+             not out of date"
+        );
+
+        // And the same carrier, on a change that IS news, still says so.
+        let mut c = Connector::over(Box::new(Carrier {
+            script: vec![vec![window("Downloads", 99)]],
+            snapshot: vec![window("Files", 99)],
+        }));
+        c.poll();
+        assert_eq!(c.epoch(), 1, "a rename was not news");
+    }
+
+    /// **What counts as news is everything about a window except where
+    /// it is.**
+    ///
+    /// The line has to be drawn somewhere, and drawn wrong in the other
+    /// direction it is worse than the bug it fixes: a window that
+    /// closed, was renamed, was minimized or moved to another board and
+    /// did not move the epoch is a list that stays wrong until
+    /// something else happens to disturb it.
+    #[test]
+    fn what_counts_as_news_is_everything_but_the_rectangle() {
+        let here = window("Files", 0);
+        let there = window("Files", 40);
+        assert!(
+            !reads_differently(std::slice::from_ref(&there), std::slice::from_ref(&here)),
+            "a window that only moved was called news"
+        );
+
+        let mut renamed = here.clone();
+        renamed.title = "Downloads".into();
+        let mut reapped = here.clone();
+        reapped.app = "org.gnome.Nautilus".into();
+        let mut boarded = here.clone();
+        boarded.board = Some(3);
+        let mut hidden = here.clone();
+        hidden.state.minimized = true;
+        let mut lit = here.clone();
+        lit.state.active = true;
+        let mut reborn = here.clone();
+        reborn.id = WindowId(2);
+        for (what, w) in [
+            ("a rename", renamed),
+            ("an app id changing", reapped),
+            ("a window moving to another board", boarded),
+            ("a window being minimized", hidden),
+            ("focus moving", lit),
+            ("a new identity on the same row", reborn),
+        ] {
+            assert!(
+                reads_differently(std::slice::from_ref(&w), std::slice::from_ref(&here)),
+                "{what} was not news — the list stays wrong until something \
+                 else disturbs it"
+            );
+        }
+
+        assert!(
+            reads_differently(&[here.clone(), here.clone()], std::slice::from_ref(&here)),
+            "a window opening was not news"
+        );
+        assert!(reads_differently(&[], std::slice::from_ref(&here)), "a window closing was not news");
+        assert!(!reads_differently(&[], &[]), "two empty lists differed");
+    }
+
+    /// **An order for a verb the toy says no to comes back
+    /// `Unsupported`, and [`Act::verb`] is what decides which verb an
+    /// order is.**
+    ///
+    /// Said narrowly on purpose. The carrier here agrees with itself by
+    /// construction — [`Toy::act`] asks its own `can` — so this cannot
+    /// and does not hold two separately written tables together. What
+    /// it does hold is the map from an order to its verb: route
+    /// [`Act::Focus`] to [`Verb::Board`] and this test goes red, which
+    /// is worth having, because that map is what decides whether a
+    /// click is allowed at all.
+    ///
+    /// The real agreement between "what is offered" and "what can be
+    /// done" is checked against the real tables, per carrier, in
+    /// `x11::tests::every_verb_ewmh_offers_has_a_request_behind_it` and
+    /// `x11::tests::ewmh_answers_the_whole_vocabulary_and_wayland_answers_a_part_of_it`.
     #[test]
     fn a_carrier_that_says_no_does_nothing_and_says_so() {
         let allowed = [Verb::Focus, Verb::Close];

@@ -49,7 +49,7 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
 
-use super::{Act, Backend, Icon, Names, Outcome, Verb, Window, WindowId};
+use super::{reads_differently, Act, Backend, Icon, Names, Outcome, Verb, Window, WindowId};
 
 /// Everything one toplevel has said since its last `done`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -238,7 +238,8 @@ impl Backend for Toplevels {
     fn blind_spot(&self) -> Option<&'static str> {
         Some(
             "this protocol lists windows and names them; it carries no state, \
-             no icon and no way to act on a window",
+             no icon, no way to act on a window, and no way for a client to \
+             tell which of the windows is its own",
         )
     }
 
@@ -264,15 +265,20 @@ impl Backend for Toplevels {
             return false;
         }
         self.feed.changed = false;
+        let before = std::mem::take(&mut self.snapshot);
         self.rebuild();
-        true
+        // The same rule as the other carrier, from the same function:
+        // news is the list reading differently. `changed` is only the
+        // bookkeeping saying it committed something, and a compositor
+        // is free to commit a window's own values back to it.
+        reads_differently(&self.snapshot, &before)
     }
 
     fn windows(&self) -> &[Window] {
         &self.snapshot
     }
 
-    fn icon(&mut self, _: WindowId) -> Option<Icon> {
+    fn icon(&mut self, _: WindowId, _: u32) -> Option<Icon> {
         // Not "no icon" — no way to ask. The app id is on the window
         // already; whoever wants an icon looks it up in the icon theme
         // and that is a job for the toolkit, not for this seam.

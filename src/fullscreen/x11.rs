@@ -45,7 +45,6 @@
 //!
 //! [`winframe`]: nacelle::object::winframe
 
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask,
@@ -54,7 +53,10 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use super::{Act, Backend, Icon, Names, Outcome, Place, State, Verb, Window, WindowId};
+use super::{
+    reads_differently, Act, Backend, Host, Icon, Names, Outcome, Place, State, Verb, Window,
+    WindowId,
+};
 
 x11rb::atom_manager! {
     Atoms:
@@ -237,12 +239,30 @@ fn route(act: Act, window: u32, atoms: &Atoms, frame: Frame) -> Step {
 /// Whether a window belongs in a list of windows a person can switch
 /// between.
 ///
-/// This is not tidiness. On the machine this branch was measured on,
+/// Three reasons to say no, and none of them is tidiness.
+///
+/// The first is that nacelle's own window is in `_NET_CLIENT_LIST` like
+/// any other client's — on an X11 session, or under
+/// `WINIT_UNIX_BACKEND=x11` — so a desktop that is not told which
+/// window is its own offers a row that switches to the thing you are
+/// already looking at. `host` is [`Host::x11_window`], and None means
+/// "no window of ours on this display", not "list everything".
+///
+/// The others were measured. On the machine this branch was written on,
 /// `_NET_CLIENT_LIST` held exactly one window — `xwaylandvideobridge`,
 /// carrying `_NET_WM_STATE_SKIP_TASKBAR` — so without the filter the
 /// whole delivered feature would show one entry, and it would be an
 /// entry nobody asked for and nobody can use.
-fn worth_listing(types: &[Atom], states: &[Atom], atoms: &Atoms) -> bool {
+fn worth_listing(
+    host: Option<u32>,
+    w: u32,
+    types: &[Atom],
+    states: &[Atom],
+    atoms: &Atoms,
+) -> bool {
+    if Some(w) == host {
+        return false;
+    }
     if states.contains(&atoms._NET_WM_STATE_SKIP_TASKBAR) {
         return false;
     }
@@ -324,7 +344,62 @@ pub struct Ewmh {
     policy: Policy,
     names: Names,
     snapshot: Vec<Window>,
-    dirty: bool,
+    /// Something happened that only reading the list again can answer.
+    relist: bool,
+    /// Something moved. Answered by two requests, not by reading every
+    /// property of every window again — see [`Ewmh::restake`].
+    moved: bool,
+}
+
+/// What to select for on the root window, by policy.
+///
+/// Watching, never redirecting: whoever manages these windows keeps the
+/// job. `SUBSTRUCTURE_NOTIFY` brings maps and unmaps, and it is
+/// everything [`Policy::Enlarge`] has ever needed. `PROPERTY_CHANGE` is
+/// the reading half — `_NET_CLIENT_LIST` and `_NET_ACTIVE_WINDOW`
+/// moving — and it is asked for only where somebody is reading.
+///
+/// The split is not decoration. A window manager rewrites both of those
+/// properties on every window change and every change of focus, so
+/// under gamescope, where nobody is building a window list at all,
+/// asking for them means every one of those events is put on the wire,
+/// woken up for, drained and thrown away. This path is meant to cost
+/// what it cost before the connector existed, and that is only true if
+/// it asks for exactly what it asked for then.
+fn root_mask(policy: Policy) -> EventMask {
+    match policy {
+        Policy::Enlarge => EventMask::SUBSTRUCTURE_NOTIFY,
+        Policy::Observe => EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE,
+    }
+}
+
+/// Whether a property changing means the list has to be read again.
+///
+/// [`Ewmh::rebuild`] asks for `PROPERTY_CHANGE` on every window it
+/// lists, which means this carrier hears everything every application
+/// writes about itself — and `_NET_WM_USER_TIME` is written on every
+/// keystroke and every click. Taking that for news costs seven round
+/// trips per window, per keypress, to produce a list that comes back
+/// identical; the epoch stays put, but the requests are paid for all
+/// the same.
+///
+/// So the answer is the properties this carrier actually reads, and
+/// nothing else. `_NET_WM_ICON` and `_NET_FRAME_EXTENTS` are read on
+/// demand and never appear in the snapshot, so they are not on this
+/// list either — an application redrawing its icon must not rebuild
+/// anything.
+fn worth_rereading(atom: Atom, atoms: &Atoms) -> bool {
+    [
+        atoms._NET_CLIENT_LIST,
+        atoms._NET_ACTIVE_WINDOW,
+        atoms._NET_WM_NAME,
+        atoms._NET_WM_STATE,
+        atoms._NET_WM_DESKTOP,
+        atoms._NET_WM_WINDOW_TYPE,
+        AtomEnum::WM_NAME.into(),
+        AtomEnum::WM_CLASS.into(),
+    ]
+    .contains(&atom)
 }
 
 impl Ewmh {
@@ -353,6 +428,12 @@ impl Ewmh {
     /// [`Policy::Enlarge`] asks for no such proof: gamescope's manager
     /// honours the fullscreen message whatever it advertises, and that
     /// path worked before this module was a connector.
+    ///
+    /// `host` is nacelle's own window ([`Host::x11_window`]), which is
+    /// neither listed nor enlarged. None means there is no window of
+    /// ours on this display — which is true on a Wayland session and
+    /// true of the hand probes below, and is not the same sentence as
+    /// "do not bother".
     pub fn start(policy: Policy, host: Option<u32>) -> Option<Ewmh> {
         let (conn, screen_num) = x11rb::connect(None).ok()?;
         let root = conn.setup().roots[screen_num].root;
@@ -363,14 +444,9 @@ impl Ewmh {
                 return None;
             }
         }
-        // Watching, never redirecting: whoever manages these windows
-        // keeps the job. SUBSTRUCTURE_NOTIFY brings maps and unmaps,
-        // PROPERTY_CHANGE brings `_NET_CLIENT_LIST` and
-        // `_NET_ACTIVE_WINDOW` moving.
         conn.change_window_attributes(
             root,
-            &ChangeWindowAttributesAux::new()
-                .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
+            &ChangeWindowAttributesAux::new().event_mask(root_mask(policy)),
         )
         .ok()?;
         conn.flush().ok()?;
@@ -382,7 +458,8 @@ impl Ewmh {
             policy,
             names: Names::new(),
             snapshot: Vec::new(),
-            dirty: false,
+            relist: false,
+            moved: false,
         };
         if policy == Policy::Observe {
             me.rebuild();
@@ -458,6 +535,12 @@ impl Ewmh {
     /// this file did nothing else. Building a window list nobody reads
     /// would be seven round trips per window per frame paid for
     /// nothing.
+    ///
+    /// Which is also to say that the two flags below belong to the
+    /// reading half. Under [`Policy::Enlarge`] nothing ever reads them,
+    /// because [`Fullscreen::poll`] calls this and not
+    /// [`Backend::poll`] — they are two booleans that stay set, and
+    /// that is the whole of it.
     fn drain(&mut self) {
         while let Ok(Some(ev)) = self.conn.poll_for_event() {
             match ev {
@@ -465,14 +548,57 @@ impl Ewmh {
                     if self.policy == Policy::Enlarge {
                         self.enlarge(e.window);
                     }
-                    self.dirty = true;
+                    self.relist = true;
                 }
-                Event::UnmapNotify(_) | Event::DestroyNotify(_) | Event::ConfigureNotify(_) => {
-                    self.dirty = true;
+                Event::UnmapNotify(_) | Event::DestroyNotify(_) => self.relist = true,
+                // A window under the pointer sends one of these per
+                // frame. Reading every property of every window sixty
+                // times a second to find out that a rectangle moved is
+                // what this second flag exists to avoid; the rectangle
+                // is answered by two requests in [`Ewmh::restake`].
+                Event::ConfigureNotify(_) => self.moved = true,
+                // Not every property is one this carrier reads.
+                // `_NET_WM_USER_TIME` arrives on every keystroke in
+                // every listed application.
+                Event::PropertyNotify(e) => {
+                    if worth_rereading(e.atom, &self.atoms) {
+                        self.relist = true;
+                    }
                 }
-                Event::PropertyNotify(_) => self.dirty = true,
                 _ => {}
             }
+        }
+    }
+
+    /// Reads where the listed windows are, and nothing else.
+    ///
+    /// Both batches of requests are put on the wire before either reply
+    /// is waited for, so this is two round trips for the whole list
+    /// rather than two per window — which is the difference that
+    /// matters, because what triggers it is a drag, once a frame.
+    ///
+    /// A window that died between the list and this request answers
+    /// nothing, and keeps the rectangle it had. It is about to leave
+    /// the list anyway.
+    fn restake(&mut self) {
+        let natives: Vec<Option<u32>> =
+            self.snapshot.iter().map(|w| self.names.native(w.id).map(|n| n as u32)).collect();
+        let sizes: Vec<_> =
+            natives.iter().map(|n| n.and_then(|w| self.conn.get_geometry(w).ok())).collect();
+        let spots: Vec<_> = natives
+            .iter()
+            .map(|n| n.and_then(|w| self.conn.translate_coordinates(w, self.root, 0, 0).ok()))
+            .collect();
+        let _ = self.conn.flush();
+        for ((win, size), spot) in self.snapshot.iter_mut().zip(sizes).zip(spots) {
+            let (Some(size), Some(spot)) = (size, spot) else { continue };
+            let (Ok(g), Ok(t)) = (size.reply(), spot.reply()) else { continue };
+            win.place = Some(Place {
+                x: t.dst_x as i32,
+                y: t.dst_y as i32,
+                w: g.width as u32,
+                h: g.height as u32,
+            });
         }
     }
 
@@ -490,12 +616,9 @@ impl Ewmh {
 
         let mut out = Vec::with_capacity(listed.len());
         for w in listed {
-            if Some(w) == self.host {
-                continue;
-            }
             let types = read32(&self.conn, w, self.atoms._NET_WM_WINDOW_TYPE);
             let states = read32(&self.conn, w, self.atoms._NET_WM_STATE);
-            if !worth_listing(&types, &states, &self.atoms) {
+            if !worth_listing(self.host, w, &types, &states, &self.atoms) {
                 continue;
             }
             // Told about this window's own property changes from now
@@ -587,27 +710,34 @@ impl Backend for Ewmh {
 
     fn poll(&mut self) -> bool {
         self.drain();
-        if !self.dirty {
-            return false;
+        if self.relist {
+            self.relist = false;
+            // The list was read whole, geometry with it.
+            self.moved = false;
+            let before = std::mem::take(&mut self.snapshot);
+            self.rebuild();
+            // News is the list coming out different, not the server
+            // having said something — and a rectangle is not part of
+            // "different" ([`reads_differently`]).
+            return reads_differently(&self.snapshot, &before);
         }
-        self.dirty = false;
-        let before = std::mem::take(&mut self.snapshot);
-        self.rebuild();
-        // News is the list coming out different, not the server having
-        // said something. X11 is chatty — a window being dragged sends
-        // a ConfigureNotify per frame — and an epoch that moved on each
-        // of those would rebuild whatever memoises on it sixty times a
-        // second.
-        self.snapshot != before
+        if self.moved {
+            self.moved = false;
+            // Where the windows are, kept current for whoever reads it
+            // every frame. Never news: this is what a drag looks like,
+            // and it looks like it sixty times a second.
+            self.restake();
+        }
+        false
     }
 
     fn windows(&self) -> &[Window] {
         &self.snapshot
     }
 
-    fn icon(&mut self, id: WindowId) -> Option<Icon> {
+    fn icon(&mut self, id: WindowId, want: u32) -> Option<Icon> {
         let native = self.names.native(id)? as u32;
-        best_icon(&read32(&self.conn, native, self.atoms._NET_WM_ICON), 64)
+        best_icon(&read32(&self.conn, native, self.atoms._NET_WM_ICON), want)
     }
 
     fn act(&mut self, act: Act) -> Outcome {
@@ -643,11 +773,10 @@ impl Fullscreen {
     /// watching for windows to enlarge. None where there is no X11
     /// window or display.
     pub fn start(window: &winit::window::Window) -> Option<Fullscreen> {
-        let host = match window.window_handle().ok()?.as_raw() {
-            RawWindowHandle::Xlib(h) => h.window as u32,
-            RawWindowHandle::Xcb(h) => h.window.get(),
-            _ => return None,
-        };
+        // One reader for "which window is ours", shared with
+        // [`Connector::start`] — the two must not be able to disagree
+        // about which window must never be enlarged.
+        let host = Host::of(window).x11_window?;
         Ewmh::start(Policy::Enlarge, Some(host)).map(Fullscreen)
     }
 
@@ -914,26 +1043,143 @@ mod tests {
     #[test]
     fn the_window_that_says_skip_taskbar_is_not_offered() {
         let a = bench();
+        let some = 0x0120_0007;
         assert!(
-            !worth_listing(&[], &[a._NET_WM_STATE_SKIP_TASKBAR], &a),
+            !worth_listing(None, some, &[], &[a._NET_WM_STATE_SKIP_TASKBAR], &a),
             "a window that asked not to be listed was listed"
         );
         assert!(
-            !worth_listing(&[a._NET_WM_WINDOW_TYPE_DOCK], &[], &a),
+            !worth_listing(None, some, &[a._NET_WM_WINDOW_TYPE_DOCK], &[], &a),
             "a panel was offered as a window to switch to"
         );
         assert!(
-            !worth_listing(&[a._NET_WM_WINDOW_TYPE_DESKTOP], &[], &a),
+            !worth_listing(None, some, &[a._NET_WM_WINDOW_TYPE_DESKTOP], &[], &a),
             "the desktop background was offered as a window"
         );
         assert!(
-            worth_listing(&[], &[], &a),
+            worth_listing(None, some, &[], &[], &a),
             "a plain window with no type at all is NORMAL and must be listed"
         );
         assert!(
-            worth_listing(&[], &[a._NET_WM_STATE_MAXIMIZED_VERT], &a),
+            worth_listing(None, some, &[], &[a._NET_WM_STATE_MAXIMIZED_VERT], &a),
             "a maximized window stopped being a window"
         );
+    }
+
+    /// **nacelle's own window is never offered as a window to switch
+    /// to, and never enlarged.**
+    ///
+    /// On an X11 session — or under `WINIT_UNIX_BACKEND=x11`, which is
+    /// one environment variable away on any machine — the desktop's own
+    /// window is in `_NET_CLIENT_LIST` exactly like every other
+    /// client's. Nothing in the properties says "this one is you": the
+    /// only way to know is to be told, which is why [`Host`] is an
+    /// argument of [`Connector::start`] and not something worked out
+    /// here.
+    ///
+    /// The second half matters as much as the first. Under
+    /// [`Policy::Enlarge`] the same number is what stops the desktop
+    /// being sent a fullscreen message about itself.
+    ///
+    /// [`Connector::start`]: super::super::Connector::start
+    #[test]
+    fn the_desktop_is_never_a_window_in_its_own_list() {
+        let a = bench();
+        let ours = 0x0120_0007;
+        let theirs = 0x0120_0008;
+        assert!(
+            !worth_listing(Some(ours), ours, &[], &[], &a),
+            "nacelle's own window was offered as a window to switch to — the \
+             row switches to the thing you are already looking at"
+        );
+        assert!(
+            worth_listing(Some(ours), theirs, &[], &[], &a),
+            "somebody else's window vanished from the list because ours was \
+             known"
+        );
+        assert!(
+            worth_listing(None, ours, &[], &[], &a),
+            "with no window of our own on this display, every window is \
+             somebody else's"
+        );
+    }
+
+    /// **The gamescope path asks the server for exactly what it asked
+    /// for before the connector existed.**
+    ///
+    /// `PROPERTY_CHANGE` on the root is the reading half:
+    /// `_NET_CLIENT_LIST` and `_NET_ACTIVE_WINDOW`, which a manager
+    /// rewrites on every window change and every change of focus. Under
+    /// [`Policy::Enlarge`] nobody builds a window list at all, so every
+    /// one of those events would be put on the wire, woken up for,
+    /// drained and dropped — a cost that is small, and that this path
+    /// promises in writing not to have.
+    #[test]
+    fn watching_for_windows_costs_less_than_reading_them() {
+        let watching = u32::from(root_mask(Policy::Enlarge));
+        let reading = u32::from(root_mask(Policy::Observe));
+        let property = u32::from(EventMask::PROPERTY_CHANGE);
+        let substructure = u32::from(EventMask::SUBSTRUCTURE_NOTIFY);
+
+        assert_eq!(
+            watching & property,
+            0,
+            "the gamescope path asked to hear about every property on the \
+             root, and nothing on that path ever reads one"
+        );
+        assert_ne!(reading & property, 0, "the reading path cannot see the client list move");
+        assert_ne!(watching & substructure, 0, "the enlarging path cannot see a window map");
+        assert_ne!(reading & substructure, 0, "the reading path cannot see a window map");
+    }
+
+    /// **Only the properties this carrier reads are worth reading the
+    /// list again for.**
+    ///
+    /// [`Ewmh::rebuild`] selects `PROPERTY_CHANGE` on every window it
+    /// lists, so this carrier hears everything every application writes
+    /// about itself. `_NET_WM_USER_TIME` is written on every keystroke
+    /// and every click: without this filter, typing in somebody else's
+    /// editor rebuilt the whole list — seven round trips per window per
+    /// keypress — to produce a list that came out identical every time.
+    /// The epoch stayed put and the requests were paid for anyway.
+    #[test]
+    fn a_keystroke_in_somebody_elses_window_does_not_reread_the_list() {
+        let a = bench();
+        // Not in the bench table at all: exactly what `_NET_WM_USER_TIME`,
+        // `_NET_WM_SYNC_REQUEST_COUNTER` or a toolkit's private property
+        // looks like from here.
+        assert!(
+            !worth_rereading(9001, &a),
+            "a property this carrier never reads sent it to read every \
+             property of every window"
+        );
+        assert!(
+            !worth_rereading(a._NET_WM_ICON, &a),
+            "an application redrawing its icon rebuilt the list — icons are \
+             fetched on demand and are not in the snapshot"
+        );
+        assert!(
+            !worth_rereading(a._NET_FRAME_EXTENTS, &a),
+            "a frame thickness changing rebuilt the list — it is read when a \
+             window is moved and never stored"
+        );
+
+        for (name, atom) in [
+            ("_NET_CLIENT_LIST", a._NET_CLIENT_LIST),
+            ("_NET_ACTIVE_WINDOW", a._NET_ACTIVE_WINDOW),
+            ("_NET_WM_NAME", a._NET_WM_NAME),
+            ("_NET_WM_STATE", a._NET_WM_STATE),
+            ("_NET_WM_DESKTOP", a._NET_WM_DESKTOP),
+            ("_NET_WM_WINDOW_TYPE", a._NET_WM_WINDOW_TYPE),
+            ("WM_NAME", AtomEnum::WM_NAME.into()),
+            ("WM_CLASS", AtomEnum::WM_CLASS.into()),
+        ] {
+            assert!(
+                worth_rereading(atom, &a),
+                "{name} is read into the snapshot and its changing was ignored \
+                 — the list would stay wrong until something else disturbed it"
+            );
+        }
     }
 
     /// **A client's icon property is a client's word, and can be a
@@ -1039,7 +1285,7 @@ mod tests {
     #[test]
     #[ignore = "needs a display; reports rather than asserts"]
     fn what_this_machine_shows() {
-        let Some(wm) = Ewmh::start(Policy::Observe, None) else {
+        let Some(wm) = Ewmh::start(Policy::Observe, Host::nobody().x11_window) else {
             println!("no display, or nobody claims to be an EWMH window manager");
             return;
         };
@@ -1130,7 +1376,7 @@ mod tests {
         conn.map_window(win).expect("map").check().expect("map");
         conn.flush().expect("flush");
 
-        let Some(mut wm) = Ewmh::start(Policy::Observe, None) else {
+        let Some(mut wm) = Ewmh::start(Policy::Observe, Host::nobody().x11_window) else {
             let _ = conn.destroy_window(win);
             let _ = conn.flush();
             println!("nobody claims to be an EWMH window manager");
