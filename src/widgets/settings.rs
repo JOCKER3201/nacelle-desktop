@@ -33,6 +33,13 @@
 //! indent says, and the deeper the sections go the worse that trade
 //! gets.
 //!
+//! THE FOLD IS A STATE OF ITS OWN and every section comes up SHUT
+//! ([`Settings::rail_open`], owner's reports 1 and 2 of 2026-08-18). A
+//! press on a section turns its fold over and goes nowhere; the entries
+//! it reveals are the doors. It was the VIEW read a second way until
+//! then — which made the rail open on the section the window opens on
+//! and left that section's own entry with nothing it could do.
+//!
 //! The layout is FLEX, and on ONE measurement: WIDTH. Where the two
 //! panels cannot both have their width — `settings.col_min_w` for the
 //! page, with the usual device-px floor ([`Panes::of`]) — the whole
@@ -184,26 +191,42 @@ fn chrome_of(v: View) -> Chrome {
     }
 }
 
-/// Which number of the editor's colour a track moves.
+/// Which single number of the editor a track moves.
 ///
-/// The theme writes colours as `oklch(L, C, H)`, so a colour is three
-/// numbers and a slider moves one of them. Named rather than indexed
-/// because a swapped pair would be a colour that is merely wrong instead
-/// of a compile error.
+/// NO COLOUR IS ON THIS LIST ANY MORE (owner, ZGŁOSZENIE 4, 2026-08-18).
+/// It used to hold thirty-nine of them — three tracks apiece for the
+/// border, the two glass quads, the accent, a severity role, the focus
+/// ring, three menu tokens, three tooltip tokens and the scrollbar's
+/// groove — because the theme writes a colour as `oklch(L, C, H)` and
+/// three tracks is the shape of that value. Three tracks is a poor way to
+/// CHOOSE one, though, and every one of the thirteen is a
+/// [`Ctrl::Picker`] now ([`PickerId`]). What is left here is what a track
+/// is genuinely good at: one number along one axis, with two ends and a
+/// middle.
+///
+/// Named rather than indexed because a swapped pair would be a value that
+/// is merely wrong instead of a compile error.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Knob {
-    EdgeL,
-    EdgeC,
-    EdgeH,
-    /// The glass TINT — the multiply quad, the one that can only darken.
-    TintB,
-    TintS,
-    TintH,
-    /// The glass WASH — the alpha-over quad, the only one that brightens.
-    WashB,
-    WashS,
-    WashH,
-    /// The whole effect's opacity, every kind.
+    /// The BORDER's own thickness — `border.edge.width`, ZGŁOSZENIE 6's
+    /// first reading of "promień borderu". NOT `stroke.hair`, which is
+    /// the global kerf 72 derivations share and which this page already
+    /// offers under HAIRLINE.
+    EdgeWidth,
+    /// How far a lit border's light reaches — `glow.panel_edge.radius`,
+    /// the second reading. Only on screen with a kind that lights
+    /// (`Row::when`), because a reach for a light nobody draws is a
+    /// question about nothing.
+    GlowReach,
+    /// The whole effect's opacity, every kind — and the editor's ONE
+    /// transparency, standing on BOTH pages since 2026-08-18.
+    ///
+    /// HOW FAR IT REACHES IS THE PAGE'S, not this knob's: on BASIC the
+    /// alpha lands on the object's own bed alone (the owner's ZGŁOSZENIE
+    /// 7), on ADVANCED it dresses every reachable rung as it always did.
+    /// Both are written from one field, so the two pages can never be
+    /// showing different numbers for one thing — the answer is in
+    /// [`Settings::editor_edits`], where the kind is already known.
     BgOpacity,
     /// The blur pyramid depth, BLUR and FROSTED.
     BgDepth,
@@ -211,11 +234,6 @@ enum Knob {
     BgCoverage,
     // ---- the whole-theme groups (2026-08-16): one knob per number the
     // ---- model in theme/edit.rs takes, nothing that has no set to join.
-    /// The one seed the interface re-derives itself from
-    /// (`palette.accent`, written opaque by the model).
-    AccentB,
-    AccentS,
-    AccentH,
     /// The surface ladder's own hue, degrees — only while OWN HUE is on;
     /// off, the set writes the reference `@hue.accent` back instead.
     SurfHue,
@@ -229,10 +247,6 @@ enum Knob {
     TextLift,
     /// `text.chroma`, the text ladder's ceiling likewise.
     TextChroma,
-    /// The chosen severity role's author colour (`severity.<role>.text`).
-    SevB,
-    SevS,
-    SevH,
     /// The three preset radii and the two counts of the shape set —
     /// radii on 0..100 tracks over the model's 4u wall, the kerf over
     /// its 1u wall, segments a bare 3..16.
@@ -245,9 +259,6 @@ enum Knob {
     /// walls (width/offset 2u, dash/gap open-ended — 4u of track).
     RingW,
     RingOffset,
-    RingB,
-    RingS,
-    RingH,
     RingDash,
     RingGap,
     /// `glow.focus_ring.alpha`, 0..1.
@@ -256,35 +267,14 @@ enum Knob {
     /// track's own range (30..100).
     UnfocusedDim,
     /// The context menu's four tokens: bed, ring, ring width, hint ink.
-    MenuFillB,
-    MenuFillS,
-    MenuFillH,
-    MenuEdgeB,
-    MenuEdgeS,
-    MenuEdgeH,
     MenuEdgeW,
-    MenuHintB,
-    MenuHintS,
-    MenuHintH,
     /// The tooltip's four, the menu's sibling float.
-    TipFillB,
-    TipFillS,
-    TipFillH,
-    TipEdgeB,
-    TipEdgeS,
-    TipEdgeH,
     TipEdgeW,
-    TipTextB,
-    TipTextS,
-    TipTextH,
     /// The scrollbar's widths (0..100 over 0.5u..4u), its fade
     /// (0..100 over 0..2000ms) and the groove's colour.
     BarW,
     BarWHover,
     BarFade,
-    BarTrackB,
-    BarTrackS,
-    BarTrackH,
     // ---- BASIC's three knobs stood here from 2026-08-17 to
     // ---- 2026-08-18: a rotation, a multiplier and an offset over the
     // ---- ten authors. The MOVE they wrote is still exactly what that
@@ -391,6 +381,9 @@ enum Act {
     /// ([`Ctrl::Cycle`] with two members is a toggle that says its own
     /// state, which a bare switch could not).
     EditorMode,
+    /// BASIC's corner SIZE, stepped through the master's own named scale
+    /// — see [`corner_step_word`].
+    EditorCornerStep,
     /// One of the theme editor's colour tracks.
     EditorTrack(Knob),
     /// One of the theme editor's switches ([`Flip`]).
@@ -413,17 +406,24 @@ enum Act {
     /// the row of the user's own. One act with a part inside it would
     /// have been shorter and would have put the same focus id on seven
     /// rects.
-    PickerField,
-    PickerValue,
-    PickerFormat,
+    ///
+    /// AND EACH OF THE SEVEN NAMES ITS PICKER ([`PickerId`]), since
+    /// 2026-08-18 — the owner asked for a picker at EVERY place a colour
+    /// is chosen, and there are fourteen of them. The alternative was one
+    /// picker and a "which colour is it standing on" field somewhere
+    /// else, which is the same fault the rail's fold had: two facts that
+    /// can disagree, and no half able to notice.
+    PickerField(PickerId),
+    PickerValue(PickerId),
+    PickerFormat(PickerId),
     /// The value written out. It has an act so it is a TARGET — a place
     /// the Tab chain lands and a rect the pointer can find — before it
     /// can be typed into; what a press does there is the next stage's
     /// (a caret in this plate, `object::text_input`).
-    PickerText,
-    PickerBase(usize),
-    PickerCustom(usize),
-    PickerAdd,
+    PickerText(PickerId),
+    PickerBase(PickerId, usize),
+    PickerCustom(PickerId, usize),
+    PickerAdd(PickerId),
     FamilyBtn(Sect),
     WeightBtn(Sect),
     FamilyPick(Sect, usize),
@@ -509,30 +509,18 @@ fn focus_id(act: Act) -> FocusId {
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
         EditorMode => FocusId::of("settings.editor.mode"),
+        EditorCornerStep => FocusId::of("settings.editor.corner.step"),
         EditorTrack(k) => FocusId::of(match k {
-            Knob::EdgeL => "settings.editor.edge.l",
-            Knob::EdgeC => "settings.editor.edge.c",
-            Knob::EdgeH => "settings.editor.edge.h",
-            Knob::TintB => "settings.editor.tint.b",
-            Knob::TintS => "settings.editor.tint.s",
-            Knob::TintH => "settings.editor.tint.h",
-            Knob::WashB => "settings.editor.wash.b",
-            Knob::WashS => "settings.editor.wash.s",
-            Knob::WashH => "settings.editor.wash.h",
+            Knob::EdgeWidth => "settings.editor.border.width",
+            Knob::GlowReach => "settings.editor.border.glow_reach",
             Knob::BgOpacity => "settings.editor.bg.opacity",
             Knob::BgDepth => "settings.editor.bg.depth",
             Knob::BgCoverage => "settings.editor.bg.coverage",
-            Knob::AccentB => "settings.editor.accent.b",
-            Knob::AccentS => "settings.editor.accent.s",
-            Knob::AccentH => "settings.editor.accent.h",
             Knob::SurfHue => "settings.editor.surface.hue",
             Knob::SurfLift => "settings.editor.surface.lift",
             Knob::SurfChroma => "settings.editor.surface.chroma",
             Knob::TextLift => "settings.editor.text.lift",
             Knob::TextChroma => "settings.editor.text.chroma",
-            Knob::SevB => "settings.editor.severity.b",
-            Knob::SevS => "settings.editor.severity.s",
-            Knob::SevH => "settings.editor.severity.h",
             Knob::CornerSm => "settings.editor.corner.sm",
             Knob::CornerMd => "settings.editor.corner.md",
             Knob::CornerLg => "settings.editor.corner.lg",
@@ -540,39 +528,15 @@ fn focus_id(act: Act) -> FocusId {
             Knob::Hairline => "settings.editor.stroke.hair",
             Knob::RingW => "settings.editor.ring.w",
             Knob::RingOffset => "settings.editor.ring.offset",
-            Knob::RingB => "settings.editor.ring.b",
-            Knob::RingS => "settings.editor.ring.s",
-            Knob::RingH => "settings.editor.ring.h",
             Knob::RingDash => "settings.editor.ring.dash",
             Knob::RingGap => "settings.editor.ring.gap",
             Knob::HaloAlpha => "settings.editor.ring.halo_alpha",
             Knob::UnfocusedDim => "settings.editor.focus.dim",
-            Knob::MenuFillB => "settings.editor.menu.fill.b",
-            Knob::MenuFillS => "settings.editor.menu.fill.s",
-            Knob::MenuFillH => "settings.editor.menu.fill.h",
-            Knob::MenuEdgeB => "settings.editor.menu.edge.b",
-            Knob::MenuEdgeS => "settings.editor.menu.edge.s",
-            Knob::MenuEdgeH => "settings.editor.menu.edge.h",
             Knob::MenuEdgeW => "settings.editor.menu.edge.w",
-            Knob::MenuHintB => "settings.editor.menu.hint.b",
-            Knob::MenuHintS => "settings.editor.menu.hint.s",
-            Knob::MenuHintH => "settings.editor.menu.hint.h",
-            Knob::TipFillB => "settings.editor.tooltip.fill.b",
-            Knob::TipFillS => "settings.editor.tooltip.fill.s",
-            Knob::TipFillH => "settings.editor.tooltip.fill.h",
-            Knob::TipEdgeB => "settings.editor.tooltip.edge.b",
-            Knob::TipEdgeS => "settings.editor.tooltip.edge.s",
-            Knob::TipEdgeH => "settings.editor.tooltip.edge.h",
             Knob::TipEdgeW => "settings.editor.tooltip.edge.w",
-            Knob::TipTextB => "settings.editor.tooltip.text.b",
-            Knob::TipTextS => "settings.editor.tooltip.text.s",
-            Knob::TipTextH => "settings.editor.tooltip.text.h",
             Knob::BarW => "settings.editor.scrollbar.w",
             Knob::BarWHover => "settings.editor.scrollbar.w_hover",
             Knob::BarFade => "settings.editor.scrollbar.fade",
-            Knob::BarTrackB => "settings.editor.scrollbar.track.b",
-            Knob::BarTrackS => "settings.editor.scrollbar.track.s",
-            Knob::BarTrackH => "settings.editor.scrollbar.track.h",
         }),
         EditorFlip(f) => FocusId::of(match f {
             Flip::SurfaceOwnHue => "settings.editor.surface.own_hue",
@@ -605,16 +569,23 @@ fn focus_id(act: Act) -> FocusId {
         // door is no longer a row of that list — an id derived from the
         // list would now collide with its first theme.
         ThemesEditor => FocusId::of("settings.lookfeel.themes.editor"),
-        // The picker's seven, under one path: the two areas, the two
-        // plates and the cells, whose index is their id exactly as a
-        // list's rows' is.
-        PickerField => FocusId::of("settings.editor.picker.field"),
-        PickerValue => FocusId::of("settings.editor.picker.value"),
-        PickerFormat => FocusId::of("settings.editor.picker.format"),
-        PickerText => FocusId::of("settings.editor.picker.text"),
-        PickerBase(i) => FocusId::of("settings.editor.picker.base").item(i),
-        PickerCustom(i) => FocusId::of("settings.editor.picker.custom").item(i),
-        PickerAdd => FocusId::of("settings.editor.picker.add"),
+        // The picker's seven, under one path each, DERIVED BY THE PICKER
+        // THEY BELONG TO: `item` is a child id and it chains, so a part
+        // is `<part path> -> which picker -> which cell` and fourteen
+        // pickers can stand on one page without two of them sharing a
+        // ring. The index is the picker's place in [`PickerId::ALL`],
+        // which is a declaration order like a list's rows'.
+        PickerField(p) => FocusId::of("settings.editor.picker.field").item(p.idx()),
+        PickerValue(p) => FocusId::of("settings.editor.picker.value").item(p.idx()),
+        PickerFormat(p) => FocusId::of("settings.editor.picker.format").item(p.idx()),
+        PickerText(p) => FocusId::of("settings.editor.picker.text").item(p.idx()),
+        PickerBase(p, i) => {
+            FocusId::of("settings.editor.picker.base").item(p.idx()).item(i)
+        }
+        PickerCustom(p, i) => {
+            FocusId::of("settings.editor.picker.custom").item(p.idx()).item(i)
+        }
+        PickerAdd(p) => FocusId::of("settings.editor.picker.add").item(p.idx()),
         LookFeelReset => FocusId::of("settings.lookfeel.reset"),
         LookFeelResetConfirm => FocusId::of("settings.lookfeel.reset.confirm"),
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
@@ -884,13 +855,15 @@ fn hsv_track_of(c: nacelle::theme::Color) -> [u32; 3] {
     ]
 }
 
-/// A slider triple back to a colour: the inverse of [`hsv_track_of`], and
+/// An HSV track back to a colour: the inverse of [`hsv_track_of`], and
 /// the ONE map this way for the reason there is one map the other.
 ///
-/// The three readers are the write-out (`editor_edits`, where a track
-/// becomes a value in the file), BASIC's fold, which carries a track the
-/// three sliders moved but do not author, and the tests that measure
-/// either.
+/// The readers are the write-out (`editor_edits`, where a track becomes a
+/// value in the file), BASIC's fold, which carries a track BASIC's move
+/// touched but does not author, the SEEDING OF THE PICKERS
+/// ([`Settings::seed_pickers_from_tracks`], since 2026-08-18 — a control
+/// has to open on the value it stands for), and the tests that measure
+/// any of them.
 ///
 /// THE DECODE IS PART OF THE MAP. The tracks hold an sRGB-ENCODED colour
 /// and OKLCh is defined over LINEAR light, so the trip is HSV -> sRGB ->
@@ -1276,7 +1249,7 @@ enum ListId {
     /// The editor's background kind — the same arrangement as `Borders`,
     /// over the three shapes a surface's back can take.
     Backgrounds,
-    /// The severity role the three sliders under it pin — §5.10's closed
+    /// The severity role the picker under it pins — §5.10's closed
     /// set, offered whole because each role is its own author token.
     Severities,
     /// The one corner shape the whole interface wears (`corner.mode`) —
@@ -1390,16 +1363,95 @@ impl ListId {
 /// directions of the seam go through it — what the drawing registers,
 /// what the hit map records and what the description says the page
 /// offers — so the three cannot name the same rect differently.
-fn picker_act(part: nacelle::object::color_picker::Part) -> Act {
+/// WHICH colour a picker on the page is pointing at.
+///
+/// The owner's ZGŁOSZENIE 4, 2026-08-18: "the picker is to be everywhere
+/// there are colours, ADVANCED included". ADVANCED asked for a colour with
+/// THREE SLIDERS — brightness, saturation, hue — thirteen times over, and
+/// three tracks is the shape of the VALUE and not a way of choosing one.
+/// Every one of those thirteen is a picker now, and BASIC's is the
+/// fourteenth.
+///
+/// WHAT EACH ONE IS ANCHORED TO. `Tone` is BASIC's and stands alone: it
+/// writes no field of this window, it writes a RELATIVE MOVE
+/// ([`Settings::set_tone_from_picker`]), because the whole of BASIC is
+/// "how far from what the theme already says". The other thirteen each
+/// stand on the `[u32; 3]` HSV track the three sliders used to write, and
+/// that is deliberate rather than lazy: `editor_edits` reads those arrays
+/// and knows nothing about controls, so the page's meaning did not move
+/// when its controls did.
+///
+/// AND THE STATE OF A PICKER IS A MODEL, NOT A NUMBER, which is why the
+/// window keeps fourteen [`nacelle::object::color_picker::Picker`]s beside
+/// the tracks instead of rebuilding one from the track each frame: the
+/// object holds the hue a drag onto the grey axis would otherwise lose,
+/// and a colour with no chroma has to remember which way it came from or
+/// the field's cursor jumps to red the moment a hand crosses the middle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PickerId {
+    /// BASIC's ONE question — the theme colour.
+    Tone,
+    /// The border's colour, both lit kinds included: the halo has none of
+    /// its own (`theme::edit::Border`).
+    Edge,
+    /// The glass TINT — the multiply quad, which can only darken.
+    Tint,
+    /// The glass WASH — the alpha-over quad, the only one that brightens,
+    /// and what SOLID reads its colour from.
+    Wash,
+    /// `palette.accent`, ADVANCED's own hand on the one seed.
+    Accent,
+    /// The CHOSEN severity role's author colour. Which role that is, is
+    /// the SEVERITY list's answer; this picker only ever writes the one
+    /// standing, and marks it touched.
+    Severity,
+    /// The focus ring's stroke.
+    Ring,
+    MenuFill,
+    MenuEdge,
+    MenuHint,
+    TipFill,
+    TipEdge,
+    TipText,
+    /// The scrollbar's groove.
+    BarTrack,
+}
+
+impl PickerId {
+    /// Declaration order, which is what [`PickerId::idx`] and every focus
+    /// id derived from it stand on.
+    const ALL: [PickerId; 14] = [
+        PickerId::Tone,
+        PickerId::Edge,
+        PickerId::Tint,
+        PickerId::Wash,
+        PickerId::Accent,
+        PickerId::Severity,
+        PickerId::Ring,
+        PickerId::MenuFill,
+        PickerId::MenuEdge,
+        PickerId::MenuHint,
+        PickerId::TipFill,
+        PickerId::TipEdge,
+        PickerId::TipText,
+        PickerId::BarTrack,
+    ];
+
+    fn idx(self) -> usize {
+        PickerId::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+}
+
+fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
     use nacelle::object::color_picker::Part;
     match part {
-        Part::Field => Act::PickerField,
-        Part::Value => Act::PickerValue,
-        Part::Format => Act::PickerFormat,
-        Part::Text => Act::PickerText,
-        Part::Base(i) => Act::PickerBase(i),
-        Part::Custom(i) => Act::PickerCustom(i),
-        Part::Add => Act::PickerAdd,
+        Part::Field => Act::PickerField(id),
+        Part::Value => Act::PickerValue(id),
+        Part::Format => Act::PickerFormat(id),
+        Part::Text => Act::PickerText(id),
+        Part::Base(i) => Act::PickerBase(id, i),
+        Part::Custom(i) => Act::PickerCustom(id, i),
+        Part::Add => Act::PickerAdd(id),
     }
 }
 
@@ -1466,7 +1518,10 @@ enum Ctrl {
     /// the disclosure triangle that promises them, and the entries
     /// themselves, which stand under it — one `settings.rail_indent`
     /// in, propped against `settings.rail_guide_*` — while the section
-    /// is the one in force.
+    /// stands UNFOLDED ([`Settings::rail_open`]). Which it is standing
+    /// on the page it belongs to has nothing to do with, since
+    /// 2026-08-18: the fold is a state of its own that a press turns
+    /// over, not the view read a second way.
     ///
     /// THE PAGES ARE A FIELD OF THE ROW AND NOT A SECOND TABLE. A
     /// lookup keyed by the act (which is what the second column was)
@@ -1519,12 +1574,13 @@ enum Ctrl {
     /// It takes no `get`/`set` pair either, and that is deliberate
     /// rather than lazy: the picker is a MODEL and not a number
     /// ([`color_picker::Picker`] keeps the hue a drag onto the grey
-    /// axis would otherwise lose), so the window owns one and the row
-    /// says which questions it answers. When a second picker joins,
-    /// this variant grows a slot to name which one — and not a
-    /// closure returning a colour, or the hue would be lost on the way
-    /// through.
-    Picker,
+    /// axis would otherwise lose), so the window owns one per control
+    /// and the row says WHICH — and not a closure returning a colour,
+    /// or the hue would be lost on the way through. The slot is the one
+    /// this variant's own comment promised when a second picker joined,
+    /// and on 2026-08-18 thirteen of them did (owner, ZGŁOSZENIE 4: a
+    /// picker everywhere a colour is chosen, ADVANCED included).
+    Picker(PickerId),
 }
 
 impl Ctrl {
@@ -1624,6 +1680,80 @@ const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
 fn bg_chosen(s: &Settings) -> bool {
     s.current_background.is_some()
 }
+
+/// Whether the border kind standing is one that LIGHTS. The condition on
+/// BASIC's GLOW REACH row: LINE draws no light, so how far its light goes
+/// is a question about nothing (`Row::when`, and not a greyed-out row —
+/// the owner asked for absent).
+fn border_lit(s: &Settings) -> bool {
+    matches!(s.current_border.as_deref(), Some("GLOW") | Some("NEON"))
+}
+
+/// Whether the corner cut standing is one that has a SIZE. The condition
+/// on BASIC's CORNER SIZE row.
+///
+/// `SQUARE` is the one cut with nothing to measure: a square corner is the
+/// absence of a corner treatment, and every radius the theme states is
+/// simply not taken. ROUND and CHAMFER both consume all three radii
+/// (`corner.sm/md/lg`), so both wear the control.
+///
+/// A list NEVER TOUCHED (`None`) shows the row: the seeding puts the
+/// theme's own `corner.mode` in this field on the way in, so `None` here
+/// means a page that has not been seeded at all, and hiding a control on
+/// that ground would be hiding it because we do not know rather than
+/// because there is nothing to ask.
+fn corner_sized(s: &Settings) -> bool {
+    let _ = s; true
+}
+
+/// The word BASIC's CORNER SIZE row is showing, DERIVED from the radii
+/// rather than remembered beside them.
+///
+/// THE SCALE, AND WHY IT IS A SCALE. `[corner]` is a NAMED ladder —
+/// `none`, `sm`, `md`, `lg`, `pill` — and 41 `@corner.*` references
+/// through the master reach it BY NAME. A free number here would have
+/// answered the owner's question ("wielkość zaokrąglenia") and drifted
+/// away from those names the moment it was moved: `corner.sm` would be a
+/// key whose name said "small" and whose value was whatever a drag left.
+/// So the control names a STEP and the value is the theme's own number
+/// for that step. Nothing about a look is decided in this file — the
+/// three numbers come from [`Settings::corner_seed`], which is read off
+/// the theme when the editor opens.
+///
+/// WHAT ONE STEP MEANS: the whole interface wears it. BASIC's rule is
+/// "one move to the whole thing" (`.gap-program/audyt-basic.md` §3), and
+/// the three-way split between a badge, a panel and a modal is exactly
+/// the "what should this one token do" question ADVANCED answers with its
+/// CORNER SM / MD / LG. Choosing SMALL here says every corner on the
+/// screen is the theme's own small; the ladder is still there, on the
+/// other page, untouched.
+///
+/// `pill` is deliberately NOT a step of this control. It is a SENTINEL
+/// word, not a length — it bakes to -2.0, "half the shorter side" — so a
+/// track that carries whole units cannot express it and a step that
+/// pretended to would be writing a number where the file wants a word.
+/// The same reason [`nacelle::theme::edit::shape_edits`] leaves it alone.
+///
+/// AS WRITTEN is first, and it is the answer whenever the three radii
+/// stand exactly where the theme put them — including the case where a
+/// theme's own ladder is flat, which is why it is tested before the three.
+fn corner_step_word(s: &Settings) -> String {
+    if [s.corner_sm, s.corner_md, s.corner_lg] == s.corner_seed {
+        return CORNER_STEPS[0].to_string();
+    }
+    for (i, seed) in s.corner_seed.iter().enumerate() {
+        if [s.corner_sm, s.corner_md, s.corner_lg] == [*seed; 3] {
+            return CORNER_STEPS[i + 1].to_string();
+        }
+    }
+    // ADVANCED's three tracks can put the radii anywhere; the word says so
+    // rather than naming a step the radii are not on.
+    "CUSTOM".to_string()
+}
+
+/// The words [`corner_step_word`] cycles through. Index 0 is the theme's
+/// own ladder; 1..=3 are its three named steps, in the master's order.
+const CORNER_STEPS: [&str; 4] = ["AS WRITTEN", "SMALL", "MEDIUM", "LARGE"];
 fn bg_blurs(s: &Settings) -> bool {
     matches!(s.current_background.as_deref(), Some("BLUR") | Some("FROSTED GLASS"))
 }
@@ -1644,7 +1774,7 @@ fn bg_solid_or_frosted(s: &Settings) -> bool {
 fn surface_own(s: &Settings) -> bool {
     s.surface_own_hue
 }
-/// A severity role stands in the list: the three sliders pin ITS author.
+/// A severity role stands in the list: the picker under it pins ITS author.
 fn severity_chosen(s: &Settings) -> bool {
     s.current_severity.is_some()
 }
@@ -2191,8 +2321,8 @@ static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
 /// every sentence the old page's head made is still true of this one:
 ///
 /// The model turns the move into edits to the AUTHORS everything else is
-/// derived from (`theme::edit::tone_edits` — `palette.accent`, the seven
-/// `severity.<role>.text`, `surface.lift` and `text.lift`), and the
+/// derived from (`theme::edit::tone_edits` — `palette.accent`, the
+/// palette's three grounds, `surface.lift` and `text.lift`), and the
 /// cascade does what it already does. Being RELATIVE is what leaves
 /// every difference the theme's author wrote exactly where it was: it
 /// keeps a theme from flattening into one colour, and it makes ONE HUE
@@ -2219,26 +2349,99 @@ static EDITOR_MODE_ROWS: [Row; 1] = [row(Ctrl::Cycle {
 /// whichever band drew them, so a kind chosen here shows in the preview
 /// and lands in the file with nothing added to the builder.
 ///
-/// What does NOT follow them here are the knobs that hang off a kind on
-/// ADVANCED. The owner asked for the KIND of the background and not for
-/// its colour, and BASIC has a second reason besides: its move already
-/// carries the window body's bed, which the theme writes as an absolute
-/// colour ([`Settings::editor_edits`], `carry`) — a TINT or WASH slider
-/// on this page would land that shift on top of itself.
-static EDITOR_BASIC_ROWS: [Row; 8] = [
+/// WHAT STILL DOES NOT FOLLOW THEM HERE are the kinds' COLOUR knobs. The
+/// owner asked for the KIND of the background and not for its colour, and
+/// BASIC has a second reason besides: its move already carries the window
+/// body's bed, which the theme writes as an absolute colour
+/// ([`Settings::editor_edits`], `carry`) — a TINT or WASH picker on this
+/// page would land that shift on top of itself. The four numbers below
+/// are not colours: three are lengths and one is an alpha, and none of
+/// them is carried by the tone move.
+///
+/// AND FOUR NUMBERS UNDER THE KINDS (owner, ZGŁOSZENIE 6 and 7,
+/// 2026-08-18). A kind alone was half an answer and the owner said so:
+/// picking ROUND on a theme whose radii are near zero changes nothing
+/// visible, and picking GLOW gave one reach with no say in it. Each of
+/// the four appears WITH the thing it belongs to and is ABSENT otherwise
+/// — `Row::when` and not a greyed-out row, which is what the owner asked
+/// for in as many words ("nie wyszarzonej, tylko nieobecnej"):
+///
+/// * BORDER WIDTH — always, because every kind draws a line.
+/// * GLOW REACH — with GLOW and NEON ([`border_lit`]).
+/// * OPACITY — with a background kind chosen ([`bg_chosen`]). The SAME
+///   control ADVANCED wears, writing the same field, exactly as the three
+///   lists are the same control on both pages. What differs is HOW FAR IT
+///   REACHES, which is ZGŁOSZENIE 7 and is answered in
+///   [`Settings::editor_edits`], not here.
+/// * CORNER SIZE — with a cut that has a size ([`corner_sized`]).
+static EDITOR_BASIC_ROWS: [Row; 12] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
-    row(Ctrl::Picker),
+    row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
+    row(Ctrl::Slider {
+        label: "BORDER WIDTH",
+        act: Act::EditorTrack(Knob::EdgeWidth),
+        unit: Unit::None,
+        // 0..100 over 0..1u — the master's heaviest stroke is bold =
+        // 0.7u, so 1u is past every weight the file states.
+        range: (0, 100),
+        step: step_1,
+        get: |s| s.edge_width,
+        set: |s, v| {
+            s.edge_width = v;
+            s.edge_width_touched = true;
+        },
+        save: |s| s.apply_editor_preview(),
+    }),
+    row_shown(
+        Ctrl::Slider {
+            label: "GLOW REACH",
+            act: Act::EditorTrack(Knob::GlowReach),
+            unit: Unit::None,
+            // 0..100 over the master's OWN declared range for
+            // `glow.panel_edge.radius`: `u, 0u .. 4u`.
+            range: (0, 100),
+            step: step_1,
+            get: |s| s.glow_reach,
+            set: |s, v| {
+                s.glow_reach = v;
+                s.glow_reach_touched = true;
+            },
+            save: |s| s.apply_editor_preview(),
+        },
+        border_lit,
+    ),
     row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Backgrounds }),
+    row_shown(
+        Ctrl::Slider {
+            label: "OPACITY",
+            act: Act::EditorTrack(Knob::BgOpacity),
+            unit: Unit::None,
+            range: (0, 100),
+            step: step_1,
+            get: |s| s.bg_opacity,
+            set: |s, v| s.bg_opacity = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_chosen,
+    ),
     row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Corners }),
+    row_shown(
+        Ctrl::Cycle {
+            label: "CORNER SIZE",
+            get: corner_step_word,
+            act: Act::EditorCornerStep,
+        },
+        corner_sized,
+    ),
 ];
 
 /// The editor's first section. The border is one kind and one colour, and
 /// the colour is three numbers because the theme writes colours as
-/// `oklch(L, C, H)` — three sliders is the shape of the value, not a
+/// `oklch(L, C, H)` — three numbers is the shape of the value, not a
 /// choice about how many controls to offer.
 ///
 /// Neither lit kind's light has a colour of its own; both wear the line's.
@@ -2246,7 +2449,7 @@ static EDITOR_BASIC_ROWS: [Row; 8] = [
 /// the light on and shapes it rather than introducing a second thing to
 /// tint — GLOW spills the border's colour, NEON drives its core white and
 /// lets the colour live in the band just outside it, and the colour they
-/// are both made of is the one these three sliders set.
+/// are both made of is the one this picker sets.
 ///
 /// Since 2026-08-16 the page carries the WHOLE THEME: after the border
 /// and the background come one section per set of `theme/edit.rs` —
@@ -2262,39 +2465,10 @@ static EDITOR_BASIC_ROWS: [Row; 8] = [
 /// UNCHANGED by the other one: the switch above it and BASIC's three
 /// sliders are bands of their own, and the only thing that happened to
 /// these eighty-six rows is that their band now has a condition.
-static EDITOR_ROWS: [Row; 86] = [
+static EDITOR_ROWS: [Row; 69] = [
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
-    row(Ctrl::Slider {
-        label: "BRIGHTNESS",
-        act: Act::EditorTrack(Knob::EdgeL),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.edge[0],
-        set: |s, v| s.edge[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "SATURATION",
-        act: Act::EditorTrack(Knob::EdgeC),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.edge[1],
-        set: |s, v| s.edge[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "HUE",
-        act: Act::EditorTrack(Knob::EdgeH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.edge[2],
-        set: |s, v| s.edge[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row(Ctrl::Picker(PickerId::Edge)),
     // BACKGROUND: the kind, then the glass pair — TINT multiplies the
     // blurred scene (it can only darken), WASH lays over with alpha (the
     // only knob that brightens). SOLID reads its colour from the WASH
@@ -2344,66 +2518,13 @@ static EDITOR_ROWS: [Row; 86] = [
         },
         bg_frosted,
     ),
-    row_shown(Ctrl::Slider {
-        label: "TINT BRIGHTNESS",
-        act: Act::EditorTrack(Knob::TintB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tint[0],
-        set: |s, v| s.tint[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_blurs),
-    row_shown(Ctrl::Slider {
-        label: "TINT SATURATION",
-        act: Act::EditorTrack(Knob::TintS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tint[1],
-        set: |s, v| s.tint[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_blurs),
-    row_shown(Ctrl::Slider {
-        label: "TINT HUE",
-        act: Act::EditorTrack(Knob::TintH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.tint[2],
-        set: |s, v| s.tint[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_blurs),
-    row_shown(Ctrl::Slider {
-        label: "WASH BRIGHTNESS",
-        act: Act::EditorTrack(Knob::WashB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.wash[0],
-        set: |s, v| s.wash[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_solid_or_frosted),
-    row_shown(Ctrl::Slider {
-        label: "WASH SATURATION",
-        act: Act::EditorTrack(Knob::WashS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.wash[1],
-        set: |s, v| s.wash[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_solid_or_frosted),
-    row_shown(Ctrl::Slider {
-        label: "WASH HUE",
-        act: Act::EditorTrack(Knob::WashH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.wash[2],
-        set: |s, v| s.wash[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }, bg_solid_or_frosted),
+    // The two glass quads, a picker each — and each still appears only
+    // WITH the kind that has it (`Row::when`), because a colour for a
+    // quad the choice does not draw is a question about nothing.
+    row_after(Ctrl::Section { title: "TINT" }, Gap::None),
+    row_shown(Ctrl::Picker(PickerId::Tint), bg_blurs),
+    row_shown_after(Ctrl::Section { title: "WASH" }, bg_solid_or_frosted, Gap::None),
+    row_shown(Ctrl::Picker(PickerId::Wash), bg_solid_or_frosted),
     // ------------------------------------------------------------------
     // The whole-theme sections (2026-08-16): one section per set of
     // theme/edit.rs, in the model's own order. Every slider's save is
@@ -2414,36 +2535,7 @@ static EDITOR_ROWS: [Row; 86] = [
     // Three sliders because a colour is three numbers; no alpha knob,
     // because the model writes the seed opaque by force.
     row_after(Ctrl::Section { title: "ACCENT" }, Gap::None),
-    row(Ctrl::Slider {
-        label: "BRIGHTNESS",
-        act: Act::EditorTrack(Knob::AccentB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.accent[0],
-        set: |s, v| s.accent[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "SATURATION",
-        act: Act::EditorTrack(Knob::AccentS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.accent[1],
-        set: |s, v| s.accent[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "HUE",
-        act: Act::EditorTrack(Knob::AccentH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.accent[2],
-        set: |s, v| s.accent[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row(Ctrl::Picker(PickerId::Accent)),
     // SURFACES: the three meta-knobs over the six-level ladder — never
     // eighteen sliders, the rungs are §5.5's. The HUE track appears
     // with OWN HUE, because off it the set restores `@hue.accent` as a
@@ -2517,45 +2609,7 @@ static EDITOR_ROWS: [Row; 86] = [
     // untouched roles keep the theme's own words.
     row_after(Ctrl::Section { title: "SEVERITY" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Severities }),
-    row_shown(
-        Ctrl::Slider {
-            label: "BRIGHTNESS",
-            act: Act::EditorTrack(Knob::SevB),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][0]),
-            set: |s, v| s.set_severity(0, v),
-            save: |s| s.apply_editor_preview(),
-        },
-        severity_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "SATURATION",
-            act: Act::EditorTrack(Knob::SevS),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][1]),
-            set: |s, v| s.set_severity(1, v),
-            save: |s| s.apply_editor_preview(),
-        },
-        severity_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "HUE",
-            act: Act::EditorTrack(Knob::SevH),
-            unit: Unit::None,
-            range: (0, 359),
-            step: step_5,
-            get: |s| s.severity_idx().map_or(0, |i| s.severity[i][2]),
-            set: |s, v| s.set_severity(2, v),
-            save: |s| s.apply_editor_preview(),
-        },
-        severity_chosen,
-    ),
+    row_shown(Ctrl::Picker(PickerId::Severity), severity_chosen),
     // SHAPE: the corner language, its three radii, the tessellation and
     // the hairline. The sliders appear with the cut, because the model
     // writes the six as ONE set and a radius without its cut is half a
@@ -2670,45 +2724,7 @@ static EDITOR_ROWS: [Row; 86] = [
         },
         ring_dressed,
     ),
-    row_shown(
-        Ctrl::Slider {
-            label: "BRIGHTNESS",
-            act: Act::EditorTrack(Knob::RingB),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_colour[0],
-            set: |s, v| s.ring_colour[0] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dressed,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "SATURATION",
-            act: Act::EditorTrack(Knob::RingS),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_colour[1],
-            set: |s, v| s.ring_colour[1] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dressed,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "HUE",
-            act: Act::EditorTrack(Knob::RingH),
-            unit: Unit::None,
-            range: (0, 359),
-            step: step_5,
-            get: |s| s.ring_colour[2],
-            set: |s, v| s.ring_colour[2] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dressed,
-    ),
+    row_shown(Ctrl::Picker(PickerId::Ring), ring_dressed),
     row_shown(
         Ctrl::Slider {
             // 0..100 over 4u of rhythm, DASH and GAP alike — the model
@@ -2774,66 +2790,10 @@ static EDITOR_ROWS: [Row; 86] = [
     // ring width, hint ink. The colours' alphas are the SEED's and stay
     // with it: there is no opacity knob here to own the channel.
     row_after(Ctrl::Section { title: "MENU" }, Gap::None),
-    row(Ctrl::Slider {
-        label: "FILL BRIGHTNESS",
-        act: Act::EditorTrack(Knob::MenuFillB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_fill[0],
-        set: |s, v| s.menu_fill[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "FILL SATURATION",
-        act: Act::EditorTrack(Knob::MenuFillS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_fill[1],
-        set: |s, v| s.menu_fill[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "FILL HUE",
-        act: Act::EditorTrack(Knob::MenuFillH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.menu_fill[2],
-        set: |s, v| s.menu_fill[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "BORDER BRIGHTNESS",
-        act: Act::EditorTrack(Knob::MenuEdgeB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_edge[0],
-        set: |s, v| s.menu_edge[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "BORDER SATURATION",
-        act: Act::EditorTrack(Knob::MenuEdgeS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_edge[1],
-        set: |s, v| s.menu_edge[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "BORDER HUE",
-        act: Act::EditorTrack(Knob::MenuEdgeH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.menu_edge[2],
-        set: |s, v| s.menu_edge[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row_after(Ctrl::Section { title: "FILL" }, Gap::None),
+    row(Ctrl::Picker(PickerId::MenuFill)),
+    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
+    row(Ctrl::Picker(PickerId::MenuEdge)),
     row(Ctrl::Slider {
         // 0..100 over 1u; zero is a legal answer — no ring at all,
         // menu.rs's own floor.
@@ -2846,99 +2806,15 @@ static EDITOR_ROWS: [Row; 86] = [
         set: |s, v| s.menu_edge_w = v,
         save: |s| s.apply_editor_preview(),
     }),
-    row(Ctrl::Slider {
-        label: "HINT BRIGHTNESS",
-        act: Act::EditorTrack(Knob::MenuHintB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_hint[0],
-        set: |s, v| s.menu_hint[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "HINT SATURATION",
-        act: Act::EditorTrack(Knob::MenuHintS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_hint[1],
-        set: |s, v| s.menu_hint[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "HINT HUE",
-        act: Act::EditorTrack(Knob::MenuHintH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.menu_hint[2],
-        set: |s, v| s.menu_hint[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row_after(Ctrl::Section { title: "HINT" }, Gap::None),
+    row(Ctrl::Picker(PickerId::MenuHint)),
     // TOOLTIP: the menu's sibling float, the four tokens tooltip.rs
     // reads, the same arrangement row for row.
     row_after(Ctrl::Section { title: "TOOLTIP" }, Gap::None),
-    row(Ctrl::Slider {
-        label: "FILL BRIGHTNESS",
-        act: Act::EditorTrack(Knob::TipFillB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_fill[0],
-        set: |s, v| s.tip_fill[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "FILL SATURATION",
-        act: Act::EditorTrack(Knob::TipFillS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_fill[1],
-        set: |s, v| s.tip_fill[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "FILL HUE",
-        act: Act::EditorTrack(Knob::TipFillH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.tip_fill[2],
-        set: |s, v| s.tip_fill[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "EDGE BRIGHTNESS",
-        act: Act::EditorTrack(Knob::TipEdgeB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_edge[0],
-        set: |s, v| s.tip_edge[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "EDGE SATURATION",
-        act: Act::EditorTrack(Knob::TipEdgeS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_edge[1],
-        set: |s, v| s.tip_edge[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "EDGE HUE",
-        act: Act::EditorTrack(Knob::TipEdgeH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.tip_edge[2],
-        set: |s, v| s.tip_edge[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row_after(Ctrl::Section { title: "FILL" }, Gap::None),
+    row(Ctrl::Picker(PickerId::TipFill)),
+    row_after(Ctrl::Section { title: "EDGE" }, Gap::None),
+    row(Ctrl::Picker(PickerId::TipEdge)),
     row(Ctrl::Slider {
         label: "EDGE WIDTH",
         act: Act::EditorTrack(Knob::TipEdgeW),
@@ -2949,36 +2825,8 @@ static EDITOR_ROWS: [Row; 86] = [
         set: |s, v| s.tip_edge_w = v,
         save: |s| s.apply_editor_preview(),
     }),
-    row(Ctrl::Slider {
-        label: "TEXT BRIGHTNESS",
-        act: Act::EditorTrack(Knob::TipTextB),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_text[0],
-        set: |s, v| s.tip_text[0] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "TEXT SATURATION",
-        act: Act::EditorTrack(Knob::TipTextS),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_text[1],
-        set: |s, v| s.tip_text[1] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "TEXT HUE",
-        act: Act::EditorTrack(Knob::TipTextH),
-        unit: Unit::None,
-        range: (0, 359),
-        step: step_5,
-        get: |s| s.tip_text[2],
-        set: |s, v| s.tip_text[2] = v,
-        save: |s| s.apply_editor_preview(),
-    }),
+    row_after(Ctrl::Section { title: "TEXT" }, Gap::None),
+    row(Ctrl::Picker(PickerId::TipText)),
     // SCROLLBAR: the two words, the two widths, and the two switches
     // with the rows each one alone makes real — the fade is read only
     // while the bar auto-hides, the groove's colour only while the
@@ -3043,45 +2891,8 @@ static EDITOR_ROWS: [Row; 86] = [
         },
         bar_chosen,
     ),
-    row_shown(
-        Ctrl::Slider {
-            label: "TRACK BRIGHTNESS",
-            act: Act::EditorTrack(Knob::BarTrackB),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bar_track_colour[0],
-            set: |s, v| s.bar_track_colour[0] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_tracked,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "TRACK SATURATION",
-            act: Act::EditorTrack(Knob::BarTrackS),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bar_track_colour[1],
-            set: |s, v| s.bar_track_colour[1] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_tracked,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "TRACK HUE",
-            act: Act::EditorTrack(Knob::BarTrackH),
-            unit: Unit::None,
-            range: (0, 359),
-            step: step_5,
-            get: |s| s.bar_track_colour[2],
-            set: |s, v| s.bar_track_colour[2] = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_tracked,
-    ),
+    row_shown_after(Ctrl::Section { title: "TRACK" }, bar_tracked, Gap::None),
+    row_shown(Ctrl::Picker(PickerId::BarTrack), bar_tracked),
 ];
 
 /// The editor's three verbs. They were three centred rows at the far
@@ -4234,6 +4045,24 @@ enum Carrier {
 pub struct Settings {
     pub open: bool,
     view: View,
+    /// WHICH SECTIONS OF THE RAIL STAND UNFOLDED — the expander's own
+    /// state, and the answer to the owner's report of 2026-08-18: the
+    /// list came up open and pressing its entry did nothing.
+    ///
+    /// It was not a field until then. `rail_open` read
+    /// `act == rail_act(self.view)`, so the unfold was a RESTATEMENT of
+    /// which page you were on: LOOK AND FEEL is the section the window
+    /// opens on, so the rail opened unfolded, and a press on the entry
+    /// went to a page that was already in force — nothing moved, and
+    /// there was nothing that COULD move, because no state said "shut".
+    /// The reasoning behind that is at [`Settings::rail_open`], where it
+    /// is now the record of what was replaced.
+    ///
+    /// A `Vec` and not an `Option`: two sections may stand open at once
+    /// (decision (a) at [`Settings::rail_open`]), so this is a set and
+    /// the type says so. Membership is O(n) over a rail that holds ten
+    /// rows.
+    unfolded: Vec<Act>,
     /// The engine's theme names, for the THEMES list.
     themes: Vec<String>,
     layauts: Vec<String>,
@@ -4267,7 +4096,8 @@ pub struct Settings {
     tint: [u32; 3],
     /// Glass wash colour, HSV in whole slider units, like `edge`.
     wash: [u32; 3],
-    /// Effect opacity in percent, every background kind.
+    /// Effect opacity in percent, every background kind — the editor's
+    /// one transparency, driven from either page ([`Knob::BgOpacity`]).
     bg_opacity: u32,
     /// Blur pyramid depth, 1..=3.
     bg_depth: u32,
@@ -4280,7 +4110,7 @@ pub struct Settings {
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
-    /// Which of the editor's two pages is showing: BASIC's three
+    /// Which of the editor's two pages is showing: BASIC's one
     /// sliders, or the ADVANCED page that has always been here. The
     /// window keeps BOTH pages' state at all times — that is the whole
     /// of "switching modes loses no work", and the reason this is one
@@ -4296,12 +4126,23 @@ pub struct Settings {
     /// — is about a RELATIVE move and knows nothing about how a person
     /// said how far.
     tone: [u32; 3],
-    /// BASIC's colour control. A model and not a colour, because the hue
-    /// of a grey is not in the grey: drag the field's handle down to the
-    /// axis and the colour has no hue left to answer with, so the handle
-    /// must remember where it stands
-    /// ([`nacelle::object::color_picker::Picker`]).
-    picker: nacelle::object::color_picker::Picker,
+    /// EVERY colour control on the two editor pages, indexed by
+    /// [`PickerId::idx`] — BASIC's one and ADVANCED's thirteen.
+    ///
+    /// A model and not a colour, because the hue of a grey is not in the
+    /// grey: drag the field's handle down to the axis and the colour has
+    /// no hue left to answer with, so the handle must remember where it
+    /// stands ([`nacelle::object::color_picker::Picker`]).
+    ///
+    /// FOURTEEN MODELS AND NOT ONE SHARED ONE, since 2026-08-18. A single
+    /// model handed round would carry the hue of whichever control was
+    /// last touched into the next one a hand landed on, and the hue it
+    /// carried would be invisible — only a drag onto the grey axis makes
+    /// it show, which is the one case the model exists for. The BANK
+    /// (`picker_custom`) is shared on purpose and is the opposite case: a
+    /// colour put by is a colour the person wants to reach again, and
+    /// reaching it from another control is the point of putting it by.
+    pickers: [nacelle::object::color_picker::Picker; 14],
     /// The colours the user banked with the picker's own bank cell, in
     /// the order they were banked. THE WINDOW's and not the picker's:
     /// they outlive the frame the control is drawn in, and a control that
@@ -4386,6 +4227,36 @@ pub struct Settings {
     corner_lg: u32,
     corner_segments: u32,
     stroke_hair: u32,
+    /// The three radii AS THE THEME WROTE THEM, in the tracks' own units
+    /// — the scale BASIC's CORNER SIZE names its steps off
+    /// ([`corner_step_word`]).
+    ///
+    /// Kept beside the live tracks and not derived from them, because the
+    /// first press of that control makes all three equal and the ladder
+    /// would be gone: pressing SMALL and then LARGE has to reach the
+    /// theme's `corner.lg`, not the value SMALL left behind. Read once,
+    /// on the way into the editor, from the same numbers the tracks are
+    /// seeded with.
+    corner_seed: [u32; 3],
+    /// `border.edge.width` — the border's OWN thickness, 0..100 over
+    /// 0..1u, and whether a hand has moved it.
+    ///
+    /// THE MARK IS WHAT KEEPS IT OUT OF UNTOUCHED FILES. Written
+    /// unconditionally, this key would replace the master's
+    /// `@stroke.hair` REFERENCE with a literal in every theme anybody
+    /// ever saved — the §5.5 fault the severity marks exist to prevent,
+    /// and the one BASIC was caught committing on 2026-08-18.
+    edge_width: u32,
+    edge_width_touched: bool,
+    /// `glow.panel_edge.radius` — how far a lit border's light reaches,
+    /// 0..100 over the master's declared 0u..4u, and whether a hand has
+    /// moved it.
+    ///
+    /// The mark is doubly load-bearing here: an unmarked write would also
+    /// undo `edge_halo_dressed`, which exists so that a theme carrying
+    /// its own halo keeps its own numbers.
+    glow_reach: u32,
+    glow_reach_touched: bool,
     ring_style_kinds: Vec<String>,
     current_ring_style: Option<String>,
     ring_on: bool,
@@ -4658,6 +4529,10 @@ impl Settings {
         Settings {
             open: false,
             view: View::LookFeel,
+            // SHUT, which is the owner's rule for the state the window
+            // comes up in and the only state a rail can be in before
+            // anybody has pressed anything.
+            unfolded: Vec::new(),
             themes: Vec::new(),
             layauts: Vec::new(),
             sounds: Vec::new(),
@@ -4715,7 +4590,7 @@ impl Settings {
             bg_coverage: 42,
             naming: None,
             // The editor opens on ADVANCED — the page that has always
-            // been there — with BASIC's three sliders at rest and no
+            // been there — with BASIC's move at rest and no
             // seeds yet, so a BASIC page that was somehow reached before
             // `seed_editor_from_theme` ran would write nothing at all.
             editor_basic: false,
@@ -4729,7 +4604,9 @@ impl Settings {
             // neutrality rather than look — but the grey WAS on screen
             // for as long as it took somebody to reach the editor, and a
             // neutral is a choice like any other. The theme names its own.
-            picker: nacelle::object::color_picker::Picker::at_rest(),
+            pickers: std::array::from_fn(|_| {
+                nacelle::object::color_picker::Picker::at_rest()
+            }),
             picker_custom: Vec::new(),
             #[cfg(test)]
             heard: Vec::new(),
@@ -4766,6 +4643,13 @@ impl Settings {
             corner_lg: 55,
             corner_segments: 6,
             stroke_hair: 25,
+            // The same three, so an unseeded page reads AS WRITTEN rather
+            // than CUSTOM; the seeding overwrites both sides together.
+            corner_seed: [20, 30, 55],
+            edge_width: 20,
+            edge_width_touched: false,
+            glow_reach: 40,
+            glow_reach_touched: false,
             ring_style_kinds: ["SOLID", "DASHED"].iter().map(|k| k.to_string()).collect(),
             current_ring_style: None,
             ring_on: false,
@@ -4952,20 +4836,121 @@ impl Settings {
     /// behaviour every slider in this window already has, in two
     /// directions instead of one.
     ///
-    /// AND IT ENDS IN THE TONE. The colour is the picker's, but what the
-    /// theme receives is a relative move ([`Settings::set_tone_from_picker`]),
-    /// so the two are re-derived together on every step of the drag and
-    /// can never be a frame apart.
+    /// AND IT ENDS WHERE THE PICKER'S OWN PAGE KEEPS ITS ANSWER
+    /// ([`Settings::commit_picker`]) — a relative move for BASIC, the
+    /// HSV track for each of ADVANCED's thirteen — so the control and the
+    /// value it stands for are re-derived together on every step of the
+    /// drag and can never be a frame apart.
     fn set_picker_from(&mut self, act: Act, x: f32, y: f32) {
         let Some(r) = self.rect_of_act(act) else { return };
         let fx = (x - r.x) / r.w.max(1.0);
         let fy = (y - r.y) / r.h.max(1.0);
-        match act {
-            Act::PickerField => self.picker.pick_field(fx, fy),
-            Act::PickerValue => self.picker.pick_value(fy),
+        let id = match act {
+            Act::PickerField(id) => {
+                self.pickers[id.idx()].pick_field(fx, fy);
+                id
+            }
+            Act::PickerValue(id) => {
+                self.pickers[id.idx()].pick_value(fy);
+                id
+            }
             _ => return,
+        };
+        self.commit_picker(id);
+    }
+
+    /// What the page DOES with the colour one of its pickers is standing
+    /// on. The one crossing between "a control holds a colour" and "the
+    /// theme is told about it", so the two roads out of a press — a drag
+    /// and a press on a ready-made swatch — cannot answer differently.
+    ///
+    /// BASIC'S IS NOT A COLOUR, and that asymmetry is the page's, not an
+    /// accident of this function: BASIC writes how far the picked colour
+    /// is FROM the theme ([`Settings::set_tone_from_picker`]), which is
+    /// what keeps every difference the theme's author wrote. ADVANCED's
+    /// thirteen are absolute and land on the `[u32; 3]` HSV tracks
+    /// `editor_edits` has always read, through [`hsv_track_of`] — the
+    /// pair of [`oklch_of_track`], and the reason the two must stay a
+    /// pair is written there.
+    fn commit_picker(&mut self, id: PickerId) {
+        if id == PickerId::Tone {
+            self.set_tone_from_picker();
+            return;
         }
-        self.set_tone_from_picker();
+        let track = hsv_track_of(self.pickers[id.idx()].colour());
+        match id {
+            // BASIC's, handled above; named so a new picker cannot be
+            // added without deciding where its value goes.
+            PickerId::Tone => {}
+            PickerId::Edge => self.edge = track,
+            PickerId::Tint => self.tint = track,
+            PickerId::Wash => self.wash = track,
+            PickerId::Accent => self.accent = track,
+            // The role standing in the SEVERITY list, and marked touched
+            // — the mark `editor_edits` gates the write on, so the six
+            // roles nobody pointed at keep the theme's own words.
+            PickerId::Severity => {
+                for c in 0..3 {
+                    self.set_severity(c, track[c]);
+                }
+            }
+            PickerId::Ring => self.ring_colour = track,
+            PickerId::MenuFill => self.menu_fill = track,
+            PickerId::MenuEdge => self.menu_edge = track,
+            PickerId::MenuHint => self.menu_hint = track,
+            PickerId::TipFill => self.tip_fill = track,
+            PickerId::TipEdge => self.tip_edge = track,
+            PickerId::TipText => self.tip_text = track,
+            PickerId::BarTrack => self.bar_track_colour = track,
+        }
+    }
+
+    /// The colour an ADVANCED picker should be SHOWING — its track, read
+    /// back as a colour.
+    ///
+    /// `None` for BASIC's, which stands on no track of this window at
+    /// all: its handles are put on the theme's accent by
+    /// [`Settings::seed_tone_from_theme`], because BASIC's move is
+    /// measured from there.
+    fn picker_track(&self, id: PickerId) -> Option<[u32; 3]> {
+        Some(match id {
+            PickerId::Tone => return None,
+            PickerId::Edge => self.edge,
+            PickerId::Tint => self.tint,
+            PickerId::Wash => self.wash,
+            PickerId::Accent => self.accent,
+            PickerId::Severity => self.severity[self.severity_idx()?],
+            PickerId::Ring => self.ring_colour,
+            PickerId::MenuFill => self.menu_fill,
+            PickerId::MenuEdge => self.menu_edge,
+            PickerId::MenuHint => self.menu_hint,
+            PickerId::TipFill => self.tip_fill,
+            PickerId::TipEdge => self.tip_edge,
+            PickerId::TipText => self.tip_text,
+            PickerId::BarTrack => self.bar_track_colour,
+        })
+    }
+
+    /// Put every ADVANCED picker's handles on the colour its track says,
+    /// which is what makes a picker OPEN ON THE THEME the way every other
+    /// control on the page does.
+    ///
+    /// CALLED AFTER THE TRACKS ARE SEEDED AND NOT INSTEAD OF IT: the
+    /// tracks are still the value — `editor_edits` reads them and knows
+    /// nothing about controls — and this is the control catching up with
+    /// it. That is also why the SEVERITY picker is re-seeded whenever the
+    /// role list changes: the track under it is a different role's.
+    ///
+    /// A GREY TRACK KEEPS THE HANDLE'S HUE. `Picker::set_colour` is the
+    /// object's own door and it holds the hue when the colour has none,
+    /// so seeding a colourless track does not throw the field's cursor
+    /// back to red.
+    fn seed_pickers_from_tracks(&mut self) {
+        for id in PickerId::ALL {
+            let Some(track) = self.picker_track(id) else { continue };
+            let colour = nacelle::theme::Color::from_oklch(oklch_of_track(&track, 1.0));
+            self.pickers[id.idx()].set_colour(colour.to_srgb());
+        }
     }
 
     /// A wheel notch over the open window — the pointer's half of the
@@ -5038,7 +5023,7 @@ impl Settings {
         }
     }
 
-    /// BASIC's three sliders as the model's own relative move.
+    /// BASIC's picked colour as the model's own relative move.
     ///
     /// [`TONE_REST`] maps to `Tone::NEUTRAL` exactly, which is what
     /// makes "open BASIC and touch nothing" a no-op all the way to the
@@ -5159,7 +5144,7 @@ impl Settings {
             nacelle::theme::Color::from_oklch(seeds.accent).to_srgb(),
         )
         .oklch();
-        let want = self.picker.oklch();
+        let want = self.pickers[PickerId::Tone.idx()].oklch();
         let step = self.tone_step();
         // One number onto its track: rounded to a whole notch, then held
         // inside the track's own ends — the same two walls the sliders
@@ -5196,7 +5181,7 @@ impl Settings {
     /// This is what makes leaving BASIC keep its work. BASIC is
     /// RELATIVE, so its edits exist only while its band is standing;
     /// the moment the page turns, `editor_edits` stops writing them and
-    /// the ADVANCED sliders answer for the same ten authors alone. So
+    /// the ADVANCED controls answer for the same authors alone. So
     /// the move has to become THEIR value, and the model's own
     /// `ToneSeeds::shifted` is the arithmetic — the same clamps the
     /// writes use, so the fold and the preview cannot drift.
@@ -5224,7 +5209,7 @@ impl Settings {
     /// little chroma is the small loss; refusing to fold at all would
     /// lose the whole move.
     ///
-    /// Nothing outside the ten authors is touched.
+    /// Nothing outside the authors BASIC writes is touched.
     fn fold_tone_into_advanced(&mut self) {
         let Some(seeds) = self.tone_seeds else { return };
         let tone = self.tone_of();
@@ -5240,17 +5225,21 @@ impl Settings {
         let onto_tracks =
             |p| hsv_track_of(nacelle::theme::Color::from_oklch(p).to_srgb());
         self.accent = onto_tracks(moved.accent);
-        for i in 0..SEVERITY_ROLES.len() {
-            self.severity[i] = onto_tracks(moved.severity[i]);
-            // ADVANCED writes only the roles a slider TOUCHED, and the
-            // rotation moved all seven — so all seven are now the page's
-            // own words, or the next preview would put the theme's back.
-            self.severity_touched[i] = true;
-        }
+        // THE SEVEN SEVERITY ROLES USED TO BE FOLDED HERE, AND MARKED
+        // TOUCHED, AND THAT WAS THE COST OF A BUG. BASIC turned them the
+        // whole way, so every one of them had to become this page's own
+        // word or the next preview would have put the theme's back —
+        // which meant that MERELY VISITING BASIC pinned all seven into
+        // every file the editor ever saved afterwards, and a theme's own
+        // amber `contained` was gone. BASIC does not touch them any more
+        // (`theme::edit::tone_edits`): they lean toward `palette.accent`
+        // in the theme itself, so there is nothing to fold and nothing to
+        // mark, and a role only becomes this page's word when somebody
+        // points at it with the SEVERITY picker.
         self.surface_lift = span_back(moved.surface_lift, SURFACE_LIFT_WALL);
         self.text_lift = span_back(moved.text_lift, TEXT_LIFT_WALL);
         // THE BODY'S BED COMES TOO. The BACKGROUND section holds it as an
-        // absolute colour and not as one of the ten authors, so the move
+        // absolute colour and not as one of BASIC's authors, so the move
         // does not re-derive it — but the screen has been SHOWING it
         // turned (`editor_edits` carries it there), and ADVANCED has to
         // carry on from what the screen showed rather than from what the
@@ -5274,7 +5263,7 @@ impl Settings {
         self.tone = TONE_REST;
     }
 
-    /// The theme's AUTHORS as they stand, and the three sliders back at
+    /// The theme's AUTHORS as they stand, and BASIC's move back at
     /// rest — what BASIC's relative move is measured from.
     ///
     /// Read off the LIVE bake, preview included, so arriving on BASIC
@@ -5305,17 +5294,18 @@ impl Settings {
             return;
         };
         let accent = accent.to_oklch();
-        // A role whose author this build cannot read follows the accent,
-        // which is where the rotation would carry it in any case.
-        let mut severity = [accent; 7];
-        for (i, (_, token, _)) in SEVERITY_ROLES.iter().enumerate() {
-            if let Some(c) = col_of(token) {
-                severity[i] = c.to_oklch();
-            }
-        }
+        // THE THREE GROUNDS. They are what a re-colour used to leave
+        // behind — hex literals on the accent's own hue, and the only
+        // targets `shade()` and `tint()` have — so the move has to carry
+        // them, and to carry them it has to know where they stand. A
+        // ground this build cannot read falls back to the accent, which
+        // is the hue the move would put it on in any case.
+        let ground = |n: &str| col_of(n).map_or(accent, |c| c.to_oklch());
         self.tone_seeds = Some(nacelle::theme::edit::ToneSeeds {
             accent,
-            severity,
+            black: ground("palette.black"),
+            white: ground("palette.white"),
+            neutral: ground("palette.neutral"),
             surface_lift: px("surface.lift"),
             text_lift: px("text.lift"),
         });
@@ -5325,7 +5315,7 @@ impl Settings {
         // anything else would say the theme is a colour it is not, and
         // the first drag would then write that lie's distance into the
         // file.
-        self.picker.set_oklch(accent);
+        self.pickers[PickerId::Tone.idx()].set_oklch(accent);
     }
 
     /// The whole of what the editor is set to, as the token edits both the
@@ -5341,11 +5331,26 @@ impl Settings {
     /// the page the user cannot see is still in the edit.
     fn editor_edits(&self) -> Vec<nacelle::theme::edit::Edit> {
         use nacelle::theme::edit::{
-            accent_edit, border_colour_edit, border_edits, focus_ring_edits, glass_edits,
-            menu_edits, scrollbar_edits, severity_role_edit, shape_edits, surface_edits,
-            text_edits, tooltip_edits, unfocused_dim_edit, Border, CornerCut, FocusRing,
-            Glass, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
+            accent_edit, border_colour_edit, border_edits, border_width_edit,
+            focus_ring_edits, glass_edits, glow_reach_edit, menu_edits, scrollbar_edits,
+            severity_role_edit, shape_edits, surface_edits, text_edits, tooltip_edits,
+            unfocused_dim_edit, Border, CornerCut, FocusRing, Glass, GlassReach,
+            RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
+        /// ONE ASSIGNMENT PER TOKEN. A list carrying a token twice would
+        /// save a file with the key written twice in one section, and the
+        /// file and the screen would then be answering to two different
+        /// rules about which of the two wins. Used wherever a later
+        /// control has to outrank an earlier set's own seed.
+        fn set_edit(
+            edits: &mut Vec<nacelle::theme::edit::Edit>,
+            e: nacelle::theme::edit::Edit,
+        ) {
+            match edits.iter_mut().find(|b| b.token == e.token) {
+                Some(slot) => *slot = e,
+                None => edits.push(e),
+            }
+        }
         // The sliders are HSV — brightness, saturation, hue — and the file
         // wants OKLCh, so every value below crosses HSV -> sRGB -> LINEAR
         // -> OKLCh on the way out. That map is [`oklch_of_track`], written
@@ -5380,6 +5385,26 @@ impl Settings {
                 border_edits(Scope::Theme, kind, colour, self.edge_halo_dressed)
             }
         };
+        // ZGŁOSZENIE 6, BOTH READINGS OF "PROMIEŃ BORDERU", and each only
+        // once a hand has moved it (the marks are the fields', and why
+        // they exist is written there).
+        //
+        // The THICKNESS is unconditional in the kind: every border draws a
+        // line, NEON included — its colour lives in the band outside a
+        // core the line still cuts.
+        if self.edge_width_touched {
+            set_edit(&mut edits, border_width_edit(Scope::Theme, scale_of(self.edge_width, 1.0)));
+        }
+        // The REACH is a question about light, so it is only asked of a
+        // kind that lights — the same condition its row stands on, stated
+        // here too because `editor_edits` is read by SAVE and a row that
+        // is off screen must not leave a value behind. And it goes in
+        // through `set_edit`, because `border_edits` may have laid its own
+        // 1.6u floor on this very token: a number a person moved outranks
+        // a floor the model put under a switch.
+        if self.glow_reach_touched && border_lit(self) {
+            set_edit(&mut edits, glow_reach_edit(Scope::Theme, scale_of(self.glow_reach, 4.0)));
+        }
         // The background joins the same set. `None` means the list was
         // never touched and the theme's own background stands — the same
         // neutrality the border's `None` earned after verification.
@@ -5409,6 +5434,26 @@ impl Settings {
                 (true, Some(_)) => self.tone_of(),
                 _ => nacelle::theme::edit::Tone::NEUTRAL,
             };
+            // ZGŁOSZENIE 7 (owner, 2026-08-18): "w trybie BASIC zmiana
+            // przezroczystości wpływa TYLKO na główne tło obiektu".
+            //
+            // The knob is the same one on both pages — one OPACITY, one
+            // field — and what the page decides is HOW FAR its alpha
+            // travels. On ADVANCED it still dresses every reachable rung,
+            // which is the page for "what exactly should this token do"
+            // and is what keeps a menu from being the one flat plate over
+            // a frosted window. On BASIC the RANK still travels (the float
+            // is still glass) and the two colour keys — where the alpha
+            // lives — stop at the body's own rung.
+            //
+            // WHAT THIS TOOK AWAY, said plainly because a narrowing must
+            // name the tokens it orphans: on BASIC, `elev.popover.glass
+            // .tint` and `elev.popover.glass.wash` are no longer written
+            // by anything. Who sets them now — the THEME FILE, and nobody
+            // else; the master ships `#FFFFFF / 1.0` and `none`, an
+            // identity multiply and no wash. ADVANCED is unchanged.
+            let reach =
+                if self.editor_basic { GlassReach::BodyOnly } else { GlassReach::EveryRung };
             edits.extend(glass_edits(
                 Scope::Theme,
                 kind,
@@ -5417,6 +5462,7 @@ impl Settings {
                 self.bg_opacity as f32 / 100.0,
                 1.0 + self.bg_depth.min(100) as f32 / 50.0,
                 self.bg_coverage as f32 / 100.0,
+                reach,
             ));
         }
         // ---- the whole-theme sets (2026-08-16), in the model's order.
@@ -5530,22 +5576,15 @@ impl Settings {
             ));
         }
         // ---- BASIC (2026-08-17), last and over the top of the rest.
-        // The three sliders move ten AUTHORS; everything above either
+        // The one move writes AUTHORS — the accent, the palette's three
+        // grounds and the two ladder lifts; everything above either
         // agrees with them or is about something else entirely, and the
-        // ten that overlap are the ten BASIC is FOR.
+        // ones that overlap are what BASIC is FOR.
         if self.editor_basic {
             if let Some(seeds) = self.tone_seeds {
                 let tone = self.tone_of();
                 for e in nacelle::theme::edit::tone_edits(Scope::Theme, &seeds, tone) {
-                    // ONE assignment per token. A list carrying a token
-                    // twice would save a file with the key written twice
-                    // in one section, and then the file and the screen
-                    // would be answering to two different rules about
-                    // which of the two wins.
-                    match edits.iter_mut().find(|b| b.token == e.token) {
-                        Some(slot) => *slot = e,
-                        None => edits.push(e),
-                    }
+                    set_edit(&mut edits, e);
                 }
             }
         }
@@ -5648,6 +5687,15 @@ impl Settings {
         // set's own output and the halo blinked at ~5 Hz.
         self.edge_halo_dressed =
             px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
+        // ZGŁOSZENIE 6's two numbers, seeded like every other control on
+        // this page: off the theme, and MARKED UNTOUCHED, so a visit that
+        // moves neither leaves neither in the saved file. Both walls are
+        // the master's own (`[stroke] bold = 0.7u`; `panel_edge.radius`
+        // declares `0u .. 4u`), stated once here and once in the row.
+        self.edge_width = scale_back(px("border.edge.width") / unit, 1.0);
+        self.edge_width_touched = false;
+        self.glow_reach = scale_back(px("glow.panel_edge.radius") / unit, 4.0);
+        self.glow_reach_touched = false;
         self.ring_halo_dressed =
             px("glow.focus_ring.radius") > 0.0 && px("glow.focus_ring.alpha") > 0.0;
 
@@ -5778,6 +5826,10 @@ impl Settings {
         self.corner_lg = scale_back(px("corner.lg") / unit, 4.0);
         self.corner_segments = (px("corner.segments").round() as u32).clamp(3, 16);
         self.stroke_hair = scale_back(px("stroke.hair") / unit, 1.0);
+        // BASIC's named scale, off the same three numbers the tracks took
+        // — one read, so the control and the ladder can never disagree
+        // about what the theme said.
+        self.corner_seed = [self.corner_sm, self.corner_md, self.corner_lg];
         // FOCUS RING.
         self.ring_on = flag("focus.ring.enabled");
         self.current_ring_style = word("focus.ring.style").map(|w| w.to_uppercase());
@@ -5849,10 +5901,16 @@ impl Settings {
         }
         // BASIC's own seeds, off the same bake and in the same breath:
         // the two pages open on ONE theme, so whatever re-seeds one
-        // re-seeds the other. The three sliders come back to rest here,
+        // re-seeds the other. BASIC's move comes back to rest here,
         // which is what makes CANCEL and the door leave BASIC showing
         // "the theme as it stands" rather than a move already made.
         self.seed_tone_from_theme();
+        // AND THE THIRTEEN PICKERS CATCH UP WITH THE TRACKS above. Last,
+        // because they read what those lines have just written: a picker
+        // seeded before its track would open on the previous theme, and
+        // the first press on a swatch would then write that stale colour
+        // back over the new one.
+        self.seed_pickers_from_tracks();
     }
 
     /// A theme's name may be its file's name, nothing more.
@@ -5991,7 +6049,7 @@ impl Settings {
         // same pulse as the tracks below: a colour dragged across the
         // field re-bakes the desktop on the theme's pulse, not on every
         // frame.
-        if let Act::PickerField | Act::PickerValue = act {
+        if let Act::PickerField(_) | Act::PickerValue(_) = act {
             self.set_picker_from(act, x, y);
             if self.preview_pulse_due() {
                 self.apply_editor_preview();
@@ -6099,10 +6157,16 @@ impl Settings {
     /// Opens the window where the rail opens it: on LOOK AND FEEL, the
     /// first section. There is no menu to land on any more, and landing
     /// on a section means landing on a section's PAGE — so this is the
-    /// same road [`Act::OpenLookFeel`] takes, scan of the three
-    /// directories included, and not a bare `go`.
+    /// same road [`Act::OpenSets`] takes, scan of the three directories
+    /// included, and not a bare `go`. (It was `Act::OpenLookFeel`'s road
+    /// until 2026-08-18, when that act stopped being a door and became
+    /// the fold — the SECTION's own page is what opens a section now,
+    /// and it is the same page it always was.)
+    ///
+    /// The rail comes up SHUT, which [`Settings::opening`] is the one
+    /// writer of.
     pub fn show(&mut self) {
-        self.open = true;
+        self.opening();
         self.enter_look_feel();
         nacelle::sound::emit(nacelle::sound::Event::PanelOpen);
     }
@@ -6124,7 +6188,7 @@ impl Settings {
     /// Opens the settings window straight at the GRID view — used by the
     /// layout editor's SETTINGS button and its CANCEL return path.
     pub fn show_grid(&mut self) {
-        self.open = true;
+        self.opening();
         let (snap, cols, rows, pad) = config::grid_prefs();
         self.grid_snap = snap;
         self.grid_cols = cols;
@@ -6341,7 +6405,7 @@ impl Settings {
             // emitted a sound of their own anyway, so pressing the
             // notation plate or the bank cell made two clicks and
             // pressing a ready-made colour made a click and a theme.
-            Act::PickerBase(_) | Act::PickerCustom(_) => {}
+            Act::PickerBase(..) | Act::PickerCustom(..) => {}
             _ => self.say(Sfx::Click),
         }
         match act {
@@ -6380,6 +6444,30 @@ impl Settings {
                 } else {
                     self.seed_tone_from_theme();
                 }
+                self.apply_editor_preview();
+            }
+            // BASIC's CORNER SIZE: step to the next word of the master's
+            // own scale and put every radius on the theme's number for
+            // that step. Nothing about a look is decided here — the three
+            // numbers come from `corner_seed`, read off the theme.
+            //
+            // CUSTOM (ADVANCED's three tracks left the radii off every
+            // step) steps to AS WRITTEN, which is the only word that can
+            // be reached from anywhere and the only one that undoes a
+            // press without a second guess about which step was meant.
+            Act::EditorCornerStep => {
+                let now = corner_step_word(self);
+                let next = CORNER_STEPS
+                    .iter()
+                    .position(|w| *w == now)
+                    .map_or(0, |i| (i + 1) % CORNER_STEPS.len());
+                let [sm, md, lg] = match next {
+                    0 => self.corner_seed,
+                    i => [self.corner_seed[i - 1]; 3],
+                };
+                self.corner_sm = sm;
+                self.corner_md = md;
+                self.corner_lg = lg;
                 self.apply_editor_preview();
             }
             Act::EditorSaveAs => {
@@ -6423,9 +6511,14 @@ impl Settings {
                 // only ever the section the window opens on.
                 self.go(parent_view(self.view).unwrap_or(View::LookFeel))
             }
-            // The section on the rail and the first page under it: one
-            // page, reached from two entries, so one road in.
-            Act::OpenLookFeel | Act::OpenSets => self.enter_look_feel(),
+            // THE SECTION TURNS ITS FOLD OVER AND STAYS WHERE IT IS;
+            // the page under it is the door. Until 2026-08-18 the two
+            // shared this arm — one page reached from two entries —
+            // which is what left the rail's own entry with nothing to
+            // do on the page it opens the window on
+            // ([`Settings::toggle_rail`]).
+            Act::OpenLookFeel => self.toggle_rail(Act::OpenLookFeel),
+            Act::OpenSets => self.enter_look_feel(),
             Act::ListBtn(list) => {
                 let d = Dropdown::List(list);
                 self.dropdown = if self.dropdown == Some(d) {
@@ -6481,10 +6574,11 @@ impl Settings {
                         // preview the pick just sent (the border pick's
                         // verified bug, not to be re-made five more times).
                         ListId::Severities => {
-                            // Choosing a role EDITS nothing: the sliders
-                            // re-aim at the role's stored colour, and only
-                            // a slider marks it touched.
+                            // Choosing a role EDITS nothing: the picker
+                            // re-aims at the role's stored colour, and only
+                            // a press on the picker marks it touched.
                             self.current_severity = Some(name.clone());
+                            self.seed_pickers_from_tracks();
                             self.say(Sfx::Theme);
                             return false;
                         }
@@ -6586,7 +6680,7 @@ impl Settings {
             // the whole reason it is a field and not two tracks. They
             // join `dragging` like every other held control, and
             // [`Settings::drag`] is where the second coordinate is read.
-            Act::PickerField | Act::PickerValue => {
+            Act::PickerField(_) | Act::PickerValue(_) => {
                 self.dragging = Some(act);
                 self.set_picker_from(act, x, y);
                 self.apply_editor_preview();
@@ -6597,27 +6691,27 @@ impl Settings {
             // It takes the plain click from the head of this function
             // like any other button. It emitted a second one here until
             // 2026-08-18, which was audible: two clicks for one press.
-            Act::PickerFormat => self.picker.cycle_format(),
+            Act::PickerFormat(id) => self.pickers[id.idx()].cycle_format(),
             // A target, and for now nothing more: the plate is a place
             // the Tab chain lands and a rect the pointer finds, so that
             // typing into it is a change to what a press DOES and not a
             // change to the page's shape.
-            Act::PickerText => {}
+            Act::PickerText(_) => {}
             // A ready-made colour, in one press. `Base` reads the
             // THEME's grid and `Custom` the user's own, and both are
             // taken from the same lists the drawing and the hit map used.
-            Act::PickerBase(i) => {
+            Act::PickerBase(id, i) => {
                 if let Some(c) = nacelle::object::color_picker::base_colours().get(i) {
-                    self.picker.set_colour(*c);
-                    self.set_tone_from_picker();
+                    self.pickers[id.idx()].set_colour(*c);
+                    self.commit_picker(id);
                     self.apply_editor_preview();
                     self.say(Sfx::Theme);
                 }
             }
-            Act::PickerCustom(i) => {
+            Act::PickerCustom(id, i) => {
                 if let Some(c) = self.picker_custom.get(i).copied() {
-                    self.picker.set_colour(c);
-                    self.set_tone_from_picker();
+                    self.pickers[id.idx()].set_colour(c);
+                    self.commit_picker(id);
                     self.apply_editor_preview();
                     self.say(Sfx::Theme);
                 }
@@ -6629,8 +6723,8 @@ impl Settings {
             // function: whether the colour was new is answered by the
             // row growing or not, and a button that fell silent on the
             // second press would read as a button that missed it.
-            Act::PickerAdd => {
-                let c = self.picker.colour();
+            Act::PickerAdd(id) => {
+                let c = self.pickers[id.idx()].colour();
                 if !self.picker_custom.iter().any(|k| *k == c) {
                     self.picker_custom.push(c);
                 }
@@ -6949,7 +7043,7 @@ impl Settings {
                 // whatever happens to be in the middle of it, which is a
                 // colour nobody chose. The swatches are how this control
                 // is used from the keyboard today.
-                if let Act::PickerField | Act::PickerValue = act {
+                if let Act::PickerField(_) | Act::PickerValue(_) = act {
                     return KeyOut::Consumed;
                 }
                 // The CENTRE of whatever the chain is standing on, both
@@ -7417,10 +7511,10 @@ impl Settings {
             trailing = m.space(row.after);
             // An unfolded section is as tall as itself PLUS its pages,
             // measured in the box they are drawn in ([`indent_region`]).
-            // A section that is not the one in force costs nothing at
-            // all, which is the same sentence the walker says by not
-            // recursing — one rule, said twice because this file has
-            // always measured and drawn with two readers.
+            // A section standing SHUT costs nothing at all, which is the
+            // same sentence the walker says by not recursing — one rule,
+            // said twice because this file has always measured and drawn
+            // with two readers.
             //
             // A DISABLED SECTION IS SHUT, whatever the view says. R6
             // takes the row out of the frame's offering, and
@@ -7929,15 +8023,26 @@ impl Settings {
             // serves the hit map, the Tab chain and the drawing, so a
             // part that is painted is a part that can be pressed and
             // reached, and no third list can fall behind the other two.
-            Ctrl::Picker => nacelle::object::color_picker::parts(&self.picker_layout(rc))
-                .into_iter()
-                .map(|(part, r)| (r, picker_act(part)))
-                .collect(),
+            Ctrl::Picker(id) => self.picker_targets(*id, rc),
             Ctrl::Section { .. }
             | Ctrl::Note { .. }
             | Ctrl::Hint { .. }
             | Ctrl::Custom { .. } => Vec::new(),
         }
+    }
+
+    /// The parts of ONE picker, as rects and acts.
+    ///
+    /// Split out of [`Settings::targets`] so the drawing arm can ask for
+    /// the same list without holding a `&'static Ctrl` it has no way to
+    /// make: the id it needs is a value now, not a variant. Both callers
+    /// go through here, so a part that is painted is still a part that
+    /// can be pressed and reached, and no third list can fall behind.
+    fn picker_targets(&self, id: PickerId, rc: RowCtx) -> Vec<(Rect, Act)> {
+        nacelle::object::color_picker::parts(&self.picker_layout(rc))
+            .into_iter()
+            .map(|(part, r)| (r, picker_act(id, part)))
+            .collect()
     }
 
     /// Where the picker's parts stand in a row's band — ONE statement of
@@ -8096,7 +8201,7 @@ impl Settings {
             // with the count that decides its last row: the control is a
             // block whose height depends on how many rows of swatches its
             // grids come to, and only the object knows that.
-            Ctrl::Picker => {
+            Ctrl::Picker(_) => {
                 nacelle::object::color_picker::height(content.w, self.picker_custom.len())
             }
         }
@@ -8232,16 +8337,16 @@ impl Settings {
             // what the hand may reach. The rects come from the same
             // `picker_layout` the targets do, so a part that is drawn is a
             // part that can be pressed and the two cannot come apart.
-            Ctrl::Picker => {
+            Ctrl::Picker(id) => {
                 let l = self.picker_layout(rc);
                 nacelle::object::color_picker::draw_focusable(
                     ctx,
                     &l,
-                    &self.picker,
+                    &self.pickers[id.idx()],
                     &self.picker_custom,
-                    |part| focus_id(picker_act(part)),
+                    |part| focus_id(picker_act(*id, part)),
                 );
-                for (r, act) in self.targets(ctx, &Ctrl::Picker, rc) {
+                for (r, act) in self.picker_targets(*id, rc) {
                     self.push_hit(r, act);
                 }
             }
@@ -8471,11 +8576,32 @@ impl Settings {
             "button",
             if hover { State::Hover } else { State::Idle },
         );
-        ctx.dl.rect_outline(
-            r.x,
-            r.y,
-            r.w,
-            r.h,
+        // THE PLATE'S RING, CUT THE WAY THE PAGE IS CUT. It was
+        // `rect_outline` until 2026-08-18 — four straight bars, square
+        // whatever the theme said — so the MODE row was the one row of
+        // the editor whose corners did not match the buttons above and
+        // below it (owner's report 3). No theme could have said
+        // otherwise: `[cycler]` stated a border weight and no shape at
+        // all. The keys are its own now and the master points both at
+        // the button's, so a theme that pins its buttons moves this row
+        // with them; the CUT comes from the toolkit's one corner
+        // dictionary (`nacelle::corner`) and not from a word spelled
+        // here, and `Corner::sized` is what makes `pill` a length on
+        // this box rather than a negative sentinel compared against
+        // zero.
+        static CYC_RADIUS: OnceLock<TokenId> = OnceLock::new();
+        static CYC_MODE: OnceLock<TokenId> = OnceLock::new();
+        static CYC_CUTS: OnceLock<nacelle::corner::Cuts> = OnceLock::new();
+        static CYC_SEG: OnceLock<TokenId> = OnceLock::new();
+        let cut = nacelle::draw::Corner::sized(
+            nacelle::corner::style(th, tok(&CYC_MODE, "cycler.corner_style"), &CYC_CUTS),
+            th.px(tok(&CYC_RADIUS, "cycler.corner")),
+            r,
+        );
+        ctx.dl.ring(
+            r,
+            &[cut; 4],
+            nacelle::corner::segments(th, &CYC_SEG, cut.size),
             th.px(tok(&CYC_BORDER, "cycler.border")),
             col(st.edge),
         );
@@ -9443,48 +9569,96 @@ impl Settings {
     /// Whether a section of the rail stands UNFOLDED — its pages drawn
     /// under it, in the focus chain and in the hit map.
     ///
-    /// THIS IS NOT A FIELD, AND THAT IS THE ANSWER TO ALL THREE OF THE
-    /// QUESTIONS THE MOCK-UP LEFT OPEN. A section is unfolded exactly
-    /// when it is the section in force, so:
+    /// IT IS A FIELD SINCE 2026-08-18 ([`Settings::unfolded`]), and what
+    /// it replaced is worth keeping because the replacement is only
+    /// legible against it. It used to read `act == rail_act(self.view)`:
+    /// the unfold was not a state at all but a second way of saying
+    /// which page was in force. The owner reported the two symptoms that
+    /// come out of that as one fault — the rail came up OPEN (the window
+    /// opens on LOOK AND FEEL, so its section was by definition the open
+    /// one) and pressing LOOK AND FEEL did NOTHING (the press went to a
+    /// page already in force, and there was no state that could have
+    /// answered differently). Its own argument for having no field —
+    /// that a field would be a second statement of where the reader is,
+    /// free to disagree with `self.view` — was answered by making it
+    /// state something ELSE: this says what the reader asked to SEE
+    /// LISTED, `self.view` says where they are, and the two were never
+    /// the same sentence. `nav_marks` is still the only reader of "where
+    /// am I", and it still reads `self.view`.
     ///
-    /// * (a) TWO AT ONCE? No — not by a rule forbidding it but because
-    ///   there is nothing to forbid: being unfolded IS being the section
-    ///   you are in, and you are in one. GNOME's expander rows may all
-    ///   stand open because they live in a scrolled page; this rail does
-    ///   not scroll (`the_navigation_fits_the_window_it_stands_in` is
-    ///   fail-closed about that), so "every section open at once" would
-    ///   be a rail that can outgrow its column and hide a section with no
-    ///   way to reach it. Single-open bounds the worst case at the
-    ///   deepest section instead of the sum of all of them.
-    /// * (b) WHAT DOES PRESSING THE SECTION DO? It opens the section's
-    ///   first page, and unfolding is what that looks like. A press that
-    ///   only unfolded would make this the one entry in the window that
-    ///   answers with a list instead of a page — and it would have to
-    ///   mark a section whose page is not open, which is a lie in the
-    ///   one place §4 asks the window to tell the truth. It is also what
-    ///   the entry already did when the pages stood in a column, so no
-    ///   habit is broken.
-    /// * (c) IS THE UNFOLD ANIMATED? No, and `motion.rs` being ready is
-    ///   not the reason to. The unfold is not a thing of its own: it
-    ///   happens because the SECTION CHANGED, and the whole page beside
-    ///   it changes in the same frame with no transition. An animated
-    ///   rail would be the only moving thing on a window that has
-    ///   already finished changing — and while it moved it would have to
-    ///   leave the focus chain and the hit map, which is the toolkit's
-    ///   own rule for a blind in motion (`object::dropdown::accordion`:
-    ///   "a ring on a moving rect is the board-ride pitfall in
-    ///   miniature"). A drop-down may go dead for a moment because it is
-    ///   a transient over one page; the window's PERMANENT navigation
-    ///   may not, on every section change. The day the window
-    ///   cross-fades a page change (`motion::Crossfade` is the
-    ///   foundation) the rail should join THAT one motion, not run a
-    ///   second clock beside it.
+    /// THE THREE THINGS THE REPORT DID NOT SETTLE, settled:
     ///
-    /// A field would also be a second statement of where the reader is,
-    /// free to disagree with `self.view` — the fault this file already
-    /// records about a BACK button that led to the page it stood on.
+    /// * (a) MAY TWO SECTIONS STAND OPEN AT ONCE? YES. The old text
+    ///   forbade it, and its reason was true when it was written: a rail
+    ///   that did not scroll could be outgrown by the sum of every
+    ///   section's pages, hiding an entry with no way to reach it, so
+    ///   single-open bounded the worst case at the deepest section. THE
+    ///   RAIL SCROLLS NOW ([`Settings::rail_scroll`], and
+    ///   `every_section_the_rail_holds_can_be_reached_at_every_window`
+    ///   was rewritten from FITTING to REACHABILITY when it did) — the
+    ///   bound buys nothing that the wheel does not already give, and
+    ///   the price of keeping it would be a rail that shuts the section
+    ///   you were reading because you asked to see a second one. That is
+    ///   the same reason the old text gave for why GNOME's expander rows
+    ///   may all stand open: they live in a scrolled page. So does this.
+    /// * (b) WHAT BECOMES OF THE FOLDS WHEN THE READER GOES TO A PAGE IN
+    ///   ANOTHER SECTION? NOTHING. This is the one answer the change
+    ///   cannot dodge — the view is exactly what used to drive the fold,
+    ///   so leaving the coupling in anywhere would be the reported fault
+    ///   surviving in a corner. A fold is the reader's own request to
+    ///   see a list; walking to another page is not a retraction of it,
+    ///   and a rail that reshaped itself under the hand on every
+    ///   navigation would lose a section the reader had just opened to
+    ///   compare against. Nothing is hidden by leaving it open: the
+    ///   entry for the page in force is marked wherever it stands
+    ///   (`nav_marks`), which is what says where you are.
+    /// * (c) DOES A FOLD SURVIVE THE WINDOW CLOSING? NO — the rail comes
+    ///   up shut every time ([`Settings::opening`]). A fold is a view
+    ///   state and not a preference: preferences in this program live in
+    ///   the configuration file and are written through `config`, and
+    ///   nothing here writes one. "Shut by default" would otherwise be
+    ///   true exactly once per session, which is not what a default is.
+    ///
+    /// AND THE UNFOLD IS STILL NOT ANIMATED, which was the old (c) and
+    /// is unchanged: while a blind moves it has to leave the focus chain
+    /// and the hit map (`object::dropdown::accordion` — "a ring on a
+    /// moving rect is the board-ride pitfall in miniature"), and a
+    /// drop-down may go dead for a moment because it is a transient over
+    /// one page, where the window's PERMANENT navigation may not.
     fn rail_open(&self, act: Act) -> bool {
-        act == rail_act(self.view)
+        self.unfolded.contains(&act)
+    }
+
+    /// A section's entry was pressed: the fold turns over, and nothing
+    /// else does.
+    ///
+    /// THE PRESS NO LONGER TRAVELS. It used to open the section's first
+    /// page, and the unfold was what that looked like; now that the fold
+    /// is a state of its own, a press that navigated as well would have
+    /// to navigate on the way OUT too — shutting the list would carry
+    /// the reader to a page they were shutting the list to get away
+    /// from. The section's pages are the doors, and SETS is the first of
+    /// them, standing where the section's own page always did.
+    fn toggle_rail(&mut self, act: Act) {
+        match self.unfolded.iter().position(|a| *a == act) {
+            Some(i) => {
+                self.unfolded.remove(i);
+            }
+            None => self.unfolded.push(act),
+        }
+    }
+
+    /// The window is being opened. The rail comes up SHUT, whichever
+    /// door was used ([`Settings::rail_open`], decision (c)).
+    ///
+    /// ONE WRITER, and it is on the way IN rather than on the way out
+    /// because there are two doors in and three ways out — `Act::Close`,
+    /// the layout editor's `Act::EditGrid` and [`Settings::close`] all
+    /// lower the flag, and a rule spelled at three exits is a rule with
+    /// two chances of being forgotten.
+    fn opening(&mut self) {
+        self.open = true;
+        self.unfolded.clear();
     }
 
     /// Whether an act's click flash is still decaying
@@ -9668,20 +9842,37 @@ mod tests {
             Act::EditorSave,
             Act::EditorSaveAs,
             Act::EditorCancel,
-            Act::EditorTrack(Knob::EdgeL),
-            Act::EditorTrack(Knob::AccentB),
             Act::EditorTrack(Knob::SurfHue),
-            Act::EditorTrack(Knob::SevB),
             Act::EditorTrack(Knob::CornerSm),
             Act::EditorTrack(Knob::Hairline),
             Act::EditorTrack(Knob::RingW),
-            Act::EditorTrack(Knob::RingH),
             Act::EditorTrack(Knob::HaloAlpha),
             Act::EditorTrack(Knob::UnfocusedDim),
             Act::EditorTrack(Knob::MenuEdgeW),
             Act::EditorTrack(Knob::TipEdgeW),
             Act::EditorTrack(Knob::BarW),
-            Act::EditorTrack(Knob::BarTrackB),
+            // AND THE FOURTEEN PICKERS AGAINST EACH OTHER. Every part of
+            // every picker is `<part> -> which picker -> which cell`, and
+            // the pairs below are the ones a collision would be invisible
+            // in: the same part of two different pickers, and the same
+            // cell of two different pickers.
+            Act::PickerField(PickerId::Tone),
+            Act::PickerField(PickerId::Accent),
+            Act::PickerField(PickerId::BarTrack),
+            Act::PickerValue(PickerId::Tone),
+            Act::PickerValue(PickerId::Accent),
+            Act::PickerFormat(PickerId::Tone),
+            Act::PickerFormat(PickerId::MenuFill),
+            Act::PickerText(PickerId::Tone),
+            Act::PickerText(PickerId::MenuEdge),
+            Act::PickerAdd(PickerId::Tone),
+            Act::PickerAdd(PickerId::TipText),
+            Act::PickerBase(PickerId::Tone, 0),
+            Act::PickerBase(PickerId::Tone, 1),
+            Act::PickerBase(PickerId::Edge, 0),
+            Act::PickerBase(PickerId::Edge, 1),
+            Act::PickerCustom(PickerId::Tone, 0),
+            Act::PickerCustom(PickerId::Severity, 0),
             Act::EditorFlip(Flip::SurfaceOwnHue),
             Act::EditorFlip(Flip::Ring),
             Act::EditorFlip(Flip::Halo),
@@ -9918,8 +10109,10 @@ mod tests {
     fn the_pages_choices_and_doors_stand_in_one_column() {
         let _g = crate::widgets::theme_test_lock();
         let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = furnished();
-        s.view = View::LookFeel;
+        // The section is unfolded, because the entries this measures are
+        // the ones it unfolds — a shut rail has no column of pages to
+        // hold to a single edge.
+        let mut s = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
         let mut dl = nacelle::draw::DrawList::new();
         let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         s.draw(&mut ctx);
@@ -10968,14 +11161,17 @@ mod tests {
         assert!(is_track(Act::SizeTrack(Sect::Term)));
         // The whole-theme sections' knobs are sliders like any other —
         // one witness per section shape, arrows not Enter.
-        assert!(is_track(Act::EditorTrack(Knob::AccentB)));
         assert!(is_track(Act::EditorTrack(Knob::SurfHue)));
-        assert!(is_track(Act::EditorTrack(Knob::SevH)));
         assert!(is_track(Act::EditorTrack(Knob::CornerSeg)));
         assert!(is_track(Act::EditorTrack(Knob::UnfocusedDim)));
         assert!(is_track(Act::EditorTrack(Knob::MenuEdgeW)));
-        assert!(is_track(Act::EditorTrack(Knob::TipTextH)));
-        assert!(is_track(Act::EditorTrack(Knob::BarTrackH)));
+        assert!(is_track(Act::EditorTrack(Knob::TipEdgeW)));
+        assert!(is_track(Act::EditorTrack(Knob::BarW)));
+        // A PICKER IS NOT A TRACK, and its two dragged areas least of
+        // all: arrows must not move a field, whose two axes have no
+        // "next" between them.
+        assert!(!is_track(Act::PickerField(PickerId::Accent)));
+        assert!(!is_track(Act::PickerValue(PickerId::Accent)));
         assert!(!is_track(Act::EditGrid));
         assert!(!is_track(Act::ToggleSnap));
         assert!(!is_track(Act::FamilyBtn(Sect::Ui)));
@@ -11875,12 +12071,32 @@ mod tests {
         s
     }
 
+    /// [`furnished`], standing on `view`, with `open` unfolded on the
+    /// rail.
+    ///
+    /// A FIXTURE THAT HAS TO SAY BOTH THINGS SINCE 2026-08-18. Setting
+    /// `s.view` used to unfold the section the view belongs to, because
+    /// the fold WAS the view read a second way — which is the fault the
+    /// owner reported ([`Settings::rail_open`]). Every fixture that
+    /// leaned on that coupling states the two separately here, and a
+    /// test that sets only the view is now asking for a SHUT rail on
+    /// purpose, which is the state the window opens in.
+    fn railed_at(view: View, open: &[Act]) -> Settings {
+        let mut s = furnished();
+        s.view = view;
+        s.unfolded = open.to_vec();
+        s
+    }
+
     /// The editor page with every `Row::when` condition set at once —
     /// FROSTED for the background's knobs, a role for the severity
     /// sliders, a cut for the shape's, the ring on, dashed and haloed,
     /// the bar fading over a drawn groove. What the reachability sweep
     /// and the group test both mean by "everything on screen".
     fn editor_ajar(s: &mut Settings) {
+        // A kind that LIGHTS, so BASIC's GLOW REACH row is one of the
+        // rows a sweep walks (ZGŁOSZENIE 6b, `border_lit`).
+        s.current_border = Some("NEON".to_string());
         s.current_background = Some("FROSTED GLASS".to_string());
         s.current_severity = Some("OK".to_string());
         s.surface_own_hue = true;
@@ -12053,12 +12269,10 @@ mod tests {
         s.editor_basic = true;
         s.seed_editor_from_theme();
         s.view = View::ThemeEditor;
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
+        let targets = targets_over_the_whole_page(&mut s, &mut fonts, 1080.0);
         for list in [ListId::Borders, ListId::Backgrounds, ListId::Corners] {
             assert!(
-                s.hits.iter().any(|&(_, a)| a == Act::ListBtn(list)),
+                targets.iter().any(|&(_, a)| a == Act::ListBtn(list)),
                 "the BASIC page drew no {} anchor",
                 list.label(&s)
             );
@@ -12102,15 +12316,31 @@ mod tests {
             s.editor_basic = true;
             s.seed_editor_from_theme();
             s.view = View::ThemeEditor;
-            let mut dl = nacelle::draw::DrawList::new();
-            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
-            s.draw(&mut ctx);
-            let anchor = s
-                .hits
-                .iter()
-                .find(|&&(_, a)| a == Act::ListBtn(list))
-                .map(|&(r, _)| r)
-                .unwrap_or_else(|| panic!("the BASIC page drew no {} anchor", list.label(&s)));
+            // The page is taller than the window since ZGŁOSZENIE 6, so
+            // the anchor is FOUND over a scroll and then brought on
+            // screen: a click is aimed at a rect from the frame that is
+            // standing, never at one from a frame that has scrolled away.
+            let found = targets_over_the_whole_page(&mut s, &mut fonts, h)
+                .into_iter()
+                .any(|(_, a)| a == Act::ListBtn(list));
+            assert!(found, "the BASIC page drew no {} anchor", list.label(&s));
+            let anchor = loop {
+                if let Some(&(r, _)) =
+                    s.hits.iter().find(|&&(_, a)| a == Act::ListBtn(list))
+                {
+                    break r;
+                }
+                let before = s.scroll.offset();
+                s.scroll.set_offset(before + h / 2.0);
+                let mut dl = nacelle::draw::DrawList::new();
+                let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+                s.draw(&mut ctx);
+                assert!(
+                    s.scroll.offset() > before,
+                    "the page stopped scrolling before the {} anchor came into view",
+                    list.label(&s)
+                );
+            };
             s.click(anchor.cx(), anchor.y + anchor.h / 2.0, w, h, None);
             assert!(
                 matches!(s.dropdown, Some(Dropdown::List(l)) if l == list),
@@ -12227,6 +12457,608 @@ mod tests {
         s
     }
 
+    /// Whether BASIC's own description offers a control at all — the
+    /// `Row::when` question, asked of the table and not of a drawing, so
+    /// "absent" means absent from the page and not merely off screen.
+    fn basic_shows(s: &Settings, act: Act) -> bool {
+        EDITOR_BASIC_ROWS.iter().any(|r| {
+            (r.when)(s)
+                && matches!(&r.ctrl,
+                    Ctrl::Slider { act: a, .. } | Ctrl::Cycle { act: a, .. } if *a == act)
+        })
+    }
+
+    /// One token's value out of an edit set.
+    fn wrote(edits: &[nacelle::theme::edit::Edit], token: &str) -> Option<String> {
+        edits.iter().find(|e| e.token == token).map(|e| e.value.clone())
+    }
+
+    /// A length the theme states, in the tracks' own units.
+    fn theme_u(token: &str) -> f32 {
+        let t = nacelle::theme::resolved();
+        let unit = t.unit_px.max(f32::MIN_POSITIVE);
+        nacelle::theme::id(token).map(|i| t.px(i)).unwrap_or(0.0) / unit
+    }
+
+    /// `"1.20u"` back to 1.20 — reading what was WRITTEN, so a test can
+    /// compare it with what the theme said instead of with the function
+    /// that wrote it.
+    fn u_of(value: &str) -> f32 {
+        value.trim_end_matches('u').parse::<f32>().unwrap_or_else(|_| {
+            panic!("`{value}` is not a length the theme language spells")
+        })
+    }
+
+    /// Every target the page holds, gathered over a SCROLL rather than
+    /// over one frame.
+    ///
+    /// A page taller than the window registers only what is on screen —
+    /// which is right, and is the same rule a shut rail section obeys —
+    /// so a test that wants to know whether a control EXISTS has to walk
+    /// the page. BASIC crossed that line on 2026-08-18, when the owner's
+    /// ZGŁOSZENIE 6 and 7 put four numbers under its three kinds; before
+    /// that its eight rows fitted at 1080 and one frame was the whole
+    /// page. Two frames are enough for a page of this length; the second
+    /// asks for an offset past the end and the scroll's own tick clamps
+    /// it to the bottom.
+    fn targets_over_the_whole_page(
+        s: &mut Settings,
+        fonts: &mut nacelle::font::FontSystem,
+        h: f32,
+    ) -> Vec<(Rect, Act)> {
+        let mut all: Vec<(Rect, Act)> = Vec::new();
+        for offset in [0.0, 1.0e6] {
+            s.scroll.set_offset(offset);
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, fonts, h, 1.0);
+            s.draw(&mut ctx);
+            for hit in &s.hits {
+                if !all.iter().any(|(_, a)| *a == hit.1) {
+                    all.push(*hit);
+                }
+            }
+        }
+        all
+    }
+
+
+
+    // ================= ZGŁOSZENIE 6 and 7 (owner, 2026-08-18) =========
+
+    /// ZGŁOSZENIE 6(a): the corner's SIZE appears with a cut that has one,
+    /// and is ABSENT — not greyed — with the cut that has not.
+    ///
+    /// The question is asked of the DESCRIPTION and not of a drawing, so a
+    /// row that is merely scrolled off cannot be mistaken for a row that
+    /// is not there. `Row::when` is the owner's own answer to how ("nie
+    /// wyszarzonej, tylko nieobecnej") and the mechanism this window
+    /// already had; the sibling half — that the row registers no target
+    /// while hidden — is `row_acts`', which every reachability sweep runs.
+    #[test]
+    fn a_square_corner_has_no_size_to_ask_about_and_a_cut_one_has() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        let mut s = furnished();
+        s.editor_basic = true;
+        for (cut, want) in [("SQUARE", false), ("ROUND", true), ("CHAMFER", true)] {
+            s.current_corner = Some(cut.to_string());
+            assert_eq!(
+                basic_shows(&s, Act::EditorCornerStep),
+                want,
+                "on {cut} the CORNER SIZE row should {} the page",
+                if want { "stand on" } else { "be absent from" }
+            );
+        }
+    }
+
+    /// ZGŁOSZENIE 6(b), first half of the conditional pair: how far a lit
+    /// border's light reaches is only asked of a kind that lights.
+    ///
+    /// The border's WIDTH is unconditional beside it, and that asymmetry
+    /// is the point of measuring both here: every kind draws a line, only
+    /// two of them draw a light.
+    #[test]
+    fn a_light_that_is_not_drawn_is_not_asked_how_far_it_reaches() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        let mut s = furnished();
+        s.editor_basic = true;
+        for (kind, lit) in [("LINE", false), ("GLOW", true), ("NEON", true)] {
+            s.current_border = Some(kind.to_string());
+            assert_eq!(
+                basic_shows(&s, Act::EditorTrack(Knob::GlowReach)),
+                lit,
+                "on {kind} the GLOW REACH row should {} the page",
+                if lit { "stand on" } else { "be absent from" }
+            );
+            assert!(
+                basic_shows(&s, Act::EditorTrack(Knob::EdgeWidth)),
+                "on {kind} the BORDER WIDTH row went missing — every kind draws a line"
+            );
+        }
+    }
+
+    /// ZGŁOSZENIE 6(a) again, and this is the decision the owner asked to
+    /// see reasoned: the control names a STEP OF THE MASTER'S OWN SCALE
+    /// and never a free number.
+    ///
+    /// What is measured is that the three radii land on the theme's own
+    /// numbers — read here out of `[corner]` by name, so both sides of the
+    /// comparison cannot move together. The tolerance is the TRACK's, not
+    /// a fudge: these are 0..100 tracks over 4u, so a value can only be
+    /// stated to a twenty-fifth of a unit and the theme's `0.80u` is the
+    /// nearest stop, not the exact one, in general.
+    #[test]
+    fn a_corner_size_names_a_step_of_the_themes_own_scale() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let mut s = editor_open();
+        s.editor_basic = true;
+        s.current_corner = Some("ROUND".to_string());
+        // A page just seeded says the ladder is the theme's, because it
+        // is: nothing has been pressed.
+        assert_eq!(
+            corner_step_word(&s),
+            "AS WRITTEN",
+            "a freshly seeded page is not standing on the theme's own ladder"
+        );
+        // 0..100 over 4u, so one stop of a radius track is 0.04u.
+        let stop = 4.0 / 100.0 + 1e-4;
+        for (step, token) in
+            [("SMALL", "corner.sm"), ("MEDIUM", "corner.md"), ("LARGE", "corner.lg")]
+        {
+            s.perform(Act::EditorCornerStep, 0.0, 0.0);
+            assert_eq!(corner_step_word(&s), step, "the control did not step to {step}");
+            let edits = s.editor_edits();
+            let want = theme_u(token);
+            let mut got = Vec::new();
+            for radius in ["corner.sm", "corner.md", "corner.lg"] {
+                let v = wrote(&edits, radius)
+                    .unwrap_or_else(|| panic!("{step}: nothing wrote `{radius}`"));
+                got.push(u_of(&v));
+            }
+            assert!(
+                got.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6),
+                "{step}: the three radii are {got:?} — one step means ONE size for the \
+                 whole interface, which is what makes it a BASIC question"
+            );
+            assert!(
+                (got[0] - want).abs() <= stop,
+                "{step}: the radii landed on {}u and the theme's `{token}` is {want}u — \
+                 this control must name the theme's own numbers, never invent one",
+                got[0]
+            );
+        }
+        // And the round is closed: one more press is back on the theme's
+        // own ladder, so a press can always be undone.
+        s.perform(Act::EditorCornerStep, 0.0, 0.0);
+        assert_eq!(corner_step_word(&s), "AS WRITTEN");
+        assert_eq!([s.corner_sm, s.corner_md, s.corner_lg], s.corner_seed);
+        nacelle::theme::clear_preview();
+    }
+
+    /// ZGŁOSZENIE 6(b), both readings at once, and the marks that keep
+    /// them out of a file nobody asked to change.
+    ///
+    /// A WIDTH AND A REACH ARE TWO DIFFERENT ANSWERS to one ambiguous
+    /// word, and this pins that they land on two different tokens. It also
+    /// pins the thing that makes the reach worth having: it OUTRANKS the
+    /// 1.6u floor a lit kind lays on an undressed theme, which until now
+    /// was the only number that key could ever hold.
+    #[test]
+    fn the_borders_thickness_and_its_lights_reach_are_two_answers_and_both_wait_to_be_asked() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let mut s = editor_open();
+        s.editor_basic = true;
+        s.current_border = Some("NEON".to_string());
+        // Untouched: neither key is in the set. The master writes
+        // `border.edge.width = @stroke.hair`, a REFERENCE, and a page
+        // that pinned it to a literal on every visit would cost every
+        // saved theme that reference — §5.5's fault, wearing a new face.
+        let quiet = s.editor_edits();
+        assert!(
+            wrote(&quiet, "border.edge.width").is_none(),
+            "an untouched BORDER WIDTH pinned the master's `@stroke.hair` reference \
+             into the file"
+        );
+        // The kind's own floor IS there, though — which is what makes the
+        // override below a real contest and not a write into an empty
+        // slot.
+        let floor = wrote(&quiet, "glow.panel_edge.radius")
+            .expect("a lit kind must give an undressed theme a reach");
+        // Now a hand moves both.
+        s.edge_width = 100;
+        s.edge_width_touched = true;
+        s.glow_reach = 25;
+        s.glow_reach_touched = true;
+        let moved = s.editor_edits();
+        let width = wrote(&moved, "border.edge.width").expect("the width was not written");
+        // The master's heaviest stroke is `[stroke] bold = 0.7u`; the top
+        // of this track is past it, which is the whole of why the wall is
+        // where it is. Read off the THEME, so the expectation is not the
+        // production arithmetic run twice.
+        assert!(
+            u_of(&width) > theme_u("stroke.bold"),
+            "the top of the BORDER WIDTH track ({width}) does not reach past the \
+             master's heaviest stroke ({}u) — the wall is in the wrong place",
+            theme_u("stroke.bold")
+        );
+        assert!(
+            wrote(&moved, "stroke.hair").is_none()
+                || wrote(&moved, "stroke.hair") != Some(width.clone()),
+            "the border's thickness landed on the GLOBAL kerf; `stroke.hair` is worn by \
+             72 derivations and the editor already offers it under HAIRLINE"
+        );
+        let reach = wrote(&moved, "glow.panel_edge.radius").expect("the reach was not written");
+        assert_ne!(
+            reach, floor,
+            "the reach a person set did not beat the floor the kind lays — a number \
+             somebody moved must outrank a default put under a switch"
+        );
+        assert!((u_of(&reach) - 1.0).abs() < 1e-6, "25 of 100 over 4u is 1u, not {reach}");
+        // And ONE assignment for it, or a saved file carries the key twice
+        // in one section.
+        assert_eq!(
+            moved.iter().filter(|e| e.token == "glow.panel_edge.radius").count(),
+            1,
+            "the reach was written twice"
+        );
+        // A reach set on a kind that draws no light is not written at all:
+        // the row is not on screen there, and a value left behind by an
+        // off-screen row would reach the file all the same.
+        s.current_border = Some("LINE".to_string());
+        assert!(
+            wrote(&s.editor_edits(), "glow.panel_edge.radius").is_none(),
+            "LINE wrote a reach for a light it does not draw"
+        );
+        nacelle::theme::clear_preview();
+    }
+
+    /// ZGŁOSZENIE 7, the owner's rule: "w trybie BASIC zmiana
+    /// przezroczystości wpływa TYLKO na główne tło obiektu".
+    ///
+    /// MEASURED AS A DIFFERENCE, which is the only way to answer "how far
+    /// does it reach" without trusting a list somebody wrote down. Two
+    /// edit sets are built from the same controls with ONE number changed
+    /// — the transparency — and every token whose value moved is the
+    /// reach, by definition.
+    ///
+    /// This is what fails if the alpha ever reaches the border or the
+    /// text: those tokens would appear in `moved` and the assertion names
+    /// the whole list.
+    ///
+    /// WHAT WAS MEASURED BEFORE THE CHANGE, on the master, FROSTED GLASS:
+    /// `elev.panel.glass.tint` AND `elev.popover.glass.tint` — two rungs,
+    /// and the second is the context menu and the tooltip, which are not
+    /// "the object's main background" by any reading. On SOLID the reach
+    /// was already one token (`component.panel.fill`), so the breach was
+    /// the glassy kinds' alone.
+    #[test]
+    fn basics_transparency_stops_at_the_body_and_advanceds_still_dresses_the_float() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        let mut s = editor_open();
+
+        /// Every token whose value the transparency knob MOVED.
+        fn reach_of(s: &mut Settings) -> Vec<&'static str> {
+            s.bg_opacity = 40;
+            let low = s.editor_edits();
+            s.bg_opacity = 90;
+            let high = s.editor_edits();
+            let mut out: Vec<&'static str> = Vec::new();
+            for e in &high {
+                if wrote(&low, e.token).as_deref() != Some(e.value.as_str()) {
+                    out.push(e.token);
+                }
+            }
+            // And a token that vanished entirely counts as moved too.
+            for e in &low {
+                if wrote(&high, e.token).is_none() {
+                    out.push(e.token);
+                }
+            }
+            out.sort_unstable();
+            out
+        }
+
+        for (kind, body) in
+            [("SOLID", "component.panel.fill"), ("FROSTED GLASS", "elev.panel.glass.tint")]
+        {
+            s.current_background = Some(kind.to_string());
+            // ADVANCED first, because what BASIC narrows has to still be
+            // there on the page whose question is "what exactly should
+            // this one token do".
+            s.editor_basic = false;
+            let wide = reach_of(&mut s);
+            assert!(
+                wide.contains(&body),
+                "{kind}: ADVANCED's transparency does not reach the body at all ({wide:?})"
+            );
+            // BASIC: the body, and nothing else in the world.
+            s.editor_basic = true;
+            s.seed_tone_from_theme();
+            let narrow = reach_of(&mut s);
+            assert_eq!(
+                narrow,
+                vec![body],
+                "{kind}: BASIC's transparency reached {narrow:?}. The owner's rule is \
+                 the body alone — a border, a text role or another object's bed in \
+                 this list is the bug this test exists for"
+            );
+            if kind == "FROSTED GLASS" {
+                assert!(
+                    wide.contains(&"elev.popover.glass.tint"),
+                    "ADVANCED stopped dressing the float's glass; that was not narrowed"
+                );
+                // The KIND still travels on BASIC, or a menu over a
+                // frosted window would be the one flat plate on screen.
+                assert!(
+                    wrote(&s.editor_edits(), "elev.popover.glass.rank").is_some(),
+                    "BASIC stopped telling the float that the theme is glassy"
+                );
+            }
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// ZGŁOSZENIE 4, THE OWNER'S SENTENCE: "the picker is to be
+    /// EVERYWHERE there are colours, ADVANCED included".
+    ///
+    /// The sweep is over the DESCRIPTIONS of both editor pages, so it
+    /// cannot be satisfied by a picker that exists in the code and stands
+    /// on no page. Two halves, and neither is enough alone: every picker
+    /// this window knows about is offered SOMEWHERE (or a colour would be
+    /// unreachable), and no page still asks for a colour with a stack of
+    /// tracks (or the picker would be an addition rather than a
+    /// replacement, and the owner asked for a replacement).
+    ///
+    /// WHY "BRIGHTNESS AND SATURATION AND HUE TOGETHER" AND NOT ANY ONE
+    /// OF THEM. `SURFACES -> HUE` is a lone hue in degrees and stays a
+    /// track on purpose: it is one number on one axis with two ends and a
+    /// middle, which is what a track is good at, and there is no colour
+    /// there to point at. What a picker replaces is the TRIPLE — the
+    /// shape of an `oklch(L, C, H)` value spread over three controls.
+    #[test]
+    fn every_colour_the_editor_offers_is_pointed_at_and_none_is_hunted_for() {
+        let s = furnished();
+        let mut offered: Vec<PickerId> = Vec::new();
+        let mut labels: Vec<&'static str> = Vec::new();
+        for rows in [&EDITOR_BASIC_ROWS[..], &EDITOR_ROWS[..]] {
+            for row in rows {
+                match row.ctrl {
+                    Ctrl::Picker(id) => offered.push(id),
+                    Ctrl::Slider { label, .. } => labels.push(label),
+                    _ => {}
+                }
+            }
+        }
+        for id in PickerId::ALL {
+            assert!(
+                offered.contains(&id),
+                "{id:?} has a picker and no page offers it — its colour cannot be reached"
+            );
+        }
+        assert_eq!(
+            offered.len(),
+            PickerId::ALL.len(),
+            "a picker is drawn twice, so two rows would answer to one focus id: {offered:?}"
+        );
+        // No section still spells a colour out as three tracks.
+        let has = |w: &str| labels.iter().any(|l| l.contains(w));
+        assert!(
+            !(has("BRIGHTNESS") && has("SATURATION") && has("HUE")),
+            "the editor still asks for a colour with three tracks: {labels:?}"
+        );
+    }
+
+    /// …AND EACH PICKER WRITES ITS OWN COLOUR AND NOBODY ELSE'S.
+    ///
+    /// Thirteen pickers stand on one page over thirteen different fields,
+    /// and the wire between "which control was pressed" and "which field
+    /// it writes" is a match arm apiece ([`Settings::commit_picker`]). A
+    /// swapped pair there is a colour that is merely wrong: pick a menu
+    /// bed and the tooltip's changes, with nothing to say so. So every
+    /// one of them is pressed here, and every OTHER one is required to
+    /// stand still.
+    ///
+    /// Driven through `perform` and a ready-made swatch rather than by
+    /// calling the writer, so the act, the picker model and the field all
+    /// have to agree — pressing is what a person does.
+    #[test]
+    fn a_press_on_one_picker_moves_one_colour() {
+        let _g = crate::widgets::theme_test_lock();
+        let swatches = nacelle::object::color_picker::base_colours();
+        assert!(swatches.len() >= 3, "the toolkit offers no ready-made colours to press");
+        for id in PickerId::ALL {
+            if id == PickerId::Tone {
+                continue; // BASIC writes a MOVE, not a colour; see below.
+            }
+            let mut s = editor_open();
+            s.current_severity = Some(s.severity_kinds[0].clone());
+            s.seed_pickers_from_tracks();
+            let before: Vec<Option<[u32; 3]>> =
+                PickerId::ALL.iter().map(|o| s.picker_track(*o)).collect();
+            // A swatch that is NOT what the picker already stands on, so
+            // "nothing happened" cannot pass for "the right thing did".
+            let k = swatches
+                .iter()
+                .position(|c| hsv_track_of(*c) != s.picker_track(id).unwrap())
+                .expect("every ready-made colour is the one this picker already holds");
+            s.perform(Act::PickerBase(id, k), 0.0, 0.0);
+            let after: Vec<Option<[u32; 3]>> =
+                PickerId::ALL.iter().map(|o| s.picker_track(*o)).collect();
+            for (i, other) in PickerId::ALL.iter().enumerate() {
+                if *other == id {
+                    assert_ne!(
+                        before[i], after[i],
+                        "pressing {id:?} left its own colour where it was"
+                    );
+                } else {
+                    assert_eq!(
+                        before[i], after[i],
+                        "pressing {id:?} moved {other:?} as well"
+                    );
+                }
+            }
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// The SEVERITY picker writes THE ROLE THAT IS STANDING, and marks
+    /// that one alone — the mark `editor_edits` gates the write on, so
+    /// the six roles nobody pointed at keep the theme's own words.
+    #[test]
+    fn the_severity_picker_touches_the_role_the_list_is_showing_and_no_other() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        let swatches = nacelle::object::color_picker::base_colours();
+        // The SECOND role in the list, so "it wrote the first one" is a
+        // failure and not a pass.
+        let role = 1;
+        s.current_severity = Some(s.severity_kinds[role].clone());
+        s.seed_pickers_from_tracks();
+        assert_eq!(s.severity_touched, [false; 7], "the editor opened with roles pinned");
+        let before = s.severity;
+        s.perform(Act::PickerBase(PickerId::Severity, swatches.len() - 1), 0.0, 0.0);
+        for i in 0..7 {
+            if i == role {
+                assert!(s.severity_touched[i], "the chosen role was not marked touched");
+                assert_ne!(before[i], s.severity[i], "the chosen role did not take the colour");
+            } else {
+                assert!(!s.severity_touched[i], "an unchosen role was pinned");
+                assert_eq!(before[i], s.severity[i], "an unchosen role took the colour");
+            }
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// TWENTY TRIPS, AND THE COLOUR HAS TO BE WHERE IT WAS AFTER THE
+    /// FIRST ONE.
+    ///
+    /// The trip is the one a person makes without meaning to: the page
+    /// SHOWS a colour, they leave it alone, they come back, and the page
+    /// shows it again. Every leg of it crosses a coordinate system —
+    /// picker to OKLCh to a token, token to bake to sRGB, sRGB back to
+    /// the picker — and a system that loses a little on any crossing
+    /// loses it again on the next trip and the next.
+    ///
+    /// THIS PROJECT HAS PAID FOR THIS ONCE ALREADY, which is why the
+    /// owner asked for the check by name. Reading the bake as if it were
+    /// linear light made BASIC seed itself from the colour it had just
+    /// written, and the master's accent climbed L 0.8200 -> 0.8904 ->
+    /// 0.9413 -> 0.9715 over three visits with nothing touched
+    /// (`seed_tone_from_theme`). Three visits was enough to see it;
+    /// twenty is enough that a loss a hundredth that size would show.
+    ///
+    /// THE FIRST TRIP IS THE BASELINE AND NOT THE START, deliberately.
+    /// The picked colour lands on whole notches of what the swapchain can
+    /// show ([`Settings::tone_step`]) and an ADVANCED track is a whole
+    /// number, so the FIRST landing is allowed to move the colour — that
+    /// is quantisation, and it is a wall, not a slope. What is forbidden
+    /// is the second landing moving it again.
+    #[test]
+    fn twenty_round_trips_leave_the_colour_where_the_first_one_put_it() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        nacelle::theme::clear_preview();
+        let lch = |c: nacelle::theme::Color| c.to_linear().to_oklch();
+        let live_accent = || {
+            let t = theme::resolved();
+            lch(col(t.color(nacelle::theme::id("palette.accent").unwrap())))
+        };
+
+        // ---- BASIC: picker -> tone -> preview -> bake -> picker -------
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        assert!(s.editor_basic, "the trip did not reach BASIC");
+        // A colour that is NOT the theme's, so the loop is exercising a
+        // move and not the neutral case another test already holds.
+        s.pickers[PickerId::Tone.idx()]
+            .set_colour(nacelle::theme::Color::new(0.85, 0.35, 0.20, 1.0));
+        s.commit_picker(PickerId::Tone);
+        s.apply_editor_preview();
+
+        let mut first = None;
+        for trip in 1..=20u32 {
+            // OUT: what the page would show on a fresh visit, read off
+            // the live bake exactly as arriving on BASIC reads it.
+            s.seed_tone_from_theme();
+            let shown = s.pickers[PickerId::Tone.idx()].colour();
+            // IN: the same colour put back — a person looking and not
+            // touching. Nothing here may move.
+            s.pickers[PickerId::Tone.idx()].set_colour(shown);
+            s.commit_picker(PickerId::Tone);
+            s.apply_editor_preview();
+            let now = live_accent();
+            let base = *first.get_or_insert(now);
+            let dh: f32 = (now.h - base.h).rem_euclid(360.0);
+            assert!(
+                (now.l - base.l).abs() < 0.002
+                    && (now.c - base.c).abs() < 0.002
+                    && dh.min(360.0 - dh) < 0.5,
+                "BASIC drifted by trip {trip}: L {} -> {}, C {} -> {}, h {} -> {}",
+                base.l, now.l, base.c, now.c, base.h, now.h
+            );
+        }
+
+        // ---- THE AUDIT'S OPEN HYPOTHESIS (§1a), MEASURED -------------
+        // `.gap-program/audyt-kolory-bazowe.md` wrote down a suspicion it
+        // had no measurement for: `Color::from_oklch` holds L and hue
+        // exactly and CLAMPS CHROMA to the sRGB boundary by bisection, and
+        // `seed_tone_from_theme` reads the seed back off the bake — so a
+        // colour outside the gamut might be measured from an already
+        // clipped chroma and shrink a little on every visit, the same
+        // monotonic slide the lightness once had, in the other axis.
+        //
+        // SATURATION at 200 % is the way to ask: it doubles the seed's
+        // chroma, and the master's mint at C 0.153 doubled is well past
+        // anything sRGB can show. If the slide is real it shows here.
+        let mut wide = editor_open();
+        wide.perform(Act::EditorMode, 0.0, 0.0);
+        wide.tone[1] = TONE_SAT_MAX;
+        wide.apply_editor_preview();
+        let mut settled_c = None;
+        for trip in 1..=20u32 {
+            wide.seed_tone_from_theme();
+            let shown = wide.pickers[PickerId::Tone.idx()].colour();
+            wide.pickers[PickerId::Tone.idx()].set_colour(shown);
+            wide.commit_picker(PickerId::Tone);
+            wide.apply_editor_preview();
+            let c = live_accent().c;
+            let base = *settled_c.get_or_insert(c);
+            assert!(
+                (c - base).abs() < 0.002,
+                "an out-of-gamut colour lost chroma on trip {trip}: {base} -> {c}"
+            );
+        }
+
+        // ---- ADVANCED: picker -> HSV track -> picker ------------------
+        // The other crossing, and a NEW one as of 2026-08-18: the page's
+        // value is a whole-number HSV track, so a picker seeded from it
+        // and committed back is a quantisation applied twice. Twice must
+        // be the same as once, or every visit to the page would grind the
+        // colour down a step.
+        let mut a = editor_open();
+        a.pickers[PickerId::MenuFill.idx()]
+            .set_colour(nacelle::theme::Color::new(0.31, 0.72, 0.44, 1.0));
+        a.commit_picker(PickerId::MenuFill);
+        let settled = a.picker_track(PickerId::MenuFill);
+        for trip in 1..=20u32 {
+            a.seed_pickers_from_tracks();
+            a.commit_picker(PickerId::MenuFill);
+            assert_eq!(
+                a.picker_track(PickerId::MenuFill),
+                settled,
+                "an ADVANCED picker ground its own track down by trip {trip}"
+            );
+        }
+        nacelle::theme::clear_preview();
+    }
 
     /// ŻYCZENIE 2, the switch. It stands at the HEAD of the page, before
     /// every section, and it is the ONE control both modes share with the
@@ -12251,11 +13083,11 @@ mod tests {
         assert!(!s.editor_basic, "the editor opened on BASIC");
         let advanced = described_acts(&s, page);
         assert!(
-            advanced.contains(&Act::EditorTrack(Knob::EdgeL)),
+            advanced.contains(&Act::PickerField(PickerId::Edge)),
             "ADVANCED is not showing the border section"
         );
         assert!(
-            !advanced.contains(&Act::PickerField),
+            !advanced.contains(&Act::PickerField(PickerId::Tone)),
             "ADVANCED is showing BASIC's picker"
         );
 
@@ -12266,19 +13098,19 @@ mod tests {
         // The picker and every part of it: the one control the three
         // tone sliders became on 2026-08-18.
         for part in [
-            Act::PickerField,
-            Act::PickerValue,
-            Act::PickerFormat,
-            Act::PickerText,
-            Act::PickerBase(0),
-            Act::PickerAdd,
+            Act::PickerField(PickerId::Tone),
+            Act::PickerValue(PickerId::Tone),
+            Act::PickerFormat(PickerId::Tone),
+            Act::PickerText(PickerId::Tone),
+            Act::PickerBase(PickerId::Tone, 0),
+            Act::PickerAdd(PickerId::Tone),
         ] {
             assert!(basic.contains(&part), "BASIC is missing a part of its picker");
         }
         assert!(
             !basic.iter().any(|a| matches!(
                 a,
-                Act::EditorTrack(Knob::EdgeL) | Act::EditorTrack(Knob::CornerSm)
+                Act::PickerField(PickerId::Edge) | Act::EditorTrack(Knob::CornerSm)
             )),
             "BASIC is still showing ADVANCED's controls"
         );
@@ -12296,13 +13128,13 @@ mod tests {
         nacelle::theme::clear_preview();
     }
 
-    /// BASIC's three sliders write the theme's AUTHORS, and nothing that
-    /// the cascade derives.
+    /// BASIC's move writes the theme's AUTHORS, and nothing that the
+    /// cascade derives.
     ///
     /// The set is the model's ([`nacelle::theme::edit::tone_edits`]) and
-    /// libnacelle holds it to its ten tokens; what this measures is the
-    /// WINDOW's half — that the sliders are wired to it at all, that a
-    /// drag changes what would be written, and that the rest of the
+    /// libnacelle holds it to its six tokens; what this measures is the
+    /// WINDOW's half — that the control is wired to it at all, that a
+    /// move changes what would be written, and that the rest of the
     /// editor's set is still in the edit underneath.
     #[test]
     fn the_basic_sliders_move_the_authors_and_leave_the_rest_standing() {
@@ -12326,8 +13158,9 @@ mod tests {
         let turned = s.editor_edits();
         for token in [
             "palette.accent",
-            "severity.ok.text",
-            "severity.critical.text",
+            "palette.black",
+            "palette.white",
+            "palette.neutral",
             "surface.lift",
             "text.lift",
         ] {
@@ -12338,14 +13171,17 @@ mod tests {
             value(&rest, "palette.accent"),
             "the HUE slider moved and the seed did not"
         );
-        // The severity family is CARRIED, not flattened: all seven
-        // authors ride the same turn, which is what keeps `ok` and
-        // `critical` different colours (measured over the master in
-        // libnacelle).
+        // THE SEVERITY FAMILY IS NOT WRITTEN HERE AT ALL, since
+        // 2026-08-18 (owner, ZGŁOSZENIE 5). This page used to write all
+        // seven with the full rotation — which is how a green success
+        // came out red — and the roles lean toward `palette.accent` in
+        // the theme itself now, capped at `severity.pull_clamp`. Silence
+        // is the whole point: a theme that dressed its own `contained`
+        // amber used to lose it the moment anybody opened this page.
         assert_eq!(
             turned.iter().filter(|e| e.token.starts_with("severity.")).count(),
-            7,
-            "the turn did not carry every severity role"
+            0,
+            "BASIC repainted the severity roles"
         );
         // Pinning a DERIVED token would cut the cascade at the joint and
         // the next drag would find it deaf.
@@ -12417,7 +13253,7 @@ mod tests {
         let mut s = editor_open();
         let seed = s.tone_seeds.expect("the editor opened without seeds").accent;
         // What the control SHOWS is the theme's own accent.
-        let shown = s.picker.oklch();
+        let shown = s.pickers[PickerId::Tone.idx()].oklch();
         assert!(
             (shown.l - seed.l).abs() < 2e-3 && (shown.c - seed.c).abs() < 5e-3,
             "the picker opened on {shown:?}, the theme says {seed:?}"
@@ -12439,7 +13275,7 @@ mod tests {
             s.seed_editor_from_theme();
             s.set_tone_from_picker();
             assert_eq!(s.tone, TONE_REST, "visit {visit} asked for a move");
-            let now = s.picker.oklch();
+            let now = s.pickers[PickerId::Tone.idx()].oklch();
             assert!(
                 (now.l - seed.l).abs() < 2e-3,
                 "visit {visit} shows lightness {} where the theme says {}",
@@ -12476,16 +13312,16 @@ mod tests {
         // Named by hand because `Act` carries no `Debug` and this window
         // has never wanted one; the names are what a failure has to say.
         for (name, act) in [
-            ("the field", Act::PickerField),
-            ("the value bar", Act::PickerValue),
-            ("the notation plate", Act::PickerFormat),
-            ("the value plate", Act::PickerText),
-            ("a ready-made colour", Act::PickerBase(0)),
-            ("a banked colour", Act::PickerCustom(0)),
-            ("the bank cell", Act::PickerAdd),
+            ("the field", Act::PickerField(PickerId::Tone)),
+            ("the value bar", Act::PickerValue(PickerId::Tone)),
+            ("the notation plate", Act::PickerFormat(PickerId::Tone)),
+            ("the value plate", Act::PickerText(PickerId::Tone)),
+            ("a ready-made colour", Act::PickerBase(PickerId::Tone, 0)),
+            ("a banked colour", Act::PickerCustom(PickerId::Tone, 0)),
+            ("the bank cell", Act::PickerAdd(PickerId::Tone)),
             // Pressed a second time: the colour is already banked, so
             // the row does not grow — and the press is still a press.
-            ("the bank cell again", Act::PickerAdd),
+            ("the bank cell again", Act::PickerAdd(PickerId::Tone)),
         ] {
             s.perform(act, 0.5, 0.5);
             assert_eq!(
@@ -12500,10 +13336,10 @@ mod tests {
         // presses. A test that only counted would pass on a picker that
         // clicked when it should have spoken.
         for (name, act, want) in [
-            ("a ready-made colour", Act::PickerBase(0), Sfx::Theme),
-            ("a banked colour", Act::PickerCustom(1), Sfx::Theme),
-            ("the notation plate", Act::PickerFormat, Sfx::Click),
-            ("the value plate", Act::PickerText, Sfx::Click),
+            ("a ready-made colour", Act::PickerBase(PickerId::Tone, 0), Sfx::Theme),
+            ("a banked colour", Act::PickerCustom(PickerId::Tone, 1), Sfx::Theme),
+            ("the notation plate", Act::PickerFormat(PickerId::Tone), Sfx::Click),
+            ("the value plate", Act::PickerText(PickerId::Tone), Sfx::Click),
         ] {
             s.perform(act, 0.5, 0.5);
             assert_eq!(s.heard, vec![want], "{name} said the wrong thing");
@@ -12528,7 +13364,7 @@ mod tests {
             nacelle::theme::id("component.picker.rest")
                 .expect("the master names what a picker holds at rest"),
         );
-        let shown = Settings::new().picker.colour();
+        let shown = Settings::new().pickers[PickerId::Tone.idx()].colour();
         for (got, want, ch) in
             [(shown.r, want.r, 'r'), (shown.g, want.g, 'g'), (shown.b, want.b, 'b')]
         {
@@ -12593,7 +13429,7 @@ mod tests {
         // the control can actually show.
         let step = s.tone_step();
         let half = nacelle::theme::color::Oklch { c: seed.c * 0.5, ..seed };
-        s.picker.set_oklch(nacelle::theme::color::Oklch { h: half.h + 90.0, ..half });
+        s.pickers[PickerId::Tone.idx()].set_oklch(nacelle::theme::color::Oklch { h: half.h + 90.0, ..half });
         s.set_tone_from_picker();
         assert!(
             (s.tone[0] as i32 - 90).abs() <= step[0] as i32,
@@ -12624,7 +13460,7 @@ mod tests {
             .expect("the accent is written in the notation the picker reads")
             .to_linear()
             .to_oklch();
-        let shown = s.picker.oklch();
+        let shown = s.pickers[PickerId::Tone.idx()].oklch();
         let off = (got.h - shown.h).rem_euclid(360.0);
         let off = off.min(360.0 - off);
         assert!(off <= step[0] as f32 + 1.0, "the file receives hue {}, shown {}", got.h, shown.h);
@@ -12636,7 +13472,7 @@ mod tests {
         );
 
         // A CHROMA MOVE ALONE DOES NOT TURN THE THEME.
-        s.picker.set_oklch(half);
+        s.pickers[PickerId::Tone.idx()].set_oklch(half);
         s.set_tone_from_picker();
         // Within a notch of no turn at all: the control holds its colour
         // in the field's own coordinates, so a chroma move re-read out of
@@ -12669,12 +13505,12 @@ mod tests {
         let base = nacelle::object::color_picker::base_colours();
         assert!(base.len() > 2, "the master ships a grid to press");
 
-        s.perform(Act::PickerBase(0), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0, 0.0);
         assert_eq!(s.tone, TONE_REST, "pressing the theme's own accent asked for a move");
 
         // A cell that is NOT the accent moves the theme, and the picker
         // shows exactly what was pressed.
-        s.perform(Act::PickerBase(2), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Tone, 2), 0.0, 0.0);
         // Compared as the eight-bit colour a screen can show and a file
         // can spell: the control holds its colour in the field's own
         // coordinates, so a channel may come back a single float ulp
@@ -12684,7 +13520,7 @@ mod tests {
             nacelle::object::color_picker::write(c, nacelle::object::color_picker::Format::Argb)
         };
         assert_eq!(
-            hex(s.picker.colour()),
+            hex(s.pickers[PickerId::Tone.idx()].colour()),
             hex(base[2]),
             "the press did not take the cell's colour"
         );
@@ -12692,14 +13528,14 @@ mod tests {
 
         // The bank: one cell per colour, however many times it is asked
         // for, and the colour banked is the one on screen.
-        s.perform(Act::PickerAdd, 0.0, 0.0);
-        s.perform(Act::PickerAdd, 0.0, 0.0);
+        s.perform(Act::PickerAdd(PickerId::Tone), 0.0, 0.0);
+        s.perform(Act::PickerAdd(PickerId::Tone), 0.0, 0.0);
         assert_eq!(s.picker_custom.len(), 1, "the bank kept the same colour twice");
         assert_eq!(hex(s.picker_custom[0]), hex(base[2]), "the bank kept another colour");
         // And a banked colour can be pressed back.
-        s.perform(Act::PickerBase(0), 0.0, 0.0);
-        s.perform(Act::PickerCustom(0), 0.0, 0.0);
-        assert_eq!(hex(s.picker.colour()), hex(base[2]), "the banked colour did not come back");
+        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0, 0.0);
+        s.perform(Act::PickerCustom(PickerId::Tone, 0), 0.0, 0.0);
+        assert_eq!(hex(s.pickers[PickerId::Tone.idx()].colour()), hex(base[2]), "the banked colour did not come back");
         nacelle::theme::clear_preview();
     }
 
@@ -12746,19 +13582,27 @@ mod tests {
             Some("CHAMFER"),
             "the trip through BASIC threw the cut away"
         );
-        // The severity roles the turn moved are handed over as TOUCHED,
-        // or ADVANCED — which writes only touched roles — would put the
-        // theme's own words back and the rotation would vanish.
+        // AND THE SEVERITY ROLES ARE STILL THE THEME'S. This assertion
+        // was its own opposite until 2026-08-18: the fold marked all
+        // seven TOUCHED, because BASIC had turned them and ADVANCED
+        // writes only touched roles, so the rotation would otherwise
+        // have vanished. The cost was that MERELY VISITING BASIC pinned
+        // seven literals into every file the editor saved afterwards,
+        // and a theme's own `contained` amber was one of the things it
+        // overwrote. BASIC does not turn them any more (they lean in the
+        // theme, `toward()` on each role's own expression), so there is
+        // nothing to hand over and nothing to mark — and the six roles
+        // nobody pointed at keep their author's words.
         assert_eq!(
             s.severity_touched,
-            [true; 7],
-            "the fold did not hand the rotated severity authors over"
+            [false; 7],
+            "the fold pinned severity roles nobody had chosen"
         );
         let folded = s.editor_edits();
         assert_eq!(
             folded.iter().filter(|e| e.token.starts_with("severity.")).count(),
-            7,
-            "ADVANCED dropped the roles BASIC had turned"
+            0,
+            "ADVANCED wrote a severity role the user never picked"
         );
         // THE LOOK SURVIVED. What ADVANCED writes for the accent after
         // the fold is the colour BASIC was writing before it — compared
@@ -12886,8 +13730,18 @@ mod tests {
         let start = lch(live("palette.accent"));
         let start_gap = sev_gap();
         // The theme the master ships, so a failure names both numbers.
+        //
+        // THE GAP WAS 121.0 UNTIL 2026-08-18 and is 117.7 now, and the
+        // 3.3 deg is the master's own severity lean arriving: `ok` at 148
+        // is 18.5 deg from the mint accent and leans a fifth of that
+        // (+3.7), while `critical` at 27 is 139.5 away and is stopped by
+        // `severity.pull_clamp` at +7. Both roles moved toward the same
+        // place from the same side, so they closed by the difference.
+        // This is a CANARY and not a claim about the lean — the claims
+        // are libnacelle's, measured over the theme rather than over a
+        // trip through this window.
         assert!(
-            (start.l - 0.8200).abs() < 0.001 && (start_gap - 121.0).abs() < 0.5,
+            (start.l - 0.8200).abs() < 0.001 && (start_gap - 117.7).abs() < 0.5,
             "the master moved under this test: accent L {} and ok/critical {start_gap}",
             start.l
         );
@@ -14904,7 +15758,7 @@ mod tests {
                                     | Ctrl::Section { .. }
                                     | Ctrl::Note { .. }
                                     | Ctrl::Hint { .. }
-                                    | Ctrl::Picker
+                                    | Ctrl::Picker(_)
                                     | Ctrl::Custom { .. } => None,
                                 };
                                 if let Some((label, ctrl_x)) = placed {
@@ -15295,8 +16149,12 @@ mod tests {
         let mut fonts = nacelle::font::FontSystem::new();
         let mut both_levels = 0;
         for p in PAGES.iter() {
-            let mut s = furnished();
-            s.view = p.view;
+            // The page's own section is UNFOLDED, said by the fixture
+            // rather than implied by the view: the second half of the
+            // double mark is only on the screen while the entry that
+            // wears it is, and since 2026-08-18 nothing about the view
+            // opens a section.
+            let mut s = railed_at(p.view, &[rail_act(p.view)]);
             let mut dl = nacelle::draw::DrawList::new();
             let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
             s.draw(&mut ctx);
@@ -15530,9 +16388,9 @@ mod tests {
     fn rail_frame(
         fonts: &mut nacelle::font::FontSystem,
         view: View,
+        open: &[Act],
     ) -> (Vec<(Rect, Act)>, Vec<FocusId>, Panes) {
-        let mut s = furnished();
-        s.view = view;
+        let mut s = railed_at(view, open);
         let mut fc = FocusCtl::new();
         let mut dl = nacelle::draw::DrawList::recording();
         fc.begin_frame();
@@ -15581,9 +16439,14 @@ mod tests {
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
         let mut fonts = nacelle::font::FontSystem::new();
-        // GRID is a section that IS its page, so LOOK AND FEEL — the one
-        // section with pages — stands shut.
-        let (hits, chain, nav) = rail_frame(&mut fonts, View::Grid);
+        // ON THE SECTION'S OWN PAGE, WITH THE SECTION SHUT — which is
+        // the state the window OPENS in since the fold stopped being
+        // the view read a second way ([`Settings::rail_open`]), and the
+        // state the coupling made unaskable: LOOK AND FEEL is the view
+        // this window comes up on, so under the old reading this frame
+        // could not exist. If the fold ever falls back to following the
+        // page, this is the assertion that says so.
+        let (hits, chain, nav) = rail_frame(&mut fonts, View::LookFeel, &[]);
         assert!(!nav.folded, "the window folded, so there is no rail to measure");
         let shut = furnished();
         let pages = nav_row_acts(&shut, &LOOKFEEL_PAGES);
@@ -15620,13 +16483,10 @@ mod tests {
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
         let mut fonts = nacelle::font::FontSystem::new();
-        let (hits, chain, nav) = rail_frame(&mut fonts, View::LookFeel);
+        let (hits, chain, nav) =
+            rail_frame(&mut fonts, View::LookFeel, &[Act::OpenLookFeel]);
         assert!(!nav.folded, "the window folded, so there is no rail to measure");
-        let open = {
-            let mut s = furnished();
-            s.view = View::LookFeel;
-            s
-        };
+        let open = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
         let pages = nav_row_acts(&open, &LOOKFEEL_PAGES);
         assert!(pages.len() > 1, "one page is not an unfold");
         let rail = nav.rail.expect("no rail").rows;
@@ -15677,6 +16537,450 @@ mod tests {
         viewport_home();
     }
 
+    /// THE OWNER'S REPORTS 1 AND 2 OF 2026-08-18, IN ONE FRAME-BY-FRAME
+    /// READING: the rail comes up SHUT, and a press on a section turns
+    /// its fold over.
+    ///
+    /// Both symptoms had one cause, so both are asserted here or neither
+    /// is proved. `rail_open` used to read `act == rail_act(self.view)`,
+    /// and the window opens on LOOK AND FEEL — so the list came up
+    /// unfolded, and pressing its entry led to the page already in
+    /// force, which is a press that does nothing anybody can see.
+    ///
+    /// AND THE PRESS DOES NOT TRAVEL, which is the decision the report
+    /// left open ([`Settings::toggle_rail`]): `self.view` is read before
+    /// and after and must not have moved. A press that navigated as well
+    /// would have to navigate on the way OUT too — shutting the list
+    /// would carry the reader off to a page.
+    ///
+    /// Read off REAL FRAMES rather than off the field: what a fold is
+    /// worth is what the hand can press and the keyboard can reach, and
+    /// a test that only asked `rail_open` would pass with the walker
+    /// laying pages under a shut section.
+    #[test]
+    fn the_rail_comes_up_shut_and_a_press_on_a_section_turns_its_fold_over() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// One frame of `s`, with the chain walked: what the pointer was
+        /// offered and what Tab can reach.
+        fn frame(
+            s: &mut Settings,
+            fonts: &mut nacelle::font::FontSystem,
+        ) -> (Vec<Act>, Vec<FocusId>) {
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            ctx.focus = Some(&mut fc);
+            s.draw(&mut ctx);
+            fc.begin_frame();
+            let mut chain: Vec<FocusId> = Vec::new();
+            fc.focus(None);
+            for _ in 0..s.hits.len() * 2 + 16 {
+                fc.nav(Nav::Next);
+                if let Some(id) = fc.focused() {
+                    if chain.contains(&id) {
+                        break;
+                    }
+                    chain.push(id);
+                }
+            }
+            (s.hits.iter().map(|&(_, a)| a).collect(), chain)
+        }
+
+        // The window as the owner meets it: opened by the road the
+        // desktop opens it by, not by a fixture.
+        let mut s = furnished();
+        s.show();
+        assert!(
+            s.view == View::LookFeel,
+            "the window stopped opening on the section this test is about"
+        );
+        let pages = nav_row_acts(&s, &LOOKFEEL_PAGES);
+        assert!(
+            pages.len() > 1,
+            "LOOK AND FEEL lists no pages, so a fold here would hide nothing"
+        );
+
+        let (hits, chain) = frame(&mut s, &mut fonts);
+        assert!(
+            hits.contains(&Act::OpenLookFeel),
+            "the rail lost the entry the report is about"
+        );
+        for act in &pages {
+            assert!(
+                !hits.contains(act),
+                "the window opened with the section's pages already on the rail — \
+                 the list starts unfolded ({})",
+                focus_id(*act).0
+            );
+            assert!(
+                !chain.contains(&focus_id(*act)),
+                "a page of the shut section is a step in the Tab order ({})",
+                focus_id(*act).0
+            );
+        }
+
+        // THE PRESS. It turns the fold over and leaves the page alone.
+        let was = s.view;
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(s.view == was, "pressing a section walked off the page as well");
+        let (hits, chain) = frame(&mut s, &mut fonts);
+        for act in &pages {
+            assert!(
+                hits.contains(act),
+                "a press on the section did not unfold it ({})",
+                focus_id(*act).0
+            );
+            assert!(
+                chain.contains(&focus_id(*act)),
+                "an unfolded page answers the pointer and not the keyboard ({})",
+                focus_id(*act).0
+            );
+        }
+
+        // AND A SECOND PRESS SHUTS IT AGAIN, which is what makes it a
+        // toggle rather than a one-way door.
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(s.view == was, "shutting the section walked off the page");
+        let (hits, chain) = frame(&mut s, &mut fonts);
+        for act in &pages {
+            assert!(
+                !hits.contains(act) && !chain.contains(&focus_id(*act)),
+                "a second press left the section open ({})",
+                focus_id(*act).0
+            );
+        }
+        viewport_home();
+    }
+
+    /// DECISION (b): A FOLD OUTLIVES A WALK TO ANOTHER SECTION'S PAGE.
+    ///
+    /// This is the assertion the change cannot dodge. The view is
+    /// exactly what used to drive the fold, so a coupling left anywhere
+    /// would be the reported fault surviving in a corner — and it would
+    /// surface as a rail that reshapes itself under the hand every time
+    /// the reader opens a page.
+    ///
+    /// The other half is asserted with it, because the pair is the whole
+    /// decision: walking INTO a section does not open it either. A rail
+    /// that unfolded on arrival would be the old reading wearing a new
+    /// field.
+    #[test]
+    fn a_fold_outlives_a_walk_to_another_sections_page() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = furnished();
+        s.show();
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(s.rail_open(Act::OpenLookFeel), "the section did not open");
+
+        // Away to a section of its own — GRID is a section that IS its
+        // page, so nothing about it has an opinion on this fold.
+        s.perform(Act::OpenGrid, 0.0, 0.0);
+        assert!(s.view == View::Grid, "the rail's other entry stopped being a door");
+        assert!(
+            s.rail_open(Act::OpenLookFeel),
+            "walking to another section's page shut a section the reader had opened"
+        );
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let offered: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+        for act in nav_row_acts(&s, &LOOKFEEL_PAGES) {
+            assert!(
+                offered.contains(&act),
+                "the fold survived in the field and not on the screen ({})",
+                focus_id(act).0
+            );
+        }
+
+        // AND ARRIVING SOMEWHERE OPENS NOTHING. Back into the section by
+        // its own page, with the fold put away first.
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(!s.rail_open(Act::OpenLookFeel), "the fold would not shut");
+        s.perform(Act::OpenSets, 0.0, 0.0);
+        assert!(s.view == View::LookFeel, "the section's own page stopped opening");
+        assert!(
+            !s.rail_open(Act::OpenLookFeel),
+            "arriving on a section's page unfolded the section — the fold is \
+             following the view again"
+        );
+        viewport_home();
+    }
+
+    /// DECISION (a): TWO SECTIONS MAY STAND OPEN AT ONCE.
+    ///
+    /// The rail holds one expander today, so the claim is made against a
+    /// table of two — the same way `a_section_the_page_turned_off_hands_
+    /// out_no_pages_either` makes its claim about a predicate the
+    /// shipped rail never exercises. What is being tested is the
+    /// WALKER's rule, and the walker takes any table.
+    ///
+    /// Under the reading this replaced the assertion was unwritable: the
+    /// fold was `act == rail_act(self.view)`, and one view cannot equal
+    /// two acts. That is not an argument for the change — the argument
+    /// is at [`Settings::rail_open`] — but it is why nothing here could
+    /// have been checked before.
+    #[test]
+    fn two_sections_of_the_rail_may_stand_open_at_once() {
+        static FIRST_KIDS: [Row; 1] = [row(Ctrl::Button {
+            label: Text::Fixed("ONE"),
+            kind: BtnKind::Wide,
+            act: Act::OpenBlur,
+        })];
+        static SECOND_KIDS: [Row; 1] = [row(Ctrl::Button {
+            label: Text::Fixed("TWO"),
+            kind: BtnKind::Wide,
+            act: Act::OpenAddons,
+        })];
+        static PAIR: [Row; 2] = [
+            row(Ctrl::Expander {
+                label: Text::Fixed("FIRST"),
+                kind: BtnKind::Wide,
+                act: Act::OpenLookFeel,
+                kids: &FIRST_KIDS,
+            }),
+            row(Ctrl::Expander {
+                label: Text::Fixed("SECOND"),
+                kind: BtnKind::Wide,
+                act: Act::OpenGrid,
+                kids: &SECOND_KIDS,
+            }),
+        ];
+
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// What the walker hands out for `PAIR` with `open` unfolded,
+        /// and how tall it measures the run.
+        fn walk(
+            fonts: &mut nacelle::font::FontSystem,
+            open: &[Act],
+        ) -> (Vec<Act>, Vec<FocusId>, f32) {
+            let mut s = railed_at(View::LookFeel, open);
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            ctx.focus = Some(&mut fc);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content).rail();
+            let region = Panes::of(m, content).rail.expect("no rail").rows;
+            let span = s.rows_span(&PAIR, m, region).0;
+            s.draw_rows(&mut ctx, &PAIR, m, region, region.y, None, Carrier::Rail);
+            fc.begin_frame();
+            let hits: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+            let chain: Vec<FocusId> = hits
+                .iter()
+                .map(|a| focus_id(*a))
+                .filter(|id| fc.rect_of(*id).is_some())
+                .collect();
+            (hits, chain, span)
+        }
+
+        let (none, _, shut_span) = walk(&mut fonts, &[]);
+        assert!(
+            !none.contains(&Act::OpenBlur) && !none.contains(&Act::OpenAddons),
+            "a table with nothing unfolded handed out pages, so this test cannot \
+             tell an open section from a broken walker"
+        );
+        let (both, chain, open_span) =
+            walk(&mut fonts, &[Act::OpenLookFeel, Act::OpenGrid]);
+        for act in [Act::OpenBlur, Act::OpenAddons] {
+            assert!(
+                both.contains(&act),
+                "one of two open sections handed out nothing ({})",
+                focus_id(act).0
+            );
+            assert!(
+                chain.contains(&focus_id(act)),
+                "a page of an open section is not in the Tab order ({})",
+                focus_id(act).0
+            );
+        }
+        // AND THE MEASUREMENT CARRIES BOTH. A height that counted one
+        // unfold would lay the second section's pages over the first's.
+        let (one, _, one_span) = walk(&mut fonts, &[Act::OpenLookFeel]);
+        assert!(
+            one.contains(&Act::OpenBlur) && !one.contains(&Act::OpenAddons),
+            "unfolding one section unfolded the other as well"
+        );
+        assert!(
+            open_span > one_span + 1.0 && one_span > shut_span + 1.0,
+            "the rail did not grow by each unfold in turn: {shut_span} shut, \
+             {one_span} with one open, {open_span} with both"
+        );
+        viewport_home();
+    }
+
+    /// DECISION (c): A FOLD DOES NOT SURVIVE THE WINDOW CLOSING.
+    ///
+    /// A fold is a view state and not a preference — nothing here writes
+    /// a `config` line, and "shut by default" that held exactly once per
+    /// session would not be a default. Asserted through BOTH doors into
+    /// the window, because the reset is written on the way in
+    /// ([`Settings::opening`]) and a door that forgot to use it is the
+    /// one way this can rot.
+    #[test]
+    fn a_fold_does_not_survive_the_window_closing() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut s = furnished();
+        s.show();
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(s.rail_open(Act::OpenLookFeel), "the section did not open");
+        s.close();
+        s.show();
+        assert!(
+            !s.rail_open(Act::OpenLookFeel),
+            "the settings window came back with yesterday's folds"
+        );
+
+        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        assert!(s.rail_open(Act::OpenLookFeel), "the section did not open again");
+        s.close();
+        s.show_grid();
+        assert!(
+            !s.rail_open(Act::OpenLookFeel),
+            "the window opened at GRID carrying a fold from the session before"
+        );
+    }
+
+    /// THE OWNER'S REPORT 3 OF 2026-08-18: the MODE row's plate is cut
+    /// like every other plate on the page, and the cut comes from the
+    /// theme.
+    ///
+    /// What the owner saw on the screen was one row of the editor whose
+    /// corners did not match the buttons above and below it. The cause
+    /// was not a theme that disagreed with itself — it was that
+    /// [`Settings::draw_cycle`] drew `rect_outline`, four straight bars
+    /// with no corners in them at all, and `[cycler]` stated a border
+    /// weight and no shape, so there was no key a theme could have used
+    /// to say otherwise.
+    ///
+    /// TWO CLAIMS, AND THE SECOND IS THE OWNER'S SENTENCE:
+    ///
+    /// * the ring the frame really laid carries the cut the `[cycler]`
+    ///   TOKENS name — read out of the engine by the word reading
+    ///   (`corner::cut`), which is the other of the toolkit's two paths
+    ///   into one dictionary and not the index reading the drawing uses.
+    ///   An expectation taken from `draw_cycle`'s own arithmetic would
+    ///   move with it and prove nothing;
+    /// * and it is the SAME cut a plain button plate on the same frame
+    ///   got — measured off that button's own recorded command, not off
+    ///   a second reading of the button's tokens. "The same as the rest"
+    ///   is a claim about two things on one screen, so both are read
+    ///   from one screen.
+    ///
+    /// FAIL-CLOSED ON THE MASTER'S OWN NUMBERS: a zero radius is a
+    /// square corner under every word there is, and a square cut is what
+    /// the broken drawing produced — so if the master ever stops asking
+    /// for a visible corner here, this test says so instead of passing
+    /// on a shape nobody can see.
+    #[test]
+    fn the_mode_row_is_cut_like_every_other_plate_on_the_page() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = railed_at(View::ThemeEditor, &[Act::OpenLookFeel]);
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let at = |act: Act| {
+            s.hits
+                .iter()
+                .find(|&&(_, a)| a == act)
+                .map(|&(r, _)| r)
+                .unwrap_or_else(|| panic!("the frame drew no {}", focus_id(act).0))
+        };
+        let cycler = at(Act::EditorMode);
+        // A plain button of the same frame: the rail's own section
+        // entry, which `object::button` dresses like every other plate
+        // in this window.
+        let button = at(Act::OpenLookFeel);
+
+        let same = |a: &[f32; 4], r: &Rect| {
+            (a[0] - r.x).abs() < 0.01
+                && (a[1] - r.y).abs() < 0.01
+                && (a[2] - r.w).abs() < 0.01
+                && (a[3] - r.h).abs() < 0.01
+        };
+        let mut worn: Option<[nacelle::draw::Corner; 4]> = None;
+        let mut plain: Option<[nacelle::draw::Corner; 4]> = None;
+        for cmd in dl.cmds() {
+            match cmd {
+                nacelle::draw::DrawCmd::Ring { r, corners, .. } if same(r, &cycler) => {
+                    worn = Some(*corners)
+                }
+                nacelle::draw::DrawCmd::RingFill { r, corners, .. }
+                    if same(r, &button) && plain.is_none() =>
+                {
+                    plain = Some(*corners)
+                }
+                _ => {}
+            }
+        }
+        let worn = worn.expect(
+            "the MODE row's plate is no ring at all — a bare rectangle outline has \
+             no corners for a theme to cut",
+        );
+        let plain = plain.expect("the rail's own entry was drawn with no plate");
+
+        // WHAT THE FILE ASKS FOR, straight out of the engine.
+        let t = theme::resolved();
+        let id = |n: &str| {
+            nacelle::theme::id(n).unwrap_or_else(|| panic!("the master declares no {n}"))
+        };
+        let word = nacelle::theme::enum_word_of(id("cycler.corner_style"))
+            .expect("a corner-style token names a word");
+        let want = nacelle::draw::Corner {
+            style: nacelle::corner::cut(&word),
+            size: nacelle::theme::corner_radius(t.px(id("cycler.corner")), cycler.w, cycler.h),
+        };
+        assert!(
+            want.size > 0.5 && want.style != nacelle::draw::CornerStyle::Square,
+            "the master asks for a {:?} of {} px here, which draws the same square \
+             plate the fault did — this test would pass on the bug",
+            want.style,
+            want.size
+        );
+        for (i, corner) in worn.iter().enumerate() {
+            assert_eq!(
+                *corner, want,
+                "corner {i} of the MODE row is not the cut `[cycler]` asks for"
+            );
+        }
+        // …AND IT IS THE PAGE'S OWN CUT. Both keys point at the button's
+        // in the master, so a row that came out different is a row that
+        // is not reading them.
+        for (i, corner) in worn.iter().enumerate() {
+            assert_eq!(
+                corner.style, plain[i].style,
+                "the MODE row is cut in a different shape from the buttons around it"
+            );
+            assert!(
+                (corner.size - plain[i].size).abs() < 0.01,
+                "the MODE row's corner {i} is {} px and the buttons around it are {}",
+                corner.size,
+                plain[i].size
+            );
+        }
+        viewport_home();
+    }
+
     /// AN ARROW IS A PROMISE (the owner's mock-up, §3). Only a section
     /// that has pages wears one; a section that IS its page has nothing
     /// to reveal and shows nothing that says it has.
@@ -15718,9 +17022,20 @@ mod tests {
         // recorded draw list, so a second arrow drawn by hand somewhere
         // would be caught however it got there.
         let mut fonts = nacelle::font::FontSystem::new();
-        for view in [View::LookFeel, View::Grid] {
-            let mut s = furnished();
-            s.view = view;
+        // THE ARROW FOLLOWS THE FOLD AND NOT THE PAGE, and the four
+        // combinations are what says so. Two of them were unaskable
+        // before 2026-08-18 — a section shut on its own page, and a
+        // section open from another one — because the fold was the view
+        // read a second way, and it is exactly those two the owner saw
+        // as "the list starts open and pressing it does nothing".
+        for (view, open, down) in [
+            (View::LookFeel, false, false),
+            (View::LookFeel, true, true),
+            (View::Grid, false, false),
+            (View::Grid, true, true),
+        ] {
+            let mut s =
+                railed_at(view, if open { &[Act::OpenLookFeel][..] } else { &[][..] });
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
@@ -15765,7 +17080,7 @@ mod tests {
             // is the sentence a row that keeps its place in the column
             // speaks (`view::paint::Disclosure`).
             let pts = &arrows[0];
-            if view == View::LookFeel {
+            if down {
                 assert!(
                     (pts[0][1] - pts[1][1]).abs() < 0.01 && pts[2][1] > pts[0][1],
                     "an unfolded section's arrow is not pointing at its pages"
@@ -15808,8 +17123,9 @@ mod tests {
         ) -> (Rect, Vec<Rect>, Vec<[f32; 4]>) {
             theme::resolved();
             theme::set_viewport(1080.0, 1.0);
-            let mut s = furnished();
-            s.view = View::LookFeel;
+            // Unfolded, said outright: there is no indent to measure and
+            // no guide to find beside a section that is standing shut.
+            let mut s = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
@@ -15999,10 +17315,10 @@ mod tests {
             fonts: &mut nacelle::font::FontSystem,
             rows: &'static [Row],
         ) -> (Vec<Act>, Vec<FocusId>, usize, f32) {
-            let mut s = furnished();
-            // The section is the one in force, so `rail_open` says it is
-            // unfolded and only the predicate can shut it.
-            s.view = View::LookFeel;
+            // The section is UNFOLDED, so only the predicate can shut
+            // it — which is the whole experiment. Asked of the fixture
+            // since 2026-08-18; it used to come free with the view.
+            let mut s = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
             let mut fc = FocusCtl::new();
             let mut dl = nacelle::draw::DrawList::recording();
             fc.begin_frame();
@@ -16112,8 +17428,10 @@ mod tests {
             s.draw(&mut ctx);
         }
 
-        let mut s = furnished();
-        s.view = View::LookFeel;
+        // Unfolded, because an unfold is what makes the rail outgrow its
+        // column at all — and since the fold stopped following the view,
+        // the fixture is the only thing that can ask for one.
+        let mut s = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
         let mut dl = nacelle::draw::DrawList::recording();
         frame(&mut s, &mut dl, &mut fonts);
         let rail = s.rail_flow.expect("the window folded at 720px — the regression is back");
@@ -16263,8 +17581,9 @@ mod tests {
         fn drawn(fonts: &mut nacelle::font::FontSystem) -> (Rect, [f32; 4], nacelle::theme::Color) {
             theme::resolved();
             theme::set_viewport(1080.0, 1.0);
-            let mut s = furnished();
-            s.view = View::LookFeel;
+            // Unfolded: the guide brackets a section's pages, and a shut
+            // section has none to bracket.
+            let mut s = railed_at(View::LookFeel, &[Act::OpenLookFeel]);
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
@@ -17222,10 +18541,20 @@ mod tests {
     ///   open one unfolds — is in the hit map at one of the offsets
     ///   [`rail_stops`] walks.
     ///
-    /// AND THIS IS STILL THE MEASUREMENT THE SINGLE-OPEN RULE RESTS ON
-    /// ([`Settings::rail_open`], decision (a)): the unfold has to COST
-    /// height, or the rail carries the open section's pages for free and
-    /// the bound single-open buys is a bound on nothing.
+    /// AND IT IS THE MEASUREMENT THAT PAID FOR THE SINGLE-OPEN RULE
+    /// BEING DROPPED ([`Settings::rail_open`], decision (a)). It used to
+    /// be cited the other way round — the unfold has to COST height, or
+    /// the bound single-open buys is a bound on nothing — and that
+    /// reading died with the fitting claim it stood on. What matters now
+    /// is the middle assertion below: the rail really does outgrow its
+    /// column somewhere in the ladder AND the wheel fetches the overflow
+    /// back, which is why the sum of every section's pages is no longer
+    /// something the window has to be protected from.
+    ///
+    /// EVERY SECTION UNFOLDED AT ONCE, which is the same claim made as
+    /// hard as this rail can make it: the longest rail the description
+    /// can produce is reachable end to end. A sweep that unfolded one
+    /// section would leave the case decision (a) allows untested.
     ///
     /// BOTH MACHINES, and the second is the taller one. `furnished()`
     /// has a colour manager, and a rail measured only there never
@@ -17239,11 +18568,23 @@ mod tests {
     fn every_section_the_rail_holds_can_be_reached_at_every_window() {
         let _g = crate::widgets::theme_test_lock();
         nacelle::theme::clear_preview();
-        /// One window, on one page, on one of the two machines.
-        fn rail_of(view: View, colour_manager: bool) -> Settings {
-            let mut s = furnished();
+        /// Every section the description can unfold. Read off the table
+        /// rather than named: a section given pages tomorrow is swept by
+        /// this test without anybody remembering to add it here.
+        fn expander_acts() -> Vec<Act> {
+            RAIL_ROWS
+                .iter()
+                .filter_map(|r| match r.ctrl {
+                    Ctrl::Expander { act, .. } => Some(act),
+                    _ => None,
+                })
+                .collect()
+        }
+        /// One window, on one page, on one of the two machines, with
+        /// the sections in `open` unfolded.
+        fn rail_of(view: View, colour_manager: bool, open: &[Act]) -> Settings {
+            let mut s = railed_at(view, open);
             s.color_enabled = colour_manager;
-            s.view = view;
             s
         }
         assert!(
@@ -17267,7 +18608,9 @@ mod tests {
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
             for p in PAGES.iter() {
-                let (open, shut) = (rail_of(p.view, true), rail_of(p.view, false));
+                let all = expander_acts();
+                let (open, shut) =
+                    (rail_of(p.view, true, &all), rail_of(p.view, false, &all));
                 let nav = Panes::of(m, content);
                 // The point of the second state, stated so it cannot
                 // quietly stop being true: a machine with no colour
@@ -17300,15 +18643,19 @@ mod tests {
                     if want > rail.h + 0.01 {
                         overflowed += 1;
                     }
-                    // The pages the open section unfolds are IN that
-                    // number: `rows_h` recurses into the section in
-                    // force and into no other ([`Settings::rows_span`]).
-                    // Measured against the SAME rail standing on a page
-                    // whose section has no pages, so the difference is
-                    // exactly what the unfold cost.
-                    let plain = rail_of(View::Grid, s.color_enabled)
+                    // The pages the open sections unfold are IN that
+                    // number: `rows_h` recurses into every section the
+                    // window has open ([`Settings::rows_span`]).
+                    // Measured against the SAME rail on the SAME page
+                    // with nothing unfolded, so the difference is
+                    // exactly what the unfolds cost. The reference used
+                    // to be another PAGE — a section that had no pages
+                    // to unfold — which stopped being a difference in
+                    // the fold the day the fold stopped following the
+                    // page ([`Settings::rail_open`]).
+                    let plain = rail_of(p.view, s.color_enabled, &[])
                         .rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
-                    if kid_acts(s, p.view).is_empty() {
+                    if all.is_empty() {
                         assert!(
                             (want - plain).abs() < 0.01,
                             "at {h}px, {which}, {} unfolds nothing and still costs \
@@ -17347,11 +18694,14 @@ mod tests {
         theme::set_viewport(HEIGHTS[0], 1.0);
         for p in PAGES.iter() {
             for colour_manager in [true, false] {
-                let reference = rail_of(p.view, colour_manager);
-                let want: Vec<Act> = nav_row_acts(&reference, &RAIL_ROWS)
-                    .into_iter()
-                    .chain(kid_acts(&reference, p.view))
-                    .collect();
+                let all = expander_acts();
+                let reference = rail_of(p.view, colour_manager, &all);
+                // The unfolded sections' pages are already IN this:
+                // `row_acts` recurses into every section the window has
+                // open. It used to need `kid_acts` welded on beside it,
+                // because the description's walk and the window's fold
+                // could disagree about which section that was.
+                let want: Vec<Act> = nav_row_acts(&reference, &RAIL_ROWS);
                 assert!(!want.is_empty(), "the rail describes nothing to reach");
                 let stops: Vec<f32> = {
                     let mut dl = nacelle::draw::DrawList::new();
@@ -17364,7 +18714,7 @@ mod tests {
                 };
                 let mut seen: Vec<Act> = Vec::new();
                 for stop in stops {
-                    let mut s = rail_of(p.view, colour_manager);
+                    let mut s = rail_of(p.view, colour_manager, &all);
                     s.rail_scroll.set_offset(stop);
                     let mut dl = nacelle::draw::DrawList::new();
                     let mut ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
@@ -17939,23 +19289,21 @@ mod tests {
     }
 
     /// Everything the rail offers this window: its sections, and the
-    /// pages of whichever section stands open.
+    /// pages of every section the window has unfolded.
     fn rail_acts(s: &Settings) -> Vec<Act> {
         nav_row_acts(s, &RAIL_ROWS)
     }
 
-    /// The pages the section in force unfolds under itself, if any —
-    /// asked on its own by the test that checks the SECOND half of the
-    /// double mark (§4).
-    fn kid_acts(s: &Settings, view: View) -> Vec<Act> {
-        RAIL_ROWS
-            .iter()
-            .find_map(|r| match r.ctrl {
-                Ctrl::Expander { act, kids, .. } if act == rail_act(view) => Some(kids),
-                _ => None,
-            })
-            .map_or_else(Vec::new, |kids| nav_row_acts(s, kids))
-    }
+    // `kid_acts` stood here until 2026-08-18: the pages the section in
+    // force unfolded, worked out from the VIEW so that a caller could
+    // weld them onto a rail walk that had not included them. It has no
+    // callers now, and the reason is the point — a section's pages are
+    // in `rail_acts` whenever the window has that section open, and the
+    // window's fold is a state anybody can ask about
+    // ([`Settings::rail_open`]) instead of something rederived from the
+    // page. A helper that answers "which pages does THIS VIEW unfold"
+    // would be the coupling the owner reported, kept alive in the test
+    // module.
 
     /// Everything the WINDOW promises on one page: the navigation, then
     /// the page's own acts. The order is the order the frame registers
@@ -18053,11 +19401,11 @@ mod tests {
             // places them — this is the DESCRIPTION's copy of that list
             // and the two are checked against each other by the sweep
             // that calls both.
-            Ctrl::Picker => nacelle::object::color_picker::parts(
+            Ctrl::Picker(id) => nacelle::object::color_picker::parts(
                 &nacelle::object::color_picker::layout(Rect::new(0.0, 0.0, 0.0, 0.0), s.picker_custom.len()),
             )
             .into_iter()
-            .map(|(part, _)| picker_act(part))
+            .map(|(part, _)| picker_act(*id, part))
             .collect(),
             Ctrl::Section { .. }
             | Ctrl::Note { .. }

@@ -97,6 +97,22 @@ libc = "0.2"
 
 
 
+# TEMPORARY, AND IT MUST NOT SURVIVE THE MERGE. Several of the owner's
+# reports of 2026-08-18 are answered on both sides of the library edge at
+# once, so a pinned commit cannot carry the desktop's half until the
+# toolkit's is merged:
+#   * report 3 — `[cycler] corner` / `corner_style` are new keys of the
+#     master theme and `nacelle::corner::segments` a new public reader;
+#   * report 6 — `theme::edit::border_width_edit` and `glow_reach_edit`
+#     are new, and `[border.edge] width` / `[glow] panel_edge.radius`
+#     gain the notes that say who writes them;
+#   * report 7 — `theme::edit::GlassReach` is new and `glass_edits` takes
+#     one more argument, so the old signature does not compile here.
+# TO REMOVE: merge libnacelle first, bump the pin in Cargo.lock to the
+# resulting commit, delete this block.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }
+
 [profile.release]
 lto = "thin"
 opt-level = 3
