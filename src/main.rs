@@ -3022,6 +3022,15 @@ fn main() {
                 // Blocking briefly is the point: the process would
                 // otherwise cut the sound off as it goes.
                 Event::LoopExiting => {
+                    // Every setting the user changed, on the disk before
+                    // the process goes. The saves are made durable on a
+                    // thread of their own so that the interface never
+                    // waits for an `fsync` (measured 2026-08-18: 0.516 s
+                    // of them on this loop, one save costing 0.35 s), and
+                    // this is the other half of that bargain — without
+                    // it the last press before quitting would be the one
+                    // that did not count.
+                    config::flush_writes();
                     if let Some(a) = audio.as_mut() {
                         a.play_blocking(nacelle::sound::Event::Shutdown, 1400);
                     }
