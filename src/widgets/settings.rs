@@ -294,8 +294,10 @@ enum Flip {
     /// `focus.ring.enabled`. OFF is the flag alone — the model leaves
     /// the ring's whole dress standing, LINE's lesson.
     Ring,
-    /// `glow.focus_ring.enabled`, dressing itself like NEON on a theme
-    /// whose halo has no radius yet.
+    /// `glow.focus_ring.enabled`, dressing itself like a lit border kind
+    /// on a theme whose halo has no radius yet. The ring's halo took no
+    /// part in the tube of 2026-08-18 — the owner's scope was the frame of
+    /// the whole object and nothing inside it.
     Halo,
     /// `scrollbar.auto_hide`; the FADE track appears with it, because
     /// the declaration reads the fade only while this is on.
@@ -2145,9 +2147,12 @@ static EDITOR_BASIC_ROWS: [Row; 10] = [
 /// `oklch(L, C, H)` — three sliders is the shape of the value, not a
 /// choice about how many controls to offer.
 ///
-/// The halo of NEON has no colour of its own; it wears the line's. So there
-/// is one colour here and not two, and the list above it switches a glow
-/// on rather than introducing a second thing to tint.
+/// Neither lit kind's light has a colour of its own; both wear the line's.
+/// So there is one colour here and not two, and the list above it switches
+/// the light on and shapes it rather than introducing a second thing to
+/// tint — GLOW spills the border's colour, NEON drives its core white and
+/// lets the colour live in the band just outside it, and the colour they
+/// are both made of is the one these three sliders set.
 ///
 /// Since 2026-08-16 the page carries the WHOLE THEME: after the border
 /// and the background come one section per set of `theme/edit.rs` —
@@ -3811,9 +3816,14 @@ pub struct Settings {
     cur_weight: [Option<String>; 2],
     /// Font sizes in percent (50-200).
     cur_size: [u32; 2],
-    /// The two shapes a border can take, as the list offers them. Built in
-    /// rather than read from anywhere: they are not files, they are the
-    /// only two things the renderer can draw for a border.
+    /// The three shapes a border can take, as the list offers them. Built
+    /// in rather than read from anywhere: they are not files, they are the
+    /// only three things the renderer can draw for a border.
+    ///
+    /// GLOW was called NEON until 2026-08-18 — the owner asked for that
+    /// word back for the thing it actually names, a lit glass tube, and
+    /// the soft halo it used to name took the plainer one. The ORDER is
+    /// the order of the light: none, spilled, lit.
     border_kinds: Vec<String>,
     current_border: Option<String>,
     background_kinds: Vec<String>,
@@ -4144,7 +4154,11 @@ impl Settings {
             cur_weight: [None, None],
             cur_size: [100, 100],
             editor_pulse: None,
-            border_kinds: vec!["LINE".to_string(), "NEON".to_string()],
+            border_kinds: vec![
+                "LINE".to_string(),
+                "GLOW".to_string(),
+                "NEON".to_string(),
+            ],
             current_border: None,
             background_kinds: vec![
                 "SOLID".to_string(),
@@ -4645,7 +4659,15 @@ impl Settings {
             // was touched switched the halo off as a side effect.
             None => vec![border_colour_edit(Scope::Theme, colour)],
             other => {
-                let kind = if other == Some("NEON") { Border::Neon } else { Border::Line };
+                // The three names the list offers, and the fall-through
+                // is LINE because a name this build does not know draws
+                // the least: a kind nobody can spell must not light
+                // anything.
+                let kind = match other {
+                    Some("NEON") => Border::Neon,
+                    Some("GLOW") => Border::Glow,
+                    _ => Border::Line,
+                };
                 // Whether the THEME already dresses a visible halo — if it
                 // does, NEON keeps the theme's radius and alpha instead of
                 // flattening five themes' dress to one theme's numbers.
@@ -4886,8 +4908,31 @@ impl Settings {
         if let Some(c) = col_of("elev.panel.edge.color") {
             seed(&mut self.edge, c);
         }
-        self.current_border =
-            Some(if flag("glow.panel_edge.enabled") { "NEON" } else { "LINE" }.to_string());
+        // THE COMPATIBILITY SEAM, and it is one line wide.
+        //
+        // Until 2026-08-18 the lit kind was called NEON and there was
+        // only one of it. Themes saved under that name — the owner's
+        // among them — say `glow.panel_edge.enabled = true` and NOT ONE
+        // WORD about a falloff, so they inherit the master's `gauss`,
+        // which is the soft halo they have always drawn. They must open
+        // on GLOW: opening them on NEON would tell the user their theme
+        // is something it is not, and the first slider drag would then
+        // SAVE that lie into the file.
+        //
+        // So the word decides, and only the word `tube` means the tube.
+        // Everything else about a lit border — its reach, its amount, its
+        // colour — is shared by the two kinds and says nothing about
+        // which one is in force.
+        self.current_border = Some(
+            if !flag("glow.panel_edge.enabled") {
+                "LINE"
+            } else if word("glow.panel_edge.falloff").as_deref() == Some("tube") {
+                "NEON"
+            } else {
+                "GLOW"
+            }
+            .to_string(),
+        );
         // THE TWO DRESS QUESTIONS, ASKED HERE AND NOWHERE ELSE. Both
         // roads onto this line run with no preview standing: CANCEL
         // clears it a statement earlier, and the door is reached from
@@ -10308,7 +10353,12 @@ mod tests {
         let mut ctx2 = probe(&mut dl2, &mut fonts, 1080.0, 1.0);
         s.dropdown_since = None; // fully unfolded, no animation
         s.draw(&mut ctx2);
-        let neon = s.hits.iter().find(|&&(_, a)| a == Act::Pick(ListId::Borders, 1))
+        // Row 2 is NEON, the tube (row 1 is GLOW, the halo it was called
+        // until 2026-08-18). Picked by INDEX and checked against the
+        // list's own member, so a re-ordering fails loudly here instead
+        // of quietly testing a different kind.
+        let want = s.border_kinds[2].clone();
+        let neon = s.hits.iter().find(|&&(_, a)| a == Act::Pick(ListId::Borders, 2))
             .map(|&(r, _)| r).expect("the open BORDER list registered no NEON row");
         assert!(
             !s.click(neon.x + neon.w / 2.0, neon.y + neon.h / 2.0, w, h, None),
@@ -10317,9 +10367,10 @@ mod tests {
         );
         assert_eq!(
             s.current_border.as_deref(),
-            Some("NEON"),
+            Some(want.as_str()),
             "the pick did not set the border kind"
         );
+        assert_eq!(want, "NEON", "the list's third border is no longer NEON");
     }
 
     /// The three lists BASIC grew on 2026-08-17: each anchor is drawn,
@@ -11093,6 +11144,114 @@ mod tests {
             edits.iter().any(|e| e.token == "glow.panel_edge.enabled" && e.value == "true"),
             "NEON did not switch the halo on"
         );
+    }
+
+    /// THE OWNER'S SAVED THEME OPENS ON GLOW.
+    ///
+    /// `~/.local/share/nacelle-desktop/themes/` carries a theme whose
+    /// whole `[glow]` section is `panel_edge.enabled = true`. It was
+    /// saved when the lit kind was called NEON and there was one of them;
+    /// on 2026-08-18 that kind became GLOW and NEON became a lit tube.
+    /// A file that says nothing about a falloff inherits the master's
+    /// `gauss` and draws exactly what it always drew, so the list has to
+    /// open on GLOW — and the edit set it then builds has to keep saying
+    /// `gauss`, because the first slider drag SAVES whatever the set
+    /// says.
+    ///
+    /// Both halves are here on purpose. Opening on the right row and then
+    /// writing `tube` on the first drag is the same bug arriving one
+    /// gesture later, and it is the one that reaches the FILE.
+    #[test]
+    fn a_theme_saved_before_the_tube_existed_opens_on_glow() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        // The owner's file, in the only two things it says that matter
+        // here: the light is on, and no word about its shape.
+        assert!(
+            nacelle::theme::set_preview(&[("glow.panel_edge.enabled", "true")]).is_empty(),
+            "the old theme's own line was refused"
+        );
+        let s = editor_open();
+        nacelle::theme::clear_preview();
+        assert_eq!(
+            s.current_border.as_deref(),
+            Some("GLOW"),
+            "a theme saved under the old NEON opened on the tube"
+        );
+        let edits = s.editor_edits();
+        let falloff = edits
+            .iter()
+            .find(|e| e.token == "glow.panel_edge.falloff")
+            .expect("the lit kind named no falloff at all");
+        assert_eq!(
+            falloff.value, "gauss",
+            "the first drag would have written a tube into a theme that has none"
+        );
+    }
+
+    /// AND A THEME THAT SAYS `tube` OPENS ON NEON.
+    ///
+    /// The other side of the same seam, without which the one above
+    /// passes on a build where the word never resolves and every theme in
+    /// the world is a GLOW.
+    #[test]
+    fn a_theme_that_names_the_tube_opens_on_neon() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        nacelle::theme::clear_preview();
+        assert!(
+            nacelle::theme::set_preview(&[
+                ("glow.panel_edge.enabled", "true"),
+                ("glow.panel_edge.falloff", "tube"),
+            ])
+            .is_empty(),
+            "the master does not know the word `tube`"
+        );
+        let s = editor_open();
+        nacelle::theme::clear_preview();
+        assert_eq!(
+            s.current_border.as_deref(),
+            Some("NEON"),
+            "a theme wearing the tube opened on the halo"
+        );
+        assert_eq!(
+            s.editor_edits()
+                .iter()
+                .find(|e| e.token == "glow.panel_edge.falloff")
+                .map(|e| e.value.as_str()),
+            Some("tube"),
+            "reopening a tube theme would have written the halo's word back"
+        );
+    }
+
+    /// AN UNLIT THEME OPENS ON LINE, whatever it says about a falloff.
+    ///
+    /// The falloff of a border that draws no light is not a kind, and a
+    /// file that carries a leftover `tube` from a kind the user switched
+    /// away from must not be read as wearing one.
+    #[test]
+    fn an_unlit_theme_opens_on_line_however_it_spells_its_falloff() {
+        let _g = crate::widgets::theme_test_lock();
+        for word in ["gauss", "tube"] {
+            theme::resolved();
+            nacelle::theme::clear_preview();
+            assert!(
+                nacelle::theme::set_preview(&[
+                    ("glow.panel_edge.enabled", "false"),
+                    ("glow.panel_edge.falloff", word),
+                ])
+                .is_empty(),
+                "the unlit theme was refused"
+            );
+            let s = editor_open();
+            nacelle::theme::clear_preview();
+            assert_eq!(
+                s.current_border.as_deref(),
+                Some("LINE"),
+                "an unlit border wearing a leftover `{word}` opened lit"
+            );
+        }
     }
 
     /// The two crossings between the editor's sRGB tracks and the file's

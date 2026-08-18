@@ -93,3 +93,15 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
+
+# ------------------------------------------------------------------------
+# TEMPORARY, FOR THE `feat/neon-tube` BRANCH ONLY — REMOVE BEFORE MERGING.
+#
+# The neon tube is a toolkit change: `theme::edit::Border` grew a third
+# member and `[glow] panel_edge` grew a profile, both in libnacelle. This
+# repository's editor page reads that enum by name, so the two branches
+# have to be built against each other while they are branches. On merge
+# the order is the standing one — libnacelle first, then the pin in
+# `Cargo.lock` bumped to the merge commit, then this block deleted.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }
