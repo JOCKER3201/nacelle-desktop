@@ -14,11 +14,12 @@
 //! card — every one of those leaves the program fully usable and merely
 //! silent, so nothing here may fail loudly.
 
-use nacelle::sound::{Clip, Event, Mixer, SoundTheme};
+use nacelle::sound::{Clip, Event, SharedMixer, SoundTheme};
 use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ALSA constants (alsa/pcm.h).
 const STREAM_PLAYBACK: c_int = 0;
@@ -179,7 +180,7 @@ struct Pcm(*mut c_void);
 unsafe impl Send for Pcm {}
 
 pub struct Audio {
-    mixer: Arc<Mutex<Mixer>>,
+    mixer: Arc<SharedMixer>,
     rate: u32,
     theme: SoundTheme,
     stop: Arc<AtomicBool>,
@@ -199,7 +200,7 @@ impl Audio {
             (Arc::new(alsa), Pcm(pcm), rate, float)
         };
 
-        let mixer = Arc::new(Mutex::new(Mixer::new()));
+        let mixer = Arc::new(SharedMixer::new());
         let stop = Arc::new(AtomicBool::new(false));
         let m = mixer.clone();
         let s = stop.clone();
@@ -216,12 +217,13 @@ impl Audio {
                 let mut buf = vec![0.0f32; frames * ch];
                 let mut pcm16 = vec![0i16; frames * ch];
                 while !s.load(Ordering::Relaxed) {
-                    match m.lock() {
-                        Ok(mut mix) => mix.fill(&mut buf, ch),
-                        // Never send stale memory to the card: that is
-                        // what a burst of noise sounds like.
-                        Err(_) => buf.iter_mut().for_each(|v| *v = 0.0),
-                    }
+                    // Filling THROUGH the shared mixer is what raises
+                    // the "the last clip just ended" edge that
+                    // `play_blocking` waits on; a bare `lock().fill()`
+                    // here would render the same samples and tell
+                    // nobody, which is how the exit came to be timed by
+                    // a constant instead of by the sound.
+                    m.fill(&mut buf, ch);
                     if !float {
                         for (o, i) in pcm16.iter_mut().zip(buf.iter()) {
                             *o = (i.clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -291,9 +293,7 @@ impl Audio {
 
     pub fn set_volume(&mut self, v: f32) {
         self.volume = v.clamp(0.0, 1.0);
-        if let Ok(mut m) = self.mixer.lock() {
-            m.set_volume(self.volume);
-        }
+        self.mixer.lock().set_volume(self.volume);
     }
 
     pub fn set_typing_enabled(&mut self, on: bool) {
@@ -311,9 +311,7 @@ impl Audio {
         } else {
             None
         };
-        if let Ok(mut m) = self.mixer.lock() {
-            m.set_ambient(clip);
-        }
+        self.mixer.lock().set_ambient(clip);
     }
 
     /// Plays whatever the theme assigns to this event. An event the
@@ -326,21 +324,46 @@ impl Audio {
             return;
         }
         let Some(clip) = self.theme.clip(e) else { return };
-        if let Ok(mut m) = self.mixer.lock() {
-            m.play(clip, 1.0);
-        }
+        self.mixer.lock().play(clip, 1.0);
     }
 
-    /// Plays a clip and waits for it, for the shutdown sound that the
-    /// process would otherwise cut off on its way out. Never waits
-    /// longer than `max_ms`, so a broken theme cannot hang the exit.
-    pub fn play_blocking(&mut self, e: Event, max_ms: u64) {
+    /// The longest the exit may wait for a farewell clip of `frames`:
+    /// the clip's own length plus the one device buffer that is still in
+    /// flight at the moment the mixer says it is finished.
+    ///
+    /// This is a WATCHDOG, not a duration. What normally ends the wait is
+    /// [`SharedMixer::wait_drained`]'s event; this number only bounds the
+    /// case where the card has stopped consuming buffers altogether, and
+    /// it is derived rather than chosen so that no length lives in Rust:
+    /// the length of the goodbye is the length of the file the sound
+    /// theme ships, which is the theme's decision and nobody else's.
+    ///
+    /// The predecessor was `min(clip_ms, 1400) + 60`, and both halves
+    /// were wrong. The `min` CUT THE THEME OFF — the master theme's
+    /// `shutdown.wav` is 1800 ms, so the program silenced its own sound
+    /// 400 ms early — and the sleep spent the whole nominal length
+    /// whatever the card was doing, which is where strace found a
+    /// `clock_nanosleep` of exactly 1.46 s on every single exit.
+    fn farewell_cap(frames: usize, rate: u32) -> Duration {
+        let rate = rate.max(1) as u64;
+        Duration::from_millis((frames as u64 + BUFFER_FRAMES) * 1000 / rate)
+    }
+
+    /// Plays a clip and waits for it to actually finish, for the
+    /// shutdown sound the process would otherwise cut off on its way out.
+    ///
+    /// The wait ends on an EVENT: the writer thread renders the last
+    /// sample of the clip, the shared mixer raises its drained edge, and
+    /// this returns — typically before the nominal length, because the
+    /// samples still inside the device are then flushed by the ALSA
+    /// drain in `Drop`, which was always going to happen anyway.
+    /// [`Audio::farewell_cap`] is only the fuse on a card that has
+    /// stopped taking buffers.
+    pub fn play_blocking(&mut self, e: Event) {
         let Some(clip) = self.theme.clip(e) else { return };
-        let ms = (clip.len() as u64 * 1000 / self.rate.max(1) as u64).min(max_ms);
-        if let Ok(mut m) = self.mixer.lock() {
-            m.play(clip, 1.0);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(ms + 60));
+        let cap = Audio::farewell_cap(clip.len(), self.rate);
+        self.mixer.lock().play(clip, 1.0);
+        self.mixer.wait_drained(cap);
     }
 }
 
@@ -353,5 +376,53 @@ impl Drop for Audio {
         if let Some(w) = self.writer.take() {
             let _ = w.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The master sound theme's own `shutdown.wav`: 86 400 mono frames
+    /// at 48 kHz, which is 1800 ms. Stated as the numbers rather than
+    /// read from the file, because the file lives in another repository
+    /// and this test is about arithmetic, not about installation.
+    const SHUTDOWN_FRAMES: usize = 86_400;
+    const SHUTDOWN_RATE: u32 = 48_000;
+
+    /// THE THEME'S CLIP MUST NOT BE CUT OFF BY A NUMBER IN RUST.
+    ///
+    /// The predecessor computed `min(1800, 1400) + 60` = 1460 ms and
+    /// slept exactly that on every exit — which is both the 1.46 s
+    /// strace measured and 400 ms of the theme's goodbye thrown away.
+    /// A cap below the clip is a cap that silences the sound.
+    #[test]
+    fn the_farewell_cap_never_truncates_the_theme() {
+        let cap = Audio::farewell_cap(SHUTDOWN_FRAMES, SHUTDOWN_RATE);
+        assert!(
+            cap >= Duration::from_millis(1800),
+            "the master theme's 1800 ms shutdown would be cut at {cap:?}"
+        );
+        // And it is a fuse, not a pause: nothing beyond the clip plus
+        // the single device buffer that is still in flight.
+        assert!(
+            cap <= Duration::from_millis(1800) + Duration::from_millis(50),
+            "{cap:?} is longer than the sound could honestly take"
+        );
+    }
+
+    /// A theme with a short sound must pay a short fuse. The cap follows
+    /// the clip; nothing in it is a constant of the program's own.
+    #[test]
+    fn the_farewell_cap_follows_the_clip() {
+        let short = Audio::farewell_cap(4_800, 48_000); // 100 ms
+        let long = Audio::farewell_cap(240_000, 48_000); // 5 s
+        assert!(short >= Duration::from_millis(100));
+        assert!(short < Duration::from_millis(200));
+        assert!(long >= Duration::from_secs(5));
+        // A theme with no shutdown sound at all waits for nothing.
+        assert_eq!(Audio::farewell_cap(0, 48_000), Duration::from_millis(21));
+        // A device that reports a nonsense rate must not divide by zero.
+        let _ = Audio::farewell_cap(4_800, 0);
     }
 }

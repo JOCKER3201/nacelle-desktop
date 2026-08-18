@@ -3019,11 +3019,14 @@ fn main() {
                 }
                 // One exit hook for every way out — the close button,
                 // Ctrl+Shift+Q, the compositor, the last shell dying.
-                // Blocking briefly is the point: the process would
-                // otherwise cut the sound off as it goes.
+                // Blocking is the point: the process would otherwise cut
+                // the sound off as it goes. How LONG it blocks is the
+                // sound's own business — the clip reports when it has
+                // been rendered and that is what ends the wait, so a
+                // theme with no shutdown sound pays nothing at all.
                 Event::LoopExiting => {
                     if let Some(a) = audio.as_mut() {
-                        a.play_blocking(nacelle::sound::Event::Shutdown, 1400);
+                        a.play_blocking(nacelle::sound::Event::Shutdown);
                     }
                 }
                 _ => {}
