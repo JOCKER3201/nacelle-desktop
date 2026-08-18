@@ -3427,6 +3427,17 @@ fn draw_screen(
                 // the whole turn. It is emitted BEFORE the first face
                 // and therefore before any face's `start`, so no yaw
                 // ever touches it: the walls move, the void does not.
+                //
+                // It covers the ground the frame laid a few hundred
+                // lines above, which is why the master derives
+                // `motion.board_ride.void` from `@backdrop.solid` and
+                // not from the swapchain clear it used to name: the two
+                // were the same colour only while a standing frame
+                // painted nothing, and once the frame laid its ground a
+                // ride that opened on the clear dimmed the whole screen
+                // fourfold for its 300 ms. Held down by
+                // `the_cube_turns_in_the_ground_a_standing_board_lays`
+                // in the toolkit, beside the reader.
                 if horizontal {
                     let void = nacelle::deco::ride_void();
                     ctx.dl.rect(0.0, 0.0, w, h, void);
@@ -3443,9 +3454,13 @@ fn draw_screen(
                     // panels so the yaw and the perspective divide
                     // below take ground and panels together.
                     // Standing still, and riding up or down, a board
-                    // paints no ground at all: the frame's own clear
-                    // and plate are already there and must stay visible
-                    // under the fixture that rides in over them.
+                    // paints no ground of its own: the FRAME has
+                    // already laid one — `board_ground` at the head of
+                    // this function, the same two levels and the same
+                    // plate — and it must stay visible under the
+                    // fixture that rides in over it. Only the sideways
+                    // turn needs a second copy, because that one has to
+                    // be inside the face's own yaw.
                     // Fixtures carry a face material on top — frosted
                     // glass: whatever is beneath shows through it
                     // blurred. The glass is sampled by screen position,
@@ -4393,6 +4408,16 @@ mod tests {
     /// window, a GPU and a live session. What can be settled without
     /// them is that the ground goes through the toolkit's one reader and
     /// that this file no longer lays half of it by hand.
+    ///
+    /// WHAT A SOURCE GUARD CANNOT SETTLE, said plainly rather than left
+    /// to be discovered: it answers about the TEXT of one call, so it
+    /// catches the old code coming back and it catches the call being
+    /// dropped, and it cannot catch a call that is still there and no
+    /// longer draws anything. Verification found exactly that hole — the
+    /// extent zeroed, `board_ground(&mut dl, 0.0, 0.0, backdrop)`, put
+    /// the fault back whole and left this test green — so the screen's
+    /// own two numbers are part of what is asserted now. That is the end
+    /// of what text can do; the pixels are the owner's to see.
     #[test]
     fn the_frame_lays_its_ground_through_the_toolkit() {
         let src = include_str!("main.rs");
@@ -4408,11 +4433,14 @@ mod tests {
         );
         // The FRAME's own call, told from the per-face one by the list it
         // is handed: the frame owns its draw list, a riding face draws
-        // through the widget context.
-        let frames_ground = format!("{}{}", "deco::", "board_ground(&mut dl,");
+        // through the widget context. WITH THE SCREEN'S OWN EXTENT: a
+        // ground drawn at no size is no ground, and the pyramid is back
+        // to holding the clear alone.
+        let frames_ground = format!("{}{}", "deco::", "board_ground(&mut dl, w, h, backdrop)");
         assert!(
             src.contains(&frames_ground),
-            "the frame stopped laying its ground through the toolkit"
+            "the frame stopped laying its ground across the whole screen through \
+             the toolkit"
         );
     }
 }

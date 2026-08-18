@@ -4163,7 +4163,23 @@ impl Settings {
             // 60/20/210, which took 46% of the light off every frosted
             // surface in the program the first time BLUR was pressed.
             tint: [100, 0, 0],
-            wash: [20, 15, 210],
+            // The wash's placeholder is COLOURLESS for the same reason,
+            // and it is the closest thing this slot has to the tint's
+            // identity: full brightness, no saturation, so no hue is
+            // chosen here. A wash cannot decide nothing the way a
+            // multiply can — its alpha is the WASH COVERAGE slider's,
+            // beside it — so the honest opening is the one that adds
+            // light without adding a colour. `seed_editor_from_theme`
+            // overwrites it from `component.panel.fill`, and from
+            // `elev.panel.glass.wash` where the theme lays one, on every
+            // visit; it survives only where a theme declares NEITHER
+            // key, and an unstyled body is what the governing principle
+            // asks to see there. It used to open at 20/15/210, a violet
+            // belonging to no theme, and that violet reached the file
+            // the first time FROSTED GLASS was pressed on any theme
+            // wearing a rank with no wash — which is precisely what this
+            // editor's own BLUR preset saves.
+            wash: [100, 0, 0],
             bg_opacity: 100,
             bg_depth: 50,
             bg_coverage: 42,
@@ -4914,10 +4930,11 @@ impl Settings {
         self.ring_halo_dressed =
             px("glow.focus_ring.radius") > 0.0 && px("glow.focus_ring.alpha") > 0.0;
 
-        // The background: kind from the rank and the wash, colours from
-        // whichever quads are live. A solid seeds the WASH group from the
-        // shared fill, because that is the group SOLID writes back through.
-        let rank = px("elev.panel.glass.rank").round() as u32;
+        // The background: kind from the rank and the wash, and then EVERY
+        // control the kind owns — two colours and three amounts — off the
+        // theme, whatever the kind. Not one of them off this file.
+        let rank_px = px("elev.panel.glass.rank");
+        let rank = rank_px.round() as u32;
         let wash_a = col_of("elev.panel.glass.wash").map_or(0.0, |c| c.a);
         self.current_background = Some(
             match (rank, wash_a > 0.0) {
@@ -4947,14 +4964,62 @@ impl Settings {
         if let Some(c) = col_of("elev.panel.glass.tint") {
             seed(&mut self.tint, c);
         }
-        if rank == 0 {
-            if let Some(c) = col_of("component.panel.fill") {
-                seed(&mut self.wash, c);
-            }
-        } else if let Some(c) = col_of("elev.panel.glass.wash") {
+        // AND SO IS THE WASH GROUP, for the same reason and against the
+        // same hole. One slot serves two keys — SOLID writes it to
+        // `component.panel.fill`, FROSTED to `elev.*.glass.wash` — and it
+        // was read only where the kind that writes it was the kind the
+        // theme already wore. The case in between is not exotic: it is
+        // the theme THIS EDITOR SAVES when the owner picks BLUR, which
+        // writes a rank and `wash = none` by definition
+        // (`edit::glass_edits`). Reopen that file and the wash tracks
+        // held 20/15/210 out of `Settings::new`; press FROSTED GLASS and
+        // that violet went into the file as the panels' own colour.
+        //
+        // The fill FIRST and the wash OVER it, which is the order the two
+        // keys stand in rather than a preference: `component.panel.fill`
+        // is the body every theme declares and the seam SOLID writes
+        // back through, so it is the answer whenever the frost has no
+        // light of its own; a wash with alpha is the theme saying
+        // something more particular, so it wins where it exists.
+        if let Some(c) = col_of("component.panel.fill") {
+            seed(&mut self.wash, c);
+        }
+        if let Some(c) = col_of("elev.panel.glass.wash") {
             if c.a > 0.0 {
                 seed(&mut self.wash, c);
             }
+        }
+        // THE THREE AMOUNTS, on the same rule as the two colours. This
+        // page's own head promises that the maps back onto the tracks are
+        // the exact inverses of `editor_edits`' maps out, "so a theme
+        // saved and reopened lands the sliders where the hand left them",
+        // and for OPACITY, BLUR DEPTH and WASH COVERAGE that was simply
+        // not so: they opened on 100, 50 and 42 out of `Settings::new`
+        // every visit, so reopening a theme saved at depth 2.6 offered
+        // depth 2.0, and an editor opened on the master and put back on
+        // SOLID turned the panels opaque — the master's own body carries
+        // alpha 0.82.
+        //
+        // Each is read from the key the kind it belongs to WRITES, and
+        // only where that key has something to say: a coverage cannot be
+        // read off a wash that is not there, and a depth cannot be read
+        // off a rank of zero. Where it has nothing to say the opening
+        // value stands, which is the one place these three numbers are
+        // still this file's — and the controls they drive are not on
+        // screen there (`Row::when`: no depth without a blur, no coverage
+        // without a frost).
+        let alpha_key = if rank == 0 { "component.panel.fill" } else { "elev.panel.glass.tint" };
+        if let Some(c) = col_of(alpha_key) {
+            self.bg_opacity = (c.a * 100.0).round().clamp(0.0, 100.0) as u32;
+        }
+        if rank_px > 0.0 {
+            // `editor_edits` maps the track by `1.0 + track / 50`, so the
+            // way back is the way out, run backwards.
+            self.bg_depth =
+                ((rank_px.clamp(1.0, 3.0) - 1.0) * 50.0).round().clamp(0.0, 100.0) as u32;
+        }
+        if wash_a > 0.0 {
+            self.bg_coverage = (wash_a * 100.0).round().clamp(0.0, 100.0) as u32;
         }
 
         // ---- the whole-theme sections (2026-08-16) ----
@@ -11553,10 +11618,14 @@ mod tests {
         s.tint = [42, 77, 300];
         s.view = View::ThemeEditor;
         s.seed_editor_from_theme();
-        // The seeding put the theme's own tint on the tracks. Compared
-        // through the tracks and not through the colour, because that is
-        // the trip the value takes: sRGB -> HSV -> whole slider units and
-        // back, and a unit of brightness is a unit of light.
+        // The seeding put the theme's own tint on the tracks, and that
+        // is ALL this first claim settles: the tracks are compared with
+        // the same map the seeding runs, so it answers "the seeding ran,
+        // and it read this key" and nothing about whether sRGB -> HSV ->
+        // whole slider units is a faithful trip. It is here to say WHICH
+        // key went missing when it fails. The map itself is under the
+        // claim below, which walks the value out through the file's own
+        // spelling and back off the bake.
         assert_eq!(
             s.tint,
             hsv_track_of(theme_tint),
@@ -11607,6 +11676,126 @@ mod tests {
                  frosts: {off} against the bed's {bed_off}"
             );
         }
+
+        nacelle::theme::clear_preview();
+        viewport_home();
+    }
+
+    /// THE BACKGROUND SECTION REOPENS ON THE THEME IT SAVED, DOWN TO THE
+    /// LAST KNOB — colours and amounts alike.
+    ///
+    /// THE FAULT, and it is the tint's fault one control to the right.
+    /// The wash slot serves two keys — SOLID writes it to
+    /// `component.panel.fill`, FROSTED to `elev.*.glass.wash` — and it
+    /// was seeded only where the kind that writes it was already the
+    /// kind the theme wore. The case in between is not a curiosity: it
+    /// is exactly the file THIS EDITOR SAVES when the owner picks BLUR,
+    /// which writes a rank and `wash = none` by its own definition. Open
+    /// that theme and the three wash sliders held 20/15/210 out of
+    /// `Settings::new`; press FROSTED GLASS and that violet — a colour
+    /// in no theme in this repository — became the body of every panel,
+    /// menu and tooltip in the program.
+    ///
+    /// The same hole ran under the three AMOUNTS, which were never
+    /// seeded at all: OPACITY, BLUR DEPTH and WASH COVERAGE opened on
+    /// 100, 50 and 42 whatever the file said, against this page's own
+    /// promise that "a theme saved and reopened lands the sliders where
+    /// the hand left them".
+    ///
+    /// THE CLAIM, in the theme's terms and not this test's numbers: what
+    /// the editor writes for a theme nobody touched is what that theme
+    /// already carried. So the trip below is the owner's — a theme wearing
+    /// a rank with no wash is opened, FROSTED GLASS is pressed, and the
+    /// body that lands in the file has to be the body the theme declares
+    /// at `component.panel.fill` — and then the whole page is reopened on
+    /// its own output, which may not move a single track.
+    #[test]
+    fn the_background_page_opens_on_the_theme_a_blur_preset_saves() {
+        let _g = crate::widgets::theme_test_lock();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        nacelle::theme::clear_preview();
+        fn live(name: &str) -> nacelle::theme::Color {
+            let t = theme::resolved();
+            col(t.color(nacelle::theme::id(name).unwrap_or_else(|| panic!("no {name}"))))
+        }
+
+        // A THEME SAVED BY THIS EDITOR'S OWN BLUR PRESET: a rank, a
+        // neutral tint carrying the opacity, and the word `none` at the
+        // wash — `edit::glass_edits` writes exactly these three keys for
+        // `Glass::Blur`. The rank and the alpha are deliberately NOT the
+        // openings the struct carries (2.0 and 1.0), or the amounts would
+        // agree by accident of never having been read.
+        let refused = nacelle::theme::set_preview(&[
+            ("elev.panel.glass.rank", "2.60"),
+            ("elev.panel.glass.tint", "oklch(1.0000, 0.0000, 0.00 / 0.600)"),
+            ("elev.panel.glass.wash", "none"),
+        ]);
+        assert!(refused.is_empty(), "the theme would not wear a saved BLUR: {refused:?}");
+        let body = live("component.panel.fill");
+
+        let mut s = furnished();
+        // Nobody's violet on the tracks, so a page that fetched nothing
+        // cannot pass by having started somewhere plausible.
+        s.wash = [42, 77, 300];
+        s.view = View::ThemeEditor;
+        s.seed_editor_from_theme();
+
+        assert_eq!(
+            s.current_background.as_deref(),
+            Some("BLUR"),
+            "a rank with no wash is what BLUR means, and the page did not read it back"
+        );
+        // WHICH KEY: the same map the seeding runs, so this settles that
+        // the seeding read the body and nothing about the map itself —
+        // the map is under the claim that follows.
+        assert_eq!(
+            s.wash,
+            hsv_track_of(body),
+            "the wash sliders opened on a colour this program invented instead of \
+             on the body the theme carries at component.panel.fill"
+        );
+        // THE AMOUNTS CAME BACK TOO. 2.60 is `1 + track / 50` at 80, and
+        // the tint's alpha is what OPACITY writes.
+        assert_eq!(s.bg_depth, 80, "BLUR DEPTH reopened on a number out of Rust");
+        assert_eq!(s.bg_opacity, 60, "OPACITY reopened on a number out of Rust");
+
+        // THE OWNER'S PRESS. FROSTED GLASS is the one preset that lays a
+        // wash, and what it lays has to be the theme's own body.
+        s.current_background = Some("FROSTED GLASS".to_string());
+        s.apply_editor_preview();
+        for rung in ["elev.panel", "elev.popover"] {
+            let written = live(&format!("{rung}.glass.wash"));
+            assert!(written.a > 0.0, "FROSTED laid no wash on {rung}");
+            for (ch, was, now) in [
+                ('r', body.r, written.r),
+                ('g', body.g, written.g),
+                ('b', body.b, written.b),
+            ] {
+                assert!(
+                    (was - now).abs() < 0.02,
+                    "FROSTED washed {rung} in a colour of its own: {ch} {now} against \
+                     the theme's body {was}"
+                );
+            }
+        }
+
+        // AND THE PAGE REOPENS ON ITS OWN OUTPUT WITHOUT MOVING. This is
+        // the promise at `seed_editor_from_theme`'s head, asked of the
+        // whole section at once: kind, both colours, all three amounts.
+        let before = (s.wash, s.tint, s.bg_opacity, s.bg_depth, s.bg_coverage);
+        s.seed_editor_from_theme();
+        assert_eq!(
+            s.current_background.as_deref(),
+            Some("FROSTED GLASS"),
+            "the kind the page just wrote is not the kind it reads back"
+        );
+        assert_eq!(
+            (s.wash, s.tint, s.bg_opacity, s.bg_depth, s.bg_coverage),
+            before,
+            "a theme saved and reopened did not land the sliders where the hand \
+             left them"
+        );
 
         nacelle::theme::clear_preview();
         viewport_home();
