@@ -33,33 +33,31 @@
 //! indent says, and the deeper the sections go the worse that trade
 //! gets.
 //!
-//! The layout is FLEX, and on TWO measurements since the columns became
-//! one. Where the two panels cannot both have their width —
-//! `settings.col_min_w` for the page, with the usual device-px floor —
-//! OR where the rail cannot show what it holds in the height it has
-//! ([`Settings::panes`]), the whole window folds into ONE vertical list:
-//! the rail's entries first, a section's pages still under it, then the
-//! page itself, all inside the one scroll. The Tab order is the same in
-//! both shapes, because registration follows the DESCRIPTION and never
-//! the geometry.
+//! The layout is FLEX, and on ONE measurement: WIDTH. Where the two
+//! panels cannot both have their width — `settings.col_min_w` for the
+//! page, with the usual device-px floor ([`Panes::of`]) — the whole
+//! window folds into ONE vertical list: the rail's entries first, a
+//! section's pages still under it, then the page itself, all inside the
+//! one scroll. The Tab order is the same in both shapes, because
+//! registration follows the DESCRIPTION and never the geometry.
 //!
-//! THE HEIGHT HALF IS NEW AND IT COSTS SOMETHING, which is worth saying
-//! plainly. The rail has no scroll of its own, so an entry past its
-//! bottom edge is a section nothing can reach; a section's pages now
-//! live in the rail, and on the master a window under about 1080 px
-//! tall cannot seat every entry AND the deepest section's pages. Such a
-//! window folds — on every page, not only inside that section, because
-//! the fold is the WINDOW's shape ([`Settings::rail_reach`]). Before
-//! this change those windows folded too, on WIDTH, because they could
-//! not seat two navigation columns; what is left is a band of heights
-//! that used to stand in columns and now does not. The way to buy it
-//! back is the toolkit's own answer to content that does not fit — a
-//! bar and a wheel on the rail (`nacelle::view::scroll`) — and that is
-//! a piece of work, not a line.
-//! It follows it off the frame as well: a row the scroll has carried
-//! out of sight is not drawn and is not a target, but it keeps its
-//! place in the route out of the rect the layout gave it, and the
-//! scroll goes and fetches back whatever the keyboard lands on
+//! THE RAIL SCROLLS, WHICH IS WHY HEIGHT IS NOT A SECOND THRESHOLD. A
+//! section's pages live in the rail now, so the column can want more
+//! height than the window has — at 720p on the master it wants about
+//! 440 px and has about 418. A first draft folded the whole window at
+//! those heights, and that was a regression the size of a laptop: it
+//! took the two-column shape away from every screen from 720p up to
+//! 768p (and, on a machine with no colour manager, to 800p), which had
+//! stood in columns before. The toolkit already answers "content that
+//! does not fit" — [`nacelle::view::scroll`] — so the rail answers with
+//! it: its own offset, its own bar in its own lane, the wheel where the
+//! pointer stands over it, and the same off-frame registration the page
+//! uses. Two scrolls in one window, and the walker says which one
+//! carries a run ([`Carrier`]) so a keyboard chase moves the right one.
+//! It follows the frame as well: a row a scroll has carried out of
+//! sight is not drawn and is not a target, but it keeps its place in
+//! the route out of the rect the layout gave it, and the scroll goes
+//! and fetches back whatever the keyboard lands on
 //! ([`Settings::register_offscreen`], [`Settings::chase_focus`]).
 //!
 //! What the pages hold: LOOK AND FEEL is one page carrying the three
@@ -1756,16 +1754,26 @@ fn zone_gap() -> f32 {
 /// the page and the columns inside it fold on the same word, which is
 /// why "there is no room" means one thing in this window and not two.
 ///
-/// Measured 2026-08-17, and the THEME's to answer, not this file's: at
-/// the master's `72u` the threshold scales with the screen, so whether
-/// a band stands in columns is very nearly the question of how much of
-/// the content box its page HAS. A page standing beside BOTH navigation
-/// columns keeps a little over half of it, and its own columns fall
-/// short at every height the program is built for — FONT is one list
-/// even at 2160 px, by four pixels. A page beside the rail alone
-/// (COLOR) stands in columns from 1080 px up. Moving the number is the
-/// owner's call and a `libnacelle` commit; nothing here may hard-code
-/// around it.
+/// Measured 2026-08-17 and RE-MEASURED 2026-08-18, and the THEME's to
+/// answer, not this file's: at the master's `72u` the threshold scales
+/// with the screen, so whether a band stands in columns is very nearly
+/// the question of how much of the content box its page HAS.
+///
+/// THE SECOND NAVIGATION COLUMN IS GONE and every page is now the wide
+/// case. A page used to keep a little over half the content box while
+/// two columns of navigation stood beside it; beside the rail alone it
+/// keeps about three quarters — 1 078 px of 1 410 at 1080p, where the
+/// rail takes 310 — so a band inside it stands in columns from 1080 px
+/// up. The paragraph this replaces drew its conclusion about FONT from
+/// the narrow case and that case no longer exists.
+///
+/// AND THE WINDOW'S OWN FOLD IS THE SAME NUMBER, which is why one
+/// reader serves both: with one column instead of two the master keeps
+/// its two panels at every height the program is built for, so the
+/// folded window is a shape for a genuinely narrow one — or for a theme
+/// that asks a wider page than the screen can give. Moving the number
+/// is the owner's call and a `libnacelle` commit; nothing here may
+/// hard-code around it.
 fn col_min_w() -> f32 {
     static MIN_W: OnceLock<TokenId> = OnceLock::new();
     static MIN_W_PX: OnceLock<TokenId> = OnceLock::new();
@@ -3739,11 +3747,13 @@ impl Metrics {
     /// stand to be read as two places you can go — and a name is the
     /// smaller claim. It stopped being one question the day a section's
     /// pages moved into the rail: the column now has to hold every
-    /// section AND the open one's pages, at a height nothing scrolls,
-    /// so the rhythm it can afford is not the rhythm a page can afford.
-    /// The alternative is real and worse — at the form's break the
-    /// unfolded rail outgrows its column at 1080p, and an over-long
-    /// rail folds the whole window ([`Settings::panes`]).
+    /// section AND the open one's pages, so the rhythm it can afford is
+    /// not the rhythm a page can afford. At the FORM's break the
+    /// unfolded rail outgrows its column even at 1080p — the rail
+    /// scrolls ([`Settings::rail_scroll`]) rather than folding the
+    /// window for it, so what this number really buys is how much of
+    /// the navigation a screen shows without the reader touching the
+    /// wheel.
     ///
     /// ASKED BY THE DRAWING AND BY THE MEASUREMENT, from the one place,
     /// so the rail cannot be laid at one rhythm and measured at another.
@@ -3951,16 +3961,16 @@ struct Column {
 /// button goes back to the head of the content box at its own width
 /// (`settings.back_w_frac`).
 ///
-/// THE THRESHOLD HAS TWO HALVES SINCE THE COLUMNS BECAME ONE, and the
-/// second is a HEIGHT. A rail is a column with no scroll of its own, so
-/// a rail taller than its box is a section cut off with no way to reach
-/// it — and the rail grew taller the day a section's pages moved into
-/// it. The width half alone used to cover this by accident: the small
-/// window folded because it could not seat TWO navigation columns, and
-/// the vertical overflow went with them. With one column that accident
-/// is gone, so the rule says out loud what it used to get for free —
-/// [`Settings::panes`] asks whether the rail FITS, and where it does
-/// not the window falls back to the one list, which scrolls.
+/// THE THRESHOLD IS STILL ONE QUESTION, AND IT IS WIDTH. A first draft
+/// of the one-column rail added a second, a HEIGHT: a rail with no
+/// scroll of its own that is taller than its box is a section cut off
+/// with no way to reach it, and the rail grew taller the day a
+/// section's pages moved into it. Folding the whole window at those
+/// heights was the wrong answer and a measurable regression — it took
+/// the two-column shape away from 720p and 768p, which had stood in
+/// columns before. The rail scrolls instead ([`Settings::rail_scroll`]),
+/// so the height it WANTS has stopped being a question about the shape
+/// of the window at all.
 #[derive(Clone, Copy)]
 struct Panes {
     rail: Option<Column>,
@@ -3987,9 +3997,15 @@ impl Panes {
         }
     }
 
-    /// The split on WIDTH alone. [`Settings::panes`] is what the window
-    /// asks: it puts the height half of the threshold on top of this,
-    /// and that half needs to know what the rail is showing.
+    /// The split, and the ONE question every walker, measurement and
+    /// test asks, so no two of them can answer it differently.
+    ///
+    /// It takes no `&Settings` and that is worth keeping: the shape of
+    /// the window is a function of the room and the theme alone, never
+    /// of which section is open. A split that could read the state
+    /// could re-shape the window under the reader's hand every time
+    /// they changed section, which is the fault the panelled layout has
+    /// always been careful to avoid.
     fn of(m: Metrics, content: Rect) -> Panes {
         let gap = col_gap();
         let rail_w = nav_w(content);
@@ -4016,17 +4032,64 @@ impl Panes {
         Panes {
             rail: Some(rail),
             page: Rect::new(x, content.y, (content.right() - x).max(0.0), content.h),
-            // The head of the rail, at the rail's own width inside its
-            // air — not `settings.back_w_frac`, which is the width of a
-            // column that no longer exists once the rail does.
-            corner: Rect::new(rail.rows.x, content.y + pad_y, rail.rows.w, m.btn_h),
+            // The head of the rail, at the width of the ENTRIES under it
+            // — not `settings.back_w_frac`, which is the width of a
+            // column that no longer exists once the rail does, and not
+            // the rail's whole room either. The room includes the lane
+            // the rail's own scrollbar stands in ([`rows_box`]), and a
+            // button 16 px wider than every button beneath it reads as
+            // a button that failed to line up. It costs the lane at
+            // every window, scrolling or not, which is the trade the
+            // page already makes and for the same reason: a lane that
+            // appeared only while scrolling would reflow the column
+            // under the reader's hand.
+            corner: Rect::new(
+                rows_box(rail.rows).x,
+                content.y + pad_y,
+                rows_box(rail.rows).w,
+                m.btn_h,
+            ),
             folded: false,
         }
     }
 }
 
-/// The box a page's ROWS really stand in: the page's own box less the
+/// Where a scrolled view is, when there is more of it than fits. Drawn
+/// after what it reports on so it sits over it.
+///
+/// `scrollbar.auto_hide` is on in the master, so a view at rest shows
+/// nothing. A HELD thumb is not at rest: it counts as hover for the
+/// width, for the fade and for the class ladder, because a hand that
+/// wandered off the lane sideways is still holding the thumb — and a
+/// thumb that thinned and faded mid-travel would say it had been let go
+/// when it had not.
+///
+/// TAKES THE VIEW RATHER THAN BEING A METHOD, because this window has
+/// two of them since 2026-08-18: the page's flow and the navigation
+/// column ([`Settings::rail_scroll`]). A bar that could only ever read
+/// one field would have had to be written twice to report on two, and
+/// two copies of "what a bar looks like" is two chances for the rail's
+/// to drift from the page's.
+fn draw_bar(ctx: &mut Ctx, sv: &ScrollView, view: Rect, length: f32) {
+    let look = ScrollbarLook::from_theme();
+    let dragging = sv.dragging();
+    let hovered = dragging || ctx.mouse.over(bar_band(view, &look));
+    let Some(geom) = scroll::scrollbar(view, &look, sv.offset(), view.h, length, hovered)
+    else {
+        return;
+    };
+    let alpha =
+        if hovered { 1.0 } else { sv.fade_alpha(ctx.t, look.auto_hide, look.fade_ms) };
+    nacelle::view::paint::scrollbar(&mut CtxSurface::new(ctx), &geom, alpha, hovered, dragging);
+}
+
+/// The box a scrolled view's ROWS really stand in: its own box less the
 /// lane the scrollbar keeps beside them.
+///
+/// TWO CALLERS SINCE THE RAIL SCROLLS — the page's flow and the
+/// navigation column — and one sentence for both, which is the point:
+/// a lane the rail reserved by a rule of its own would be a second
+/// opinion about where a bar lives.
 ///
 /// An inset bar takes its lane OUT of the rows' box, so it stands
 /// BESIDE the controls instead of over them — the owner's ask, and the
@@ -4088,6 +4151,40 @@ struct Flow {
     view: Rect,
     length: f32,
     offset: f32,
+}
+
+/// The same, for the navigation column, plus the rectangle the POINTER
+/// has to be over for a wheel notch to belong to it.
+///
+/// The bed and not the rows box, because the air a bed keeps round its
+/// buttons (`settings.band_pad_*`) and the corner button's own row are
+/// part of the column to a reader's eye. A notch two pixels inside the
+/// rail's edge that turned the PAGE instead would be the window telling
+/// the hand it had missed something it had not missed.
+#[derive(Clone, Copy)]
+struct RailFrame {
+    bed: Rect,
+    flow: Flow,
+}
+
+/// Which of the window's scrolls carries a run of rows — the walker's
+/// own word, written into a ledger as it lays them.
+///
+/// THERE ARE TWO SCROLLS SINCE 2026-08-18 and a keyboard chase has to
+/// move the right one: bringing a rail entry back into view by moving
+/// the PAGE would carry the page off under a column that had not
+/// budged. Nothing about a rect says which offset it was laid at, so
+/// the geometry cannot be asked; the walker knows, and this is the
+/// walker saying it ([`Settings::flowed`], [`Settings::railed`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Carrier {
+    /// Nothing carries it: the chrome, and a pinned band standing
+    /// outside the box the flow is read in.
+    Still,
+    /// The page's own flow ([`Settings::scroll`]).
+    Page,
+    /// The navigation column ([`Settings::rail_scroll`]).
+    Rail,
 }
 
 pub struct Settings {
@@ -4413,6 +4510,24 @@ pub struct Settings {
     /// key arrives outside the drawing and has to ask somebody where the
     /// page stood before it can move it.
     flow: Flow,
+    /// THE NAVIGATION COLUMN'S OWN OFFSET, and its own physics.
+    ///
+    /// A section's pages stand IN the rail since 2026-08-18, so the
+    /// column can want more height than the window has. The toolkit's
+    /// answer to content that does not fit is a bar and a wheel
+    /// (`nacelle::view::scroll`) and this is the rail taking it, rather
+    /// than the window folding both panels away at heights that used to
+    /// hold two.
+    ///
+    /// NOT RESET BY [`Settings::go`], unlike the page's. The rail is
+    /// PERMANENT — the same column on every page — so where the reader
+    /// scrolled it to is a property of the window and not of the section
+    /// they happen to be in; resetting it on every section change would
+    /// throw away the position with every press it took to get there.
+    rail_scroll: ScrollView,
+    /// How the last frame laid that column out, or `None` where the
+    /// window had folded and there was no column at all.
+    rail_flow: Option<RailFrame>,
     now: f64,
     /// The box the body is being clipped to while it draws, so a rect
     /// can be trimmed to what the eye can actually see. None outside the
@@ -4430,6 +4545,11 @@ pub struct Settings {
     /// anything else would carry the page off under something that had
     /// not moved.
     flowed: Vec<FocusId>,
+    /// The same ledger for the RAIL's scroll: what the navigation
+    /// column registered this frame, and nothing else. Empty whenever
+    /// the window has folded — there is no column then, and the
+    /// entries are bands of the flow and belong to `flowed`.
+    railed: Vec<FocusId>,
     hits: Vec<(Rect, Act)>,
     /// The act whose click flash is decaying, and the frame clock it was
     /// pressed on. On `Ctx.t` for the same reason as
@@ -4657,9 +4777,12 @@ impl Settings {
                 length: 0.0,
                 offset: 0.0,
             },
+            rail_scroll: ScrollView::new(),
+            rail_flow: None,
             now: 0.0,
             clip: None,
             flowed: Vec::new(),
+            railed: Vec::new(),
             hits: Vec::new(),
             flash: None,
         }
@@ -4744,7 +4867,12 @@ impl Settings {
     /// calls this from its `MouseWheel` arm, ahead of the hit test on the
     /// board behind the window, so the `allow(dead_code)` this carried is
     /// gone. The keyboard's PageUp/PageDown/Home/End move the same offset.
-    pub fn wheel(&mut self, notches: f32) {
+    ///
+    /// IT TAKES THE POINTER because the window has TWO scrolls now — the
+    /// page's and the navigation column's ([`Settings::rail_scroll`]) —
+    /// and the only thing that can say which one a notch is aimed at is
+    /// where the hand is. It had no need of it while there was one.
+    pub fn wheel(&mut self, notches: f32, x: f32, y: f32) {
         if !self.open {
             return;
         }
@@ -4767,7 +4895,17 @@ impl Settings {
         // browser): winit reports scrolling UP as positive, and a page
         // scrolled up shows EARLIER content — a smaller offset. Passed
         // through raw, the page ran away from the hand.
-        self.scroll.wheel(-notches, &ScrollPhysics::from_theme(), self.now);
+        let p = ScrollPhysics::from_theme();
+        // The column the hand stands over takes the turn, measured
+        // against the BED it was drawn on ([`RailFrame`]). Folded there
+        // is no bed and no `rail_flow`, and the entries are bands of the
+        // page's own flow — one scroll, exactly as before.
+        match self.rail_flow {
+            Some(rail) if rail.bed.contains(x, y) => {
+                self.rail_scroll.wheel(-notches, &p, self.now)
+            }
+            _ => self.scroll.wheel(-notches, &p, self.now),
+        }
     }
 
     /// The place of the CHOSEN severity role in [`SEVERITY_ROLES`] — the
@@ -5621,6 +5759,26 @@ impl Settings {
             }
             return;
         }
+        // And the RAIL's thumb, on the page thumb's terms exactly: the
+        // column scrolls, so its bar takes the hand the same way. Only
+        // the frame it aims with differs ([`RailFrame`]).
+        if self.rail_scroll.dragging() {
+            if let Some(rail) = self.rail_flow {
+                let look = ScrollbarLook::from_theme();
+                let (viewport, content) = (rail.flow.view.h, rail.flow.length);
+                if let Some(geom) = scroll::scrollbar(
+                    rail.flow.view,
+                    &look,
+                    self.rail_scroll.offset(),
+                    viewport,
+                    content,
+                    true,
+                ) {
+                    self.rail_scroll.drag(y, viewport, content, geom.track);
+                }
+            }
+            return;
+        }
         let Some(act) = self.dragging else { return };
         self.set_from_x(act, x);
         self.mark_dirty(act);
@@ -5690,6 +5848,7 @@ impl Settings {
         // be a third copy of a state the model already keeps.
         self.list_scroll.release();
         self.scroll.release();
+        self.rail_scroll.release();
         let Some(act) = self.dragging.take() else { return false };
         if let Some(&Ctrl::Slider { save, .. }) = slider_of(act) {
             save(self);
@@ -5794,7 +5953,7 @@ impl Settings {
             }
         }
         // THE PAGE'S OWN BAR, on the list bar's terms exactly. It was
-        // drawn and never asked: `draw_scrollbar` built a geometry, put
+        // drawn and never asked: [`draw_bar`] built a geometry, put
         // it on screen and threw it away, so a thumb the eye reads as
         // draggable took no hand at all and the whole bar was an
         // indicator. The frame the bar was drawn against is the one the
@@ -5813,7 +5972,7 @@ impl Settings {
         // fits gets no geometry at all (`scroll::scrollbar` answers None
         // on `content <= viewport` and on `mode = none`), so the press
         // falls straight through to the rows. And a bar hidden by
-        // `scrollbar.auto_hide` is a bar AT REST — `draw_scrollbar` reads
+        // `scrollbar.auto_hide` is a bar AT REST — [`draw_bar`] reads
         // its hover off `bar_band` OF THIS SAME `self.flow.view` and
         // draws at full alpha whenever the pointer stands in it, so the
         // pointer cannot be in this lane and the lane be empty at once.
@@ -5839,6 +5998,34 @@ impl Settings {
                         self.scroll.page(y >= geom.thumb.bottom(), viewport, self.now);
                     }
                     return false;
+                }
+            }
+            // AND THE RAIL'S, which is the same paragraph again with the
+            // navigation column's frame in it. Its lane is inside the
+            // rail's own room and cannot overlap the page's, so the order
+            // of the two branches decides nothing; they are two because
+            // the frames are two.
+            if let Some(rail) = self.rail_flow {
+                let (area, viewport, content) =
+                    (rail.flow.view, rail.flow.view.h, rail.flow.length);
+                if bar_band(area, &look).contains(x, y) {
+                    if let Some(geom) = scroll::scrollbar(
+                        area,
+                        &look,
+                        self.rail_scroll.offset(),
+                        viewport,
+                        content,
+                        true,
+                    ) {
+                        if !self.rail_scroll.press_thumb(y, geom.thumb) {
+                            self.rail_scroll.page(
+                                y >= geom.thumb.bottom(),
+                                viewport,
+                                self.now,
+                            );
+                        }
+                        return false;
+                    }
                 }
             }
         }
@@ -6455,7 +6642,7 @@ impl Settings {
                     }
                 }
                 fc.nav(n);
-                self.chase_focus(fc, self.flow);
+                self.chase_focus(fc);
                 KeyOut::Consumed
             }
         }
@@ -6475,19 +6662,30 @@ impl Settings {
     /// offset has since got to; the clamp is the next tick's, as it is
     /// for every other way this window moves.
     ///
-    /// What the scroll does not carry is not chased, and the frame said
-    /// which that is rather than the geometry being asked to guess
-    /// ([`Settings::flowed`]): the corner button, a pinned bar and the
-    /// rows of an open list all stand over the flow's own lane and none
-    /// of them moves with it — chasing them would carry the page off
-    /// under something that had not moved. The navigation is in the
-    /// ledger exactly when the window has folded, which is exactly when
-    /// its entries scroll with everything else.
-    fn chase_focus(&mut self, fc: &FocusCtl, flow: Flow) {
+    /// What no scroll carries is not chased, and the frame said which
+    /// that is rather than the geometry being asked to guess
+    /// ([`Carrier`]): the corner button, a pinned bar and the rows of an
+    /// open list all stand over a lane that does not move with them —
+    /// chasing them would carry a panel off under something that had not
+    /// moved.
+    ///
+    /// TWO SCROLLS, AND THE LEDGERS SAY WHICH. A rail entry is brought
+    /// back by the RAIL's offset and a page row by the page's; the
+    /// window folded has no rail at all, and its entries are in
+    /// `flowed` with everything else, which is exactly when they scroll
+    /// with everything else.
+    fn chase_focus(&mut self, fc: &FocusCtl) {
         let Some(id) = fc.focused() else { return };
-        if !self.flowed.contains(&id) {
-            return;
-        }
+        // Read before anything is moved: `rail_flow` is the LAST
+        // COMPLETED frame's, the same rule the page's `flow` follows.
+        let carried = if self.flowed.contains(&id) {
+            Some((Carrier::Page, self.flow))
+        } else if self.railed.contains(&id) {
+            self.rail_flow.map(|r| (Carrier::Rail, r.flow))
+        } else {
+            None
+        };
+        let Some((by, flow)) = carried else { return };
         let Some(r) = fc.rect_of(id) else { return };
         let view = flow.view;
         // A rect taller than the frame lands on its TOP edge: the first
@@ -6499,7 +6697,11 @@ impl Settings {
         } else {
             return;
         };
-        self.scroll.set_offset(flow.offset + travel);
+        let at = flow.offset + travel;
+        match by {
+            Carrier::Rail => self.rail_scroll.set_offset(at),
+            _ => self.scroll.set_offset(at),
+        }
     }
 
     /// The Act of the chain's focused control, when it is one of this
@@ -6650,7 +6852,7 @@ impl Settings {
         // The panels are cut BEFORE the corner button is placed, because
         // the corner button is the head of the rail and stands inside the
         // rail's own air ([`Panes`]).
-        let nav = self.panes(m, content);
+        let nav = Panes::of(m, content);
         let corner = nav.corner;
         let (chrome_act, chrome_label) = match chrome_of(page.view) {
             Chrome::Close => (Act::Close, "CLOSE"),
@@ -6783,79 +6985,11 @@ impl Settings {
     /// `content` is the WHOLE content box; the navigation is taken out
     /// of it here, so every caller — the drawing, the scroll, the tests
     /// — asks one question and gets the box the flow really has.
-    /// Where the window's panels stand this frame — the ONE question
-    /// every walker, measurement and test asks, so no two of them can
-    /// answer it differently.
-    ///
-    /// [`Panes::of`] answers it on width. This adds the other half of
-    /// the threshold: A RAIL THAT DOES NOT FIT IS NOT A RAIL. The
-    /// column has no scroll of its own, so an entry past its bottom
-    /// edge is clipped away with nothing to bring it back — and since a
-    /// section's pages moved INTO the rail, how tall the rail wants to
-    /// be is a question about the state of the window and not about the
-    /// theme alone, which is why it is asked here and not there.
-    ///
-    /// The width half used to hide this one. A window too small for two
-    /// navigation columns folded, and the vertical overflow folded with
-    /// it; one column fits at widths where the rail's own height does
-    /// not, so the rule that was an accident is now written down. The
-    /// folded shape is the one that CAN carry an over-long rail — it is
-    /// a band of the page's flow there, and the flow scrolls.
-    fn panes(&self, m: Metrics, content: Rect) -> Panes {
-        let nav = Panes::of(m, content);
-        match nav.rail {
-            Some(c) if self.rail_reach(m.rail(), c.rows) > c.rows.h + 0.01 => {
-                Panes::folded(m, content)
-            }
-            _ => nav,
-        }
-    }
-
-    /// The tallest the rail can EVER stand on this window — every entry,
-    /// plus the pages of the deepest section, whichever section that is.
-    ///
-    /// THE WORST CASE AND NOT THIS FRAME'S, because the fold is the
-    /// WINDOW's shape and not one section's. Measured against the page
-    /// in force, the window would stand in columns on GRID and fold on
-    /// LOOK AND FEEL — re-shaping itself under the reader's hand every
-    /// time they changed section, which is the fault the three-panel
-    /// layout was careful to avoid and which this must go on avoiding
-    /// now that a section's pages cost HEIGHT instead of width.
-    ///
-    /// The DEEPEST section and not the sum of all of them, because
-    /// exactly one is ever unfolded ([`Settings::rail_open`]) — the
-    /// bound single-open buys, written where it is spent.
-    ///
-    /// Conservative by at most one break: the gap between a section and
-    /// its first page is already counted in the entries' own run, and
-    /// this adds another for the one under the last page. A threshold
-    /// that errs toward folding errs toward the shape that can carry an
-    /// over-long rail, which is the safe direction.
-    fn rail_reach(&self, m: Metrics, box_: Rect) -> f32 {
-        let mut entries = 0.0;
-        let mut trailing = 0.0;
-        let mut deepest: f32 = 0.0;
-        for row in RAIL_ROWS.iter() {
-            if !(row.when)(self) {
-                continue;
-            }
-            entries += self.row_h(&row.ctrl, m, box_) + m.space(row.after);
-            trailing = m.space(row.after);
-            if let Ctrl::Expander { kids, .. } = row.ctrl {
-                // The kids carry no expander of their own, so this run
-                // is the same run whatever section is in force.
-                deepest =
-                    deepest.max(self.rows_h(kids, m, indent_region(box_)) + m.gap);
-            }
-        }
-        (entries - trailing).max(0.0) + deepest
-    }
-
     fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
         // The WHOLE split and not the page column alone: the body starts
         // under the chrome button, and where that button stands is the
         // rail's business ([`body_top`]).
-        let nav = self.panes(m, content);
+        let nav = Panes::of(m, content);
         let box_ = nav.page;
         // The box is the FULL one — the clip and the bar are drawn on it
         // — but what a pinned band COSTS is measured where its rows
@@ -6946,7 +7080,16 @@ impl Settings {
             // all, which is the same sentence the walker says by not
             // recursing — one rule, said twice because this file has
             // always measured and drawn with two readers.
-            if let Ctrl::Expander { act, kids, .. } = row.ctrl {
+            //
+            // A DISABLED SECTION IS SHUT, whatever the view says. R6
+            // takes the row out of the frame's offering, and
+            // [`Settings::draw_rows`] therefore lays no pages under it;
+            // a height that counted them would reserve room for a run
+            // nothing draws, and the two readers would be measuring two
+            // different rails.
+            if let (true, Ctrl::Expander { act, kids, .. }) =
+                ((row.enabled)(self), row.ctrl)
+            {
                 if self.rail_open(act) {
                     let (kids_h, kids_gap) =
                         self.rows_span(kids, m, indent_region(region));
@@ -6990,7 +7133,7 @@ impl Settings {
     /// rows: a band folds on its width, so a length taken at the full
     /// box would be a length of a page nobody is looking at.
     fn flow_h(&self, page: &'static Page, m: Metrics, content: Rect) -> f32 {
-        let nav = self.panes(m, content);
+        let nav = Panes::of(m, content);
         let box_ = rows_box(nav.page);
         let mut h = 0.0;
         for zone in self.frame_zones(page, &nav) {
@@ -7027,7 +7170,7 @@ impl Settings {
         // ([`rows_box`]), and the bar is drawn against the original edge
         // — otherwise it would hug the narrowed edge and stand over the
         // rows again, just from the other side of its own lane.
-        let nav = self.panes(m, content);
+        let nav = Panes::of(m, content);
         let rows_box = rows_box(nav.page);
         // Both of these take the WHOLE content box and split it again —
         // one split, stated in [`Panes::of`], so a test that measures a
@@ -7064,7 +7207,7 @@ impl Settings {
                 y += zone_gap();
             }
             started = true;
-            self.draw_zone(ctx, zone, m, rows_box, y, Some(view), true);
+            self.draw_zone(ctx, zone, m, rows_box, y, Some(view), Carrier::Page);
             y += zh;
         }
         self.clip = None;
@@ -7079,10 +7222,10 @@ impl Settings {
                 continue;
             }
             let zh = self.zone_h(zone, m, rows_box);
-            self.draw_zone(ctx, zone, m, rows_box, anchor - zh, None, false);
+            self.draw_zone(ctx, zone, m, rows_box, anchor - zh, None, Carrier::Still);
             anchor -= zh + m.gap;
         }
-        self.draw_scrollbar(ctx, view, length);
+        draw_bar(ctx, &self.scroll, view, length);
     }
 
     /// The two columns' beds: the navigation's, and the page's.
@@ -7188,15 +7331,54 @@ impl Settings {
     /// Drawn before the body, so the chain runs corner button, rail
     /// (a section's pages inside it, where they stand), page — reading
     /// order, and the same order the folded window registers them in.
+    ///
+    /// AND IT SCROLLS, on the page's own terms: the toolkit's offset,
+    /// the toolkit's physics and the toolkit's bar, its own instance of
+    /// each ([`Settings::rail_scroll`]). Nothing here is a second
+    /// mechanism — what a column that carries the open section's pages
+    /// needed was the mechanism the page already had, pointed at the
+    /// other box. The entries stand BESIDE the bar's lane
+    /// ([`rows_box`]) while the clip, the span and the bar keep the
+    /// whole room, which is the page's arrangement to the letter.
     fn draw_nav(&mut self, ctx: &mut Ctx, m: Metrics, nav: &Panes) {
-        let Some(box_) = nav.rail.map(|c| c.rows) else { return };
+        let Some(col_) = nav.rail else {
+            // Folded: the entries are bands of the page's flow and the
+            // page's ledger answers for them. A frame left over from
+            // the last unfolded window would aim the wheel and the
+            // press at a column that is not on the screen.
+            self.rail_flow = None;
+            self.railed.clear();
+            return;
+        };
+        let box_ = col_.rows;
+        let rows = rows_box(box_);
+        let length = self.rows_h(&RAIL_ROWS, m.rail(), rows);
+        self.rail_scroll.tick(
+            ctx.t,
+            box_.h,
+            length,
+            Snap::None,
+            &ScrollPhysics::from_theme(),
+        );
+        let off = self.rail_scroll.offset();
+        // What the wheel, the press and the chase read back between
+        // frames ([`RailFrame`]).
+        self.rail_flow = Some(RailFrame { bed: col_.bed, flow: Flow { view: box_, length, offset: off } });
         ctx.dl.push_clip(box_.x, box_.y, box_.w, box_.h);
         self.clip = Some(box_);
-        // Not the flow's: a column stands where it stands, and the
-        // page's scroll is no use to it ([`Settings::chase_focus`]).
-        self.draw_rows(ctx, &RAIL_ROWS, m.rail(), box_, box_.y, Some(box_), false);
+        self.railed.clear();
+        self.draw_rows(
+            ctx,
+            &RAIL_ROWS,
+            m.rail(),
+            rows,
+            box_.y - off,
+            Some(box_),
+            Carrier::Rail,
+        );
         self.clip = None;
         ctx.dl.pop_clip();
+        draw_bar(ctx, &self.rail_scroll, box_, length);
     }
 
     /// One band, at the top edge it was given. A flow lays its rows in
@@ -7207,8 +7389,8 @@ impl Settings {
     ///
     /// `cull` is the viewport a flowed band is held to; a pinned band
     /// passes `None`, because it stands outside the clip and is always
-    /// on screen. `flowed` says whether the band is one the SCROLL
-    /// carries — the ledger the chase reads ([`Settings::flowed`]).
+    /// on screen. `by` says WHICH scroll the band rides — the ledger
+    /// the chase reads ([`Carrier`]).
     fn draw_zone(
         &mut self,
         ctx: &mut Ctx,
@@ -7217,11 +7399,11 @@ impl Settings {
         box_: Rect,
         top: f32,
         cull: Option<Rect>,
-        flowed: bool,
+        by: Carrier,
     ) {
         let offsets = self.zone_offsets(zone, m, box_);
         for ((region, rows), dy) in zone_regions(zone, box_).into_iter().zip(offsets) {
-            self.draw_rows(ctx, rows, m, region, top + dy, cull, flowed);
+            self.draw_rows(ctx, rows, m, region, top + dy, cull, by);
         }
     }
 
@@ -7245,7 +7427,7 @@ impl Settings {
         region: Rect,
         top: f32,
         cull: Option<Rect>,
-        flowed: bool,
+        by: Carrier,
     ) -> (f32, f32) {
         // Measured for THIS region, and from THESE rows: the sliders of
         // one column do not inherit the label width of the next (M3).
@@ -7265,16 +7447,25 @@ impl Settings {
                 cull.map_or(true, |v| band.bottom() > v.y && band.y < v.bottom());
             let rc = RowCtx { content: region, band, label_w, value_w, m };
             // R6: a row the page turned off registers nothing at all,
-            // on screen or off it.
-            if !(row.enabled)(self) {
+            // on screen or off it — AND NEITHER DO ITS PAGES, which is
+            // why this is read once and asked twice. An expander is a
+            // row like any other: a grey one offers no way in, so the
+            // pages behind it are not a way in either, and a run drawn
+            // under a section nothing can press would be four buttons
+            // belonging to a heading that says they are unavailable.
+            // [`Settings::rows_span`] leaves them out of the height for
+            // the same reason and by the same test, so the measurement
+            // and the picture stay one answer.
+            let live = (row.enabled)(self);
+            if !live {
                 if on_screen {
                     self.draw_disabled(ctx, &row.ctrl, rc);
                 }
             } else {
                 // What the row offers, asked ONCE: the off-frame
-                // registration places it, and a band the scroll carries
+                // registration places it, and a band a scroll carries
                 // writes it into the ledger the chase reads.
-                let targets = (flowed || !on_screen)
+                let targets = (by != Carrier::Still || !on_screen)
                     .then(|| self.targets(ctx, &row.ctrl, rc))
                     .unwrap_or_default();
                 if on_screen {
@@ -7282,8 +7473,13 @@ impl Settings {
                 } else {
                     self.register_offscreen(ctx, &row.ctrl, &targets);
                 }
-                if flowed {
-                    self.flowed.extend(targets.iter().map(|&(_, a)| focus_id(a)));
+                let ledger = match by {
+                    Carrier::Page => Some(&mut self.flowed),
+                    Carrier::Rail => Some(&mut self.railed),
+                    Carrier::Still => None,
+                };
+                if let Some(l) = ledger {
+                    l.extend(targets.iter().map(|&(_, a)| focus_id(a)));
                 }
             }
             y += h + m.space(row.after);
@@ -7302,11 +7498,10 @@ impl Settings {
             // only when the whole of it is standing), said here by the
             // one thing that can never disagree with the picture: the
             // walker that draws the picture.
-            if let Ctrl::Expander { act, kids, .. } = row.ctrl {
+            if let (true, Ctrl::Expander { act, kids, .. }) = (live, row.ctrl) {
                 if self.rail_open(act) {
                     let inner = indent_region(region);
-                    let (end, gap) =
-                        self.draw_rows(ctx, kids, m, inner, y, cull, flowed);
+                    let (end, gap) = self.draw_rows(ctx, kids, m, inner, y, cull, by);
                     self.draw_rail_guide(ctx, region, y, end - gap);
                     y = end;
                     trailing = gap;
@@ -7430,43 +7625,6 @@ impl Settings {
                 fc.register(focus_id(act), r, caps);
             }
         }
-    }
-
-    /// Where the page is, when there is more of it than fits. Drawn
-    /// after the body so it sits over it.
-    ///
-    /// `scrollbar.auto_hide` is on in the master, so a page at rest
-    /// shows nothing. A HELD thumb is not at rest: it counts as hover
-    /// for the width, for the fade and for the class ladder, because a
-    /// hand that wandered off the lane sideways is still holding the
-    /// thumb — and a thumb that thinned and faded mid-travel would say
-    /// it had been let go when it had not.
-    fn draw_scrollbar(&mut self, ctx: &mut Ctx, view: Rect, length: f32) {
-        let look = ScrollbarLook::from_theme();
-        let dragging = self.scroll.dragging();
-        let hovered = dragging || ctx.mouse.over(bar_band(view, &look));
-        let Some(geom) = scroll::scrollbar(
-            view,
-            &look,
-            self.scroll.offset(),
-            view.h,
-            length,
-            hovered,
-        ) else {
-            return;
-        };
-        let alpha = if hovered {
-            1.0
-        } else {
-            self.scroll.fade_alpha(ctx.t, look.auto_hide, look.fade_ms)
-        };
-        nacelle::view::paint::scrollbar(
-            &mut CtxSurface::new(ctx),
-            &geom,
-            alpha,
-            hovered,
-            dragging,
-        );
     }
 
     /// A REGION's label and value columns, in px — THE MEASURING COLUMN,
@@ -8832,7 +8990,7 @@ impl Settings {
         // `object::dropdown::accordion` token for token — the seam gap,
         // the height cap, the skew and the anchor-width floor — because
         // the object does not hand its geometry back (the same
-        // restatement `draw_scrollbar` makes for the page's own bar).
+        // restatement [`draw_bar`] makes for the page's own bar).
         {
             static GAP: OnceLock<TokenId> = OnceLock::new();
             static MAX_H_FRAC: OnceLock<TokenId> = OnceLock::new();
@@ -9711,7 +9869,7 @@ mod tests {
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
-            let page = s.panes(Metrics::of(&ctx, content), content).page;
+            let page = Panes::of(Metrics::of(&ctx, content), content).page;
             s.draw(&mut ctx);
             carets(&dl, page)
         };
@@ -9957,12 +10115,12 @@ mod tests {
             .collect();
         s.addon_report = addon_report(true, &many);
         let mut dl = nacelle::draw::DrawList::recording();
-        // The shortest window that still stands in COLUMNS (below that
-        // the whole window is one scroll and the report's tail is a
-        // wheel away rather than dropped, which is a different claim).
-        // Eighty lines do not fit its box either, which is what this
-        // test needs.
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        // The shortest window the program is built for, so the box is
+        // certainly shorter than eighty lines. It stands in COLUMNS at
+        // that height and did before the rail was one column; the draft
+        // that folded it here on the rail's HEIGHT is why this line said
+        // 1080 for a day.
+        let mut ctx = probe(&mut dl, &mut fonts, 720.0, 1.0);
         s.draw(&mut ctx);
         let drawn = text_runs(&dl);
         assert!(
@@ -10200,7 +10358,8 @@ mod tests {
         s.list_scroll.tick(1.0, 100.0, 10_000.0, Snap::None, &ScrollPhysics::from_theme());
         let page_before = s.scroll.offset();
         s.dropdown = Some(Dropdown::List(ListId::Looks));
-        s.wheel(-1.0);
+        let at = on_the_page(&s);
+        s.wheel(-1.0, at.0, at.1);
         assert_eq!(
             s.scroll.offset(),
             page_before,
@@ -10212,7 +10371,7 @@ mod tests {
         );
         // List closed, the same notch is the page's again.
         s.dropdown = None;
-        s.wheel(-1.0);
+        s.wheel(-1.0, at.0, at.1);
         assert!(
             s.scroll.offset() > page_before,
             "with the list closed the page must take the wheel back"
@@ -10476,7 +10635,8 @@ mod tests {
         let mut s = furnished();
         assert!(s.open, "the furnished window is the open one");
         let before = s.scroll.offset();
-        s.wheel(-3.0);
+        let at = on_the_page(&s);
+        s.wheel(-3.0, at.0, at.1);
         let after = s.scroll.offset();
         assert_ne!(
             before, after,
@@ -10491,7 +10651,8 @@ mod tests {
         let mut shut = furnished();
         shut.open = false;
         let before = shut.scroll.offset();
-        shut.wheel(-3.0);
+        let at = on_the_page(&shut);
+        shut.wheel(-3.0, at.0, at.1);
         assert_eq!(
             before,
             shut.scroll.offset(),
@@ -11352,6 +11513,19 @@ mod tests {
         s.bar_auto_hide = true;
         s.bar_track = true;
     }
+    /// A pointer standing over the PAGE and never over the navigation
+    /// column — what a wheel test that is about the page's own offset
+    /// has to hand [`Settings::wheel`] since the rail took a scroll of
+    /// its own. Just past the rail's right edge is inside the page at
+    /// every split this window can make; with no rail on the last frame
+    /// there is nothing to be beside and any point will do.
+    fn on_the_page(s: &Settings) -> (f32, f32) {
+        match s.rail_flow {
+            Some(r) => (r.bed.right() + 1.0, r.bed.y + 1.0),
+            None => (0.0, 0.0),
+        }
+    }
+
 
     /// A drawing context at one window height and one interface scale:
     /// no pointer, no focus, no panel shrink — the resting state every
@@ -13147,6 +13321,57 @@ mod tests {
         theme::set_viewport(1080.0, 1.0);
     }
 
+    /// A theme under which this window ALWAYS folds, whatever height it
+    /// is drawn at.
+    ///
+    /// THE MASTER NO LONGER REACHES THE FOLD BY BEING SHORT, and that is
+    /// the change rather than a hole in the tests. Two navigation
+    /// columns took 44 % of the content box and a 500 px screen could
+    /// not seat them and a page as well; ONE column takes 22 %, so every
+    /// height the program is built for keeps its columns. The folded
+    /// shape is still there — a genuinely narrow window still reaches
+    /// it — and still has to be measured, so the tests that measure it
+    /// ask for it the way the rule is written: the threshold is
+    /// `settings.col_min_w`, the threshold is the THEME's, and a theme
+    /// that wants a wider page than any of these windows can give folds
+    /// every one of them.
+    ///
+    /// It folds the columned BANDS with it, through the same token —
+    /// which is the point of `col_min_w` having one reader for both:
+    /// "there is no room" means one thing in this window and not two.
+    fn folding_theme() -> crate::widgets::Themed {
+        crate::widgets::Themed::new(
+            "always-folds",
+            "[settings]\ncol_min_w_min_px = 4000px\n",
+        )
+    }
+
+    /// The offsets a sweep has to drive the RAIL through to have seen
+    /// all of it, on exactly the rule the page's stops are built with:
+    /// half a box at a time, so consecutive stops overlap, and the
+    /// clamp's own far end last.
+    ///
+    /// EMPTY WHERE THE RAIL FITS OR THERE IS NO RAIL, because then the
+    /// stops the page is already walked with have shown the whole of it
+    /// — a folded window has no column at all and its entries are bands
+    /// of the flow.
+    fn rail_stops(s: &Settings, m: Metrics, content: Rect) -> Vec<f32> {
+        let Some(rail) = Panes::of(m, content).rail else { return Vec::new() };
+        let length = s.rows_h(&RAIL_ROWS, m.rail(), rows_box(rail.rows));
+        if length <= rail.rows.h {
+            return Vec::new();
+        }
+        let stride = (rail.rows.h * 0.5).max(1.0);
+        let mut out = Vec::new();
+        let mut at = stride;
+        while at < length {
+            out.push(at);
+            at += stride;
+        }
+        out.push(f32::MAX / 4.0);
+        out
+    }
+
     /// §8.3/1, part one — the body's box is inside the window, at every
     /// height and on every page.
     ///
@@ -13221,7 +13446,7 @@ mod tests {
                 // page's box less the scrollbar's lane. Asked of the same
                 // three functions the drawing asks, or the walk would be
                 // measuring a window nobody is looking at.
-                let nav = s.panes(m, content);
+                let nav = Panes::of(m, content);
                 let box_ = rows_box(nav.page);
                 // Walk the description band by band, at the furthest the
                 // offset goes, and inside a banded region column by
@@ -13492,7 +13717,7 @@ mod tests {
 
     /// The owner's report, in one gesture: press the thumb, move, let go.
     ///
-    /// The bar was drawn and never asked — `draw_scrollbar` worked out a
+    /// The bar was drawn and never asked — [`draw_bar`] worked out a
     /// geometry, painted it and threw it away, so nothing on screen
     /// carried the press. The model has had the whole gesture since
     /// F2 (`view::scroll`), and the open list's thumb was already using
@@ -13593,7 +13818,8 @@ mod tests {
         // An auto-hiding bar starts HIDDEN and is painted only once the
         // page has moved (`ScrollView::last_move_t`) — which is how a
         // person meets it in any case: the wheel first, the hand second.
-        s.wheel(-1.0);
+        let at = on_the_page(&s);
+        s.wheel(-1.0, at.0, at.1);
         let (rest_w, rest_fill) = drawn_thumb(&mut s, &mut fonts, None);
         assert!(
             (rest_w - look.w).abs() < 0.5,
@@ -13942,7 +14168,7 @@ mod tests {
             for basic in [false, true] {
                 s.editor_basic = basic;
                 for page in PAGES.iter() {
-                    let nav = s.panes(m, content);
+                    let nav = Panes::of(m, content);
                     let box_ = rows_box(nav.page);
                     for zone in s.frame_zones(page, &nav) {
                         for (region, rows) in zone_regions(zone, box_) {
@@ -14518,7 +14744,7 @@ mod tests {
         let ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
-        let nav = furnished().panes(m, content);
+        let nav = Panes::of(m, content);
         assert!(!nav.folded, "the window folded at a width it fits in");
         // The BED is what a column IS: where the gutter falls and how
         // wide the column reads are questions about the paint, not about
@@ -14563,14 +14789,14 @@ mod tests {
         );
 
         // AND THE SHAPE IS THE WINDOW'S, NOT THE SECTION'S, at every
-        // height the program is built for. The fold now has a HEIGHT
-        // half ([`Settings::panes`]) and a section's pages are part of
-        // what the rail has to hold, so a threshold that asked about
-        // THIS page would stand in columns on GRID and fold on LOOK AND
-        // FEEL — the window re-shaping itself under the reader's hand
-        // every time they changed section. It asks about the deepest
-        // section instead ([`Settings::rail_reach`]), which is why this
-        // holds.
+        // height the program is built for. It holds STRUCTURALLY:
+        // [`Panes::of`] takes no `&Settings` at all, so there is no
+        // path by which which-section-is-open could reach the split. A
+        // threshold that could ask would stand in columns on GRID and
+        // fold on LOOK AND FEEL — the window re-shaping itself under
+        // the reader's hand every time they changed section — and a
+        // first draft of the one-column rail came within one parameter
+        // of exactly that.
         for h in HEIGHTS {
             theme::resolved();
             theme::set_viewport(h, 1.0);
@@ -14582,7 +14808,7 @@ mod tests {
             for p in PAGES.iter() {
                 let mut s = furnished();
                 s.view = p.view;
-                shapes.push((p.title, s.panes(m, content).folded));
+                shapes.push((p.title, Panes::of(m, content).folded));
             }
             let first = shapes[0].1;
             if let Some((title, _)) = shapes.iter().find(|(_, f)| *f != first) {
@@ -14634,7 +14860,7 @@ mod tests {
         let content = content_rect(modal_rect(1080.0 * 16.0 / 9.0, 1080.0));
         let mut dl2 = nacelle::draw::DrawList::new();
         let ctx2 = probe(&mut dl2, fonts, 1080.0, 1.0);
-        let nav = s.panes(Metrics::of(&ctx2, content), content);
+        let nav = Panes::of(Metrics::of(&ctx2, content), content);
         (s.hits.clone(), chain, nav)
     }
 
@@ -14803,7 +15029,7 @@ mod tests {
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
-            let nav = s.panes(Metrics::of(&ctx, content), content);
+            let nav = Panes::of(Metrics::of(&ctx, content), content);
             let bed = nav.rail.expect("no rail").bed;
             s.draw(&mut ctx);
             let arrows: Vec<Vec<[f32; 2]>> = dl
@@ -14892,7 +15118,7 @@ mod tests {
             let mut dl = nacelle::draw::DrawList::recording();
             let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
-            let nav = s.panes(Metrics::of(&ctx, content), content);
+            let nav = Panes::of(Metrics::of(&ctx, content), content);
             let bed = nav.rail.expect("no rail").bed;
             s.draw(&mut ctx);
             let at = |act: Act| {
@@ -14915,6 +15141,24 @@ mod tests {
                 })
                 .collect();
             (section, pages, rules)
+        }
+
+        /// The stroke the THEME asks for, rebuilt from the tokens
+        /// themselves and never from [`rail_guide_x`] — the reader this
+        /// is about. Both sides of an equation drawn from one function
+        /// move together, and a `0.5` or a `4.0` baked into that
+        /// function would satisfy it.
+        fn guide_from_the_theme(section_x: f32) -> (f32, f32) {
+            let t = theme::resolved();
+            let px = |n: &str| {
+                t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}")))
+            };
+            let (w, at, step) = (
+                px("settings.rail_guide_w"),
+                px("settings.rail_guide_x"),
+                px("settings.rail_indent"),
+            );
+            (section_x + (step - w).max(0.0) * at, w)
         }
 
         let (section, pages, rules) = measured(&mut fonts);
@@ -14941,7 +15185,7 @@ mod tests {
         // THE GUIDE: one hairline, of the theme's width, standing in the
         // step, and spanning exactly the run it brackets.
         assert_eq!(rules.len(), 1, "the rail laid {} vertical rules", rules.len());
-        let (want_x, want_w) = rail_guide_x(Rect::new(section.x, 0.0, section.w, 0.0));
+        let (want_x, want_w) = guide_from_the_theme(section.x);
         let g = rules[0];
         assert!(want_w > 0.0, "the theme states no width for the guide");
         assert!(
@@ -14983,10 +15227,543 @@ mod tests {
                     "a page kept its old step under a theme that asked for {step}"
                 );
             }
-            let (want_x, _) = rail_guide_x(Rect::new(section.x, 0.0, section.w, 0.0));
+            let (want_x, _) = guide_from_the_theme(section.x);
             assert!(
                 (rules[0][0] - want_x).abs() < 0.01,
                 "the guide stayed where the old step put it"
+            );
+        }
+        viewport_home();
+    }
+
+    /// R6 REACHES A SECTION'S PAGES. A row the page has turned off
+    /// registers nothing at all — and if that row is an EXPANDER, its
+    /// pages are nothing too: not drawn, not measured, not targets, not
+    /// steps in the Tab order, and no hairline beside them.
+    ///
+    /// WHY IT MATTERS THOUGH NOTHING SHIPS IT. The rail's one expander
+    /// (LOOK AND FEEL) carries no `enabled` predicate today, so this
+    /// combination cannot arise from `RAIL_ROWS` — but the GRAMMAR
+    /// allows it, and the grammar is what the walker obeys. Left as it
+    /// was, a greyed section standing on its own page would hand out
+    /// four buttons under an inscription that says the section is
+    /// unavailable: a way in behind a door marked shut. The rule was
+    /// already written three lines above the fault
+    /// ([`Settings::draw_rows`]), which is the kind of gap that survives
+    /// review by looking like it is being followed.
+    ///
+    /// BOTH READERS, and that is half the claim. The walker draws and
+    /// [`Settings::rows_span`] measures; a fix in one alone would
+    /// reserve height for a run nothing draws, and the rail would be one
+    /// length for the scroll and another for the eye.
+    ///
+    /// The two tables differ in ONE thing — the predicate — so what the
+    /// assertions compare is that predicate and nothing else. The
+    /// enabled one is measured first: a test in which neither table
+    /// hands anything out would pass while proving nothing.
+    #[test]
+    fn a_section_the_page_turned_off_hands_out_no_pages_either() {
+        static KIDS: [Row; 2] = [
+            row(Ctrl::Button {
+                label: Text::Fixed("ONE"),
+                kind: BtnKind::Wide,
+                act: Act::OpenBlur,
+            }),
+            row(Ctrl::Button {
+                label: Text::Fixed("TWO"),
+                kind: BtnKind::Wide,
+                act: Act::OpenGrid,
+            }),
+        ];
+        static OPEN: [Row; 1] = [row(Ctrl::Expander {
+            label: Text::Fixed("SECTION"),
+            kind: BtnKind::Wide,
+            act: Act::OpenLookFeel,
+            kids: &KIDS,
+        })];
+        static SHUT: [Row; 1] = [row_when(
+            Ctrl::Expander {
+                label: Text::Fixed("SECTION"),
+                kind: BtnKind::Wide,
+                act: Act::OpenLookFeel,
+                kids: &KIDS,
+            },
+            |_| false,
+        )];
+
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        theme::resolved();
+        theme::set_viewport(1080.0, 1.0);
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// One run of the walker over one table: what it registered,
+        /// what joined the chain, how many hairlines it laid, and what
+        /// the MEASUREMENT says the same run is worth.
+        fn walk(
+            fonts: &mut nacelle::font::FontSystem,
+            rows: &'static [Row],
+        ) -> (Vec<Act>, Vec<FocusId>, usize, f32) {
+            let mut s = furnished();
+            // The section is the one in force, so `rail_open` says it is
+            // unfolded and only the predicate can shut it.
+            s.view = View::LookFeel;
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::recording();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            ctx.focus = Some(&mut fc);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content).rail();
+            let region = Panes::of(m, content).rail.expect("no rail").rows;
+            let span = s.rows_span(rows, m, region).0;
+            s.draw_rows(&mut ctx, rows, m, region, region.y, None, Carrier::Rail);
+            fc.begin_frame();
+            let hits: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+            let chain: Vec<FocusId> = hits
+                .iter()
+                .map(|a| focus_id(*a))
+                .filter(|id| fc.rect_of(*id).is_some())
+                .collect();
+            let rules = dl
+                .cmds()
+                .iter()
+                .filter(|c| {
+                    matches!(c, nacelle::draw::DrawCmd::Rect { r, .. } if r[2] < r[3])
+                })
+                .count();
+            (hits, chain, rules, span)
+        }
+
+        let (open_hits, open_chain, open_rules, open_span) = walk(&mut fonts, &OPEN);
+        assert!(
+            open_hits.contains(&Act::OpenBlur) && open_hits.contains(&Act::OpenGrid),
+            "the enabled section handed out no pages, so this test cannot tell a \
+             shut one from a broken walker"
+        );
+        assert!(!open_chain.is_empty(), "the enabled section joined no chain at all");
+        assert_eq!(open_rules, 1, "the enabled section laid {open_rules} hairlines");
+
+        let (hits, chain, rules, span) = walk(&mut fonts, &SHUT);
+        for act in [Act::OpenBlur, Act::OpenGrid] {
+            assert!(
+                !hits.contains(&act),
+                "a page of a section the window turned off is still a target"
+            );
+            assert!(
+                !chain.contains(&focus_id(act)),
+                "a page of a section the window turned off is still a step in the \
+                 Tab order"
+            );
+        }
+        assert_eq!(
+            rules, 0,
+            "a section the window turned off still braced its pages with a hairline"
+        );
+        // AND THE MEASUREMENT AGREES. The shut section is as tall as its
+        // own row and no taller; the open one is taller by its pages.
+        assert!(
+            span < open_span - 1.0,
+            "a section the window turned off is measured as tall as an open one \
+             ({span} against {open_span}) — the height reserves room for a run \
+             nothing draws"
+        );
+        viewport_home();
+    }
+
+    /// A RAIL TALLER THAN ITS COLUMN SCROLLS; IT DOES NOT FOLD THE
+    /// WINDOW. Point 10 of the programme, on the navigation column.
+    ///
+    /// THE FAULT THIS CLOSES was made by the change beside it. A
+    /// section's pages moved INTO the rail on 2026-08-18, so the column
+    /// can want more height than it has — 440 px against 418 at 720p on
+    /// the master, 455 against 454 at 768p on a machine with no colour
+    /// manager. The first draft answered by folding the whole window at
+    /// those heights, which took the two-panel shape away from every
+    /// screen between 720p and 800p that had stood in columns before.
+    /// The toolkit has had the answer to content that does not fit since
+    /// the page adopted it: an offset, a bar and a wheel.
+    ///
+    /// FOUR THINGS, and the first is what makes the other three mean
+    /// something:
+    ///
+    /// * at 720p the window stands in COLUMNS and the rail really does
+    ///   overflow — no fold, and something to scroll;
+    /// * a notch over the RAIL moves the rail and leaves the page where
+    ///   it was, and a notch over the PAGE does the opposite — the
+    ///   pointer is what tells them apart, and a window that answered
+    ///   one wheel with both scrolls would be unusable in a way no
+    ///   offset-only test can see;
+    /// * the rail's bar is DRAWN, in the rail's own room, where the
+    ///   entries overflow it and nowhere else;
+    /// * and the bar takes the hand: a press on the thumb grabs it and
+    ///   dragging moves the rail rather than the page.
+    #[test]
+    fn a_rail_taller_than_its_column_scrolls_and_the_window_keeps_its_panels() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut fonts = nacelle::font::FontSystem::new();
+        theme::resolved();
+        theme::set_viewport(720.0, 1.0);
+
+        /// One drawn frame of the window at 720p, with the recorder on.
+        fn frame<'a>(
+            s: &mut Settings,
+            dl: &'a mut nacelle::draw::DrawList,
+            fonts: &mut nacelle::font::FontSystem,
+        ) {
+            let mut ctx = probe(dl, fonts, 720.0, 1.0);
+            ctx.t = 1.0;
+            s.draw(&mut ctx);
+        }
+
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        let mut dl = nacelle::draw::DrawList::recording();
+        frame(&mut s, &mut dl, &mut fonts);
+        let rail = s.rail_flow.expect("the window folded at 720px — the regression is back");
+        assert!(
+            rail.flow.length > rail.flow.view.h + 0.01,
+            "the rail wants {} px and has {} px, so nothing here is scrolling and \
+             this test is measuring the wrong window",
+            rail.flow.length,
+            rail.flow.view.h
+        );
+
+        // THE POINTER DECIDES. Over the rail's bed, then over the page.
+        let (page_before, rail_before) = (s.scroll.offset(), s.rail_scroll.offset());
+        s.wheel(-3.0, rail.bed.cx(), rail.bed.y + rail.bed.h / 2.0);
+        assert!(
+            s.rail_scroll.offset() > rail_before + 0.01,
+            "a notch over the navigation column moved nothing"
+        );
+        assert!(
+            (s.scroll.offset() - page_before).abs() < 0.01,
+            "a notch over the navigation column moved the page as well"
+        );
+        let rail_at = s.rail_scroll.offset();
+        let on_page = (rail.bed.right() + 1.0, rail.bed.y + rail.bed.h / 2.0);
+        s.wheel(-3.0, on_page.0, on_page.1);
+        assert!(
+            (s.rail_scroll.offset() - rail_at).abs() < 0.01,
+            "a notch over the page moved the navigation column as well"
+        );
+
+        // AND THE RAIL REALLY MOVED WHAT IT DRAWS. The same entry, two
+        // frames apart, stands higher by exactly what the offset took.
+        let mut dl2 = nacelle::draw::DrawList::recording();
+        frame(&mut s, &mut dl2, &mut fonts);
+        let after = s.rail_flow.expect("the rail went away mid-test");
+        let moved = after.flow.offset - rail.flow.offset;
+        assert!(moved > 0.01, "the rail's offset did not survive into the next frame");
+
+        // THE BAR IS ON THE SCREEN, in the rail's room and not over the
+        // page's — read off the frame that was just drawn and not from a
+        // geometry this test worked out for itself, because a bar that
+        // is only computed is the very fault the page's own bar had.
+        // The pointer is off the window in a probe, so the RESTING width
+        // is the one the frame painted.
+        let look = ScrollbarLook::from_theme();
+        let lane = bar_band(after.flow.view, &look);
+        assert!(
+            lane.right() <= rail.bed.right() + 0.01 && lane.x >= rail.bed.x - 0.01,
+            "the rail's bar lane {:?} left the rail's own bed {:?}",
+            (lane.x, lane.right()),
+            (rail.bed.x, rail.bed.right())
+        );
+        let at_rest = scroll::scrollbar(
+            after.flow.view,
+            &look,
+            after.flow.offset,
+            after.flow.view.h,
+            after.flow.length,
+            false,
+        )
+        .expect("an overflowing rail was given no bar geometry at all");
+        let same = |r: &[f32; 4], t: Rect| {
+            (r[0] - t.x).abs() < 0.5
+                && (r[1] - t.y).abs() < 0.5
+                && (r[2] - t.w).abs() < 0.5
+                && (r[3] - t.h).abs() < 0.5
+        };
+        assert!(
+            dl2.cmds().iter().any(|c| match c {
+                nacelle::draw::DrawCmd::RingFill { r, .. }
+                | nacelle::draw::DrawCmd::Rect { r, .. } => same(r, at_rest.thumb),
+                _ => false,
+            }),
+            "the rail overflows and no thumb was painted at {:?}",
+            [at_rest.thumb.x, at_rest.thumb.y, at_rest.thumb.w, at_rest.thumb.h]
+        );
+        // The press aims at the HOVER width, which is what the hand
+        // grabs: a lane is reserved at the bar's widest and the press
+        // path reads it that way ([`Settings::click`]).
+        let geom = scroll::scrollbar(
+            after.flow.view,
+            &look,
+            after.flow.offset,
+            after.flow.view.h,
+            after.flow.length,
+            true,
+        )
+        .expect("an overflowing rail was given no bar geometry at all");
+
+        // AND IT TAKES THE HAND. A press on the thumb grabs the RAIL's
+        // view; the drag that follows moves the rail and not the page.
+        let page_at = s.scroll.offset();
+        let took = s.click(
+            geom.thumb.cx(),
+            geom.thumb.y + geom.thumb.h / 2.0,
+            720.0 * 16.0 / 9.0,
+            720.0,
+            None,
+        );
+        assert!(!took, "a press on the rail's thumb was answered as a control");
+        assert!(s.rail_scroll.dragging(), "the rail's thumb did not take the press");
+        // Dragged back toward the TOP, which is the direction with room
+        // in it: the wheel above has already moved the rail down, and a
+        // drag toward an end it may already be resting against would
+        // measure the clamp instead of the grab.
+        assert!(after.flow.offset > 0.01, "the rail is at its top, so a drag up moves nothing");
+        s.drag(geom.thumb.cx(), geom.track.y);
+        assert!(
+            s.rail_scroll.offset() < after.flow.offset - 0.01,
+            "dragging the rail's thumb upward did not move the rail"
+        );
+        assert!(
+            (s.scroll.offset() - page_at).abs() < 0.01,
+            "dragging the rail's thumb moved the page"
+        );
+        s.release();
+        assert!(!s.rail_scroll.dragging(), "the rail's thumb was never let go");
+        viewport_home();
+    }
+
+    /// THE HAIRLINE IS THE THEME'S IN ALL THREE OF THE THINGS IT IS:
+    /// how wide it is, where across the indent step it stands, and what
+    /// colour it is drawn in.
+    ///
+    /// WHY A SWEEP OF THEMES AND NOT ONE MEASUREMENT. A reader that had
+    /// baked the master's own answers — `1.08` for the stroke, `0.5`
+    /// for the place, the resolved ink for the colour — draws exactly
+    /// the frame the master asks for, and one measurement against the
+    /// master cannot tell it from a reader that asked. So the theme is
+    /// MOVED under the window, once per token, and the frame has to
+    /// move with it: `rail_guide_x` is driven to both ENDS of its range
+    /// (flush with the section's own edge and flush against its pages'),
+    /// which is the whole of what that token can say.
+    ///
+    /// The expectation is rebuilt from the tokens themselves and never
+    /// from [`rail_guide_x`], for the reason that function's own test
+    /// gives: both sides of an equation drawn from one reader move
+    /// together.
+    #[test]
+    fn the_guide_wears_the_width_the_place_and_the_ink_the_theme_states() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// The section's plate and the one vertical hairline the rail
+        /// laid beside its pages, at whatever theme is in force.
+        fn drawn(fonts: &mut nacelle::font::FontSystem) -> (Rect, [f32; 4], nacelle::theme::Color) {
+            theme::resolved();
+            theme::set_viewport(1080.0, 1.0);
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let bed = Panes::of(Metrics::of(&ctx, content), content)
+                .rail
+                .expect("the window folded, so there is no rail to measure")
+                .bed;
+            s.draw(&mut ctx);
+            let section = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == Act::OpenLookFeel)
+                .map(|&(r, _)| r)
+                .expect("the rail drew no section to bracket");
+            // A rect taller than it is wide, inside the rail: the guide,
+            // and nothing else the rail draws is that shape.
+            let mut rules: Vec<([f32; 4], nacelle::theme::Color)> = dl
+                .cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::Rect { r, color }
+                        if r[2] < r[3] && bed.contains(r[0], r[1]) =>
+                    {
+                        Some((*r, *color))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rules.len(), 1, "the rail laid {} vertical rules", rules.len());
+            let (r, ink) = rules.remove(0);
+            (section, r, ink)
+        }
+
+        /// What the FILE asks for, read straight out of the engine.
+        fn asked(section_x: f32) -> (f32, f32, nacelle::theme::Color) {
+            let t = theme::resolved();
+            let px = |n: &str| {
+                t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}")))
+            };
+            let (w, at, step) = (
+                px("settings.rail_guide_w"),
+                px("settings.rail_guide_x"),
+                px("settings.rail_indent"),
+            );
+            let ink = t.color(
+                nacelle::theme::id("component.settings.rail_guide")
+                    .expect("no component.settings.rail_guide"),
+            );
+            (section_x + (step - w).max(0.0) * at, w, ink)
+        }
+
+        // The master first, then one theme per thing the guide is. Each
+        // body states a value the master does NOT ship, so a reader that
+        // had baked the master's answer is caught by the very case it
+        // was baked from.
+        let cases: [(&str, &str); 5] = [
+            ("master", ""),
+            ("guide-wide", "[settings]\nrail_guide_w = 1u\n"),
+            ("guide-left", "[settings]\nrail_guide_x = 0%\n"),
+            ("guide-right", "[settings]\nrail_guide_x = 100%\n"),
+            (
+                "guide-ink",
+                "[component]\nsettings.rail_guide = oklch(0.7000, 0.1500, 30.00 / 1.000)\n",
+            ),
+        ];
+        let mut moved_x: Vec<f32> = Vec::new();
+        let mut moved_w: Vec<f32> = Vec::new();
+        let mut moved_ink: Vec<[f32; 4]> = Vec::new();
+        for (tag, body) in cases {
+            let _t = (!body.is_empty()).then(|| crate::widgets::Themed::new(tag, body));
+            let (section, g, ink) = drawn(&mut fonts);
+            let (want_x, want_w, want_ink) = asked(section.x);
+            assert!(want_w > 0.0, "under {tag} the theme states no width for the guide");
+            assert!(
+                (g[2] - want_w).abs() < 0.01,
+                "under {tag} the guide is {} px wide and the theme asked for {want_w}",
+                g[2]
+            );
+            assert!(
+                (g[0] - want_x).abs() < 0.01,
+                "under {tag} the guide stands at {} and the theme asked for {want_x}",
+                g[0]
+            );
+            let want = col(want_ink);
+            assert!(
+                (ink.r - want.r).abs() < 0.002
+                    && (ink.g - want.g).abs() < 0.002
+                    && (ink.b - want.b).abs() < 0.002
+                    && (ink.a - want.a).abs() < 0.002,
+                "under {tag} the guide is drawn in {} and the theme asked for {}",
+                ink.to_hex(),
+                want.to_hex()
+            );
+            // …and the stroke never leaves the step it brackets, at
+            // either end of the range.
+            assert!(
+                g[0] >= section.x - 0.01
+                    && g[0] + g[2] <= section.x + rail_indent() + 0.01,
+                "under {tag} the guide left the step it brackets"
+            );
+            moved_x.push(g[0] - section.x);
+            moved_w.push(g[2]);
+            moved_ink.push([ink.r, ink.g, ink.b, ink.a]);
+        }
+        // THE SWEEP REALLY SWEPT. Three tokens, three things that had to
+        // come out different somewhere — otherwise every case above
+        // measured one frame five times and a baked reader walks through.
+        assert!(
+            moved_x[2] < moved_x[0] - 0.5 && moved_x[3] > moved_x[0] + 0.5,
+            "the two ends of settings.rail_guide_x put the stroke in the same \
+             place as the middle did: {moved_x:?}"
+        );
+        assert!(
+            (moved_w[1] - moved_w[0]).abs() > 0.5,
+            "settings.rail_guide_w did not change the stroke: {moved_w:?}"
+        );
+        assert!(
+            moved_ink[4] != moved_ink[0],
+            "component.settings.rail_guide did not change the ink: {moved_ink:?}"
+        );
+        viewport_home();
+    }
+
+    /// THE RAIL'S BREAK BETWEEN TWO ENTRIES IS `settings.rail_row_gap`,
+    /// and nothing else — not `modal.row_gap`, which is the rhythm of a
+    /// FORM, and not a number in this file.
+    ///
+    /// [`Metrics::rail`] is the whole of that claim: one field replaced
+    /// on the metrics the page uses. It is worth a test of its own
+    /// because it is the kind of reader that passes every OTHER test in
+    /// this file while baked — the rail is laid and measured through the
+    /// same `Metrics`, so a rail whose break was a constant would still
+    /// draw and measure identically to itself. Only a THEME that says a
+    /// different number can tell the two apart, so that is what this
+    /// asks: the master, and a file that doubles the break.
+    ///
+    /// READ OFF THE FRAME. Two entries that stand one under the other
+    /// with nothing between them — GRID and BOARDS, both plain buttons
+    /// under one heading — and the distance between the rects the window
+    /// really registered them at.
+    #[test]
+    fn the_rails_break_between_two_entries_is_the_one_the_theme_names() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut fonts = nacelle::font::FontSystem::new();
+
+        /// The gap the frame really left between the two adjacent
+        /// entries, at the theme in force.
+        fn between(fonts: &mut nacelle::font::FontSystem) -> f32 {
+            theme::resolved();
+            theme::set_viewport(1080.0, 1.0);
+            let mut s = furnished();
+            s.view = View::Grid;
+            let mut dl = nacelle::draw::DrawList::new();
+            let mut ctx = probe(&mut dl, fonts, 1080.0, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            assert!(
+                !Panes::of(Metrics::of(&ctx, content), content).folded,
+                "the window folded, and a folded window has no rail rhythm"
+            );
+            s.draw(&mut ctx);
+            let at = |act: Act| {
+                s.hits
+                    .iter()
+                    .find(|&&(_, a)| a == act)
+                    .map(|&(r, _)| r)
+                    .expect("the rail drew neither GRID nor BOARDS")
+            };
+            at(Act::OpenBoards).y - at(Act::OpenGrid).bottom()
+        }
+
+        /// What the FILE asks for, read straight out of the engine.
+        fn asked() -> (f32, f32) {
+            let t = theme::resolved();
+            let px = |n: &str| {
+                t.px(nacelle::theme::id(n).unwrap_or_else(|| panic!("no {n}")))
+            };
+            (px("settings.rail_row_gap"), px("modal.row_gap"))
+        }
+
+        for (tag, body) in [("master", ""), ("dense-rail", "[settings]\nrail_row_gap = 4u\n")] {
+            let _t = (!body.is_empty()).then(|| crate::widgets::Themed::new(tag, body));
+            let (rail_gap, form_gap) = asked();
+            let got = between(&mut fonts);
+            assert!(
+                (got - rail_gap).abs() < 0.01,
+                "under {tag} the rail broke {got} px between two entries and \
+                 settings.rail_row_gap is {rail_gap}"
+            );
+            assert!(
+                (rail_gap - form_gap).abs() > 0.5,
+                "under {tag} the rail's break and the form's are the same number \
+                 ({rail_gap} vs {form_gap}), so this measurement cannot tell a \
+                 rail that reads the wrong token from one that reads the right one"
             );
         }
         viewport_home();
@@ -15060,7 +15837,7 @@ mod tests {
             let mut ctx = probe(&mut dl, fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = s.panes(m, content);
+            let nav = Panes::of(m, content);
             s.draw_bands(&mut ctx, &nav);
             let out = ctx
                 .dl
@@ -15257,20 +16034,25 @@ mod tests {
         // differently — the page is the whole interior and the body is
         // already standing on the page's own bed — so the folded window
         // looks exactly as it did before any of this existed.
-        let mut folded_seen = false;
-        for h in HEIGHTS {
-            theme::set_viewport(h, 1.0);
-            let (drawn, nav, _) = bands(&s, &mut fonts, h);
-            if !nav.folded {
-                continue;
+        //
+        // ASKED FOR RATHER THAN FOUND. Since the navigation became one
+        // column the master keeps its columns at every height the
+        // program is built for, so a sweep over HEIGHTS would never
+        // reach this shape at all ([`folding_theme`] says why, and why
+        // that is the change rather than a hole).
+        {
+            let _t = folding_theme();
+            let mut folded_seen = false;
+            for h in [HEIGHTS[0], HEIGHTS[4]] {
+                theme::set_viewport(h, 1.0);
+                let (drawn, nav, _) = bands(&s, &mut fonts, h);
+                assert!(nav.folded, "the folding theme did not fold the window at {h}px");
+                folded_seen = true;
+                assert!(drawn.is_empty(), "a folded window bedded its interior twice");
             }
-            folded_seen = true;
-            assert!(drawn.is_empty(), "a folded window bedded its interior twice");
+            assert!(folded_seen, "the folded band was never measured");
         }
-        assert!(
-            folded_seen,
-            "no window height in HEIGHTS folds — the folded band was never measured"
-        );
+        theme::set_viewport(1080.0, 1.0);
 
         // A THEME MOVES BOTH AT ONCE, through the one token the master
         // anchors them to. This is the divergence the owner
@@ -15388,7 +16170,7 @@ mod tests {
             let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = s.panes(m, content);
+            let nav = Panes::of(m, content);
             if nav.folded {
                 continue;
             }
@@ -15495,7 +16277,7 @@ mod tests {
             ctx.focus = Some(&mut fc);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = s.panes(m, content);
+            let nav = Panes::of(m, content);
             // Folded there is no bed and nothing stands on one: the
             // entries are ordinary bands in the flow, which is the
             // scroll's ground and another test's.
@@ -15565,10 +16347,34 @@ mod tests {
             // THE CHROME BUTTON IS ONE OF THEM, named rather than left to
             // the sweep: it is the head of the RAIL and the one control
             // this window used to place against the content box instead.
+            let corner = s
+                .hits
+                .iter()
+                .find(|(_, a)| matches!(a, Act::Back | Act::Close))
+                .map(|&(r, _)| r);
+            let corner = corner.unwrap_or_else(|| {
+                panic!("at {h}px the frame carried no way out, so the sweep never measured it")
+            });
+            // AND IT LINES UP WITH WHAT STANDS UNDER IT. The rail keeps
+            // a lane for its own scrollbar out of the box its ENTRIES
+            // are laid in ([`rows_box`]); a chrome button placed against
+            // the room instead of against the entries would be some
+            // sixteen pixels wider than every button beneath it, which
+            // reads as a button that failed to line up rather than as
+            // the head of the column it is.
+            let entry = s
+                .hits
+                .iter()
+                .find(|&&(_, a)| a == Act::OpenLookFeel)
+                .map(|&(r, _)| r)
+                .expect("the rail drew no top-level entry to line the button up with");
             assert!(
-                s.hits.iter().any(|(_, a)| matches!(a, Act::Back | Act::Close)),
-                "at {h}px the frame carried no way out, so the sweep never \
-                 measured it"
+                (corner.x - entry.x).abs() < 0.01
+                    && (corner.right() - entry.right()).abs() < 0.01,
+                "at {h}px the chrome button runs {:?} and the entry under it {:?} — \
+                 the head of the rail is not the width of the rail",
+                (corner.x, corner.right()),
+                (entry.x, entry.right())
             );
         }
         assert!(measured > 0, "no window height in HEIGHTS stands in columns at all");
@@ -15624,7 +16430,7 @@ mod tests {
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
             for p in PAGES.iter() {
-                let nav = s.panes(m, content);
+                let nav = Panes::of(m, content);
                 let top = s.body_box(p, m, content).y;
                 let want = nav.corner.bottom() + m.space(p.lead);
                 assert!(
@@ -15673,7 +16479,7 @@ mod tests {
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
         assert!(
-            !s.panes(m, content).folded,
+            !Panes::of(m, content).folded,
             "the window folded at a width it fits in"
         );
         s.draw(&mut ctx);
@@ -15694,35 +16500,50 @@ mod tests {
     }
 
 
-    /// The rail shows every section it has — AND, ON EVERY PAGE, THE
-    /// PAGES THE OPEN SECTION UNFOLDS — at every window height the
-    /// program is built for.
+    /// EVERY SECTION THE RAIL HOLDS CAN BE REACHED — on every page, on
+    /// both machines, at every window height the program is built for.
     ///
-    /// Fail-closed: a rail taller than its box is cut off by its own
-    /// clip, and a section cut off is a section no pointer can reach —
-    /// the navigation would be the one part of this window with no way
-    /// to scroll to what it hides.
+    /// Fail-closed, and the property it guards changed shape on
+    /// 2026-08-18. A rail is clipped to its column, so an entry past the
+    /// bottom edge is drawn nowhere and is in no hit map; the first
+    /// draft of the one-column rail answered that by FOLDING the whole
+    /// window wherever the rail wanted more height than it had, which
+    /// took the two-panel shape away from 720p and 768p — screens that
+    /// had stood in columns before. The rail scrolls now
+    /// ([`Settings::rail_scroll`]), so the claim is REACHABILITY and no
+    /// longer fitting: an entry may be off the frame, and the wheel has
+    /// to be able to fetch it back.
     ///
-    /// AND THIS IS THE MEASUREMENT THE SINGLE-OPEN RULE RESTS ON
-    /// ([`Settings::rail_open`], decision (a)). While a section's pages
-    /// stood in a column of their own the rail's height was one number
-    /// whatever page you were on; now the open section's pages are part
-    /// of it, so the tallest rail this window can ever build is the
-    /// tallest SECTION's — which is why the sweep runs every view and
-    /// not the two it used to. Were sections independently expandable
-    /// the bound would be the SUM of every section's pages instead, and
-    /// nothing here could tell whether that still fitted.
+    /// THREE THINGS ARE ASSERTED, and the middle one is what keeps the
+    /// other two honest:
+    ///
+    /// * the window stands in COLUMNS at every height in the ladder and
+    ///   at the two heights the regression was measured at (768 and
+    ///   800), on both machines — a fold here is the regression coming
+    ///   back;
+    /// * somewhere in that ladder the rail really does want more than
+    ///   its box, or the scroll this test is about is never exercised;
+    /// * every act the rail describes — the sections AND the pages the
+    ///   open one unfolds — is in the hit map at one of the offsets
+    ///   [`rail_stops`] walks.
+    ///
+    /// AND THIS IS STILL THE MEASUREMENT THE SINGLE-OPEN RULE RESTS ON
+    /// ([`Settings::rail_open`], decision (a)): the unfold has to COST
+    /// height, or the rail carries the open section's pages for free and
+    /// the bound single-open buys is a bound on nothing.
+    ///
+    /// BOTH MACHINES, and the second is the taller one. `furnished()`
+    /// has a colour manager, and a rail measured only there never
+    /// carries the NO COLOR MANAGER note at all — while the machine that
+    /// DOES carry it keeps the greyed COLOR SPACE entry too (R6 paints
+    /// an unofferable section shut, it does not remove it), so the shut
+    /// rail is strictly the longer of the two. Measuring the short one
+    /// and calling the property proved is how a fail-closed test comes
+    /// to guard everything except the case that grew.
     #[test]
-    fn the_navigation_fits_the_window_it_stands_in() {
+    fn every_section_the_rail_holds_can_be_reached_at_every_window() {
         let _g = crate::widgets::theme_test_lock();
-        // BOTH MACHINES, and the second is the taller one. `furnished()`
-        // has a colour manager, and a rail measured only there never
-        // carries the NO COLOR MANAGER note at all — while the machine
-        // that DOES carry it keeps the greyed COLOR SPACE entry too (R6
-        // paints an unofferable section shut, it does not remove it), so
-        // the shut rail is strictly the longer of the two. Measuring the
-        // short one and calling the property proved is how a fail-closed
-        // test comes to guard everything except the case that grew.
+        nacelle::theme::clear_preview();
         /// One window, on one page, on one of the two machines.
         fn rail_of(view: View, colour_manager: bool) -> Settings {
             let mut s = furnished();
@@ -15735,24 +16556,30 @@ mod tests {
             "the fixture lost its colour manager, so the two machines are one"
         );
         let mut fonts = nacelle::font::FontSystem::new();
-        let mut dl = nacelle::draw::DrawList::new();
         let mut measured = 0;
         let mut unfolded = 0;
-        for h in HEIGHTS {
+        let mut overflowed = 0;
+        // The ladder, plus the two heights the fold regression was
+        // measured at: 768 is a 1366x768 laptop and 800 is where the
+        // machine with no colour manager crossed over.
+        let ladder: Vec<f32> =
+            HEIGHTS.iter().copied().chain([768.0, 800.0]).collect();
+        for h in ladder {
             theme::resolved();
             theme::set_viewport(h, 1.0);
+            let mut dl = nacelle::draw::DrawList::new();
             let ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
             for p in PAGES.iter() {
                 let (open, shut) = (rail_of(p.view, true), rail_of(p.view, false));
+                let nav = Panes::of(m, content);
                 // The point of the second state, stated so it cannot
                 // quietly stop being true: a machine with no colour
                 // manager keeps the greyed entry AND gains the note, so
                 // its rail is the longer one. If the two ever measure
                 // the same, this loop is running twice over one rail.
-                let both = open.panes(m, content).rail.map(|c| c.rows);
-                if let Some(rail) = both {
+                if let Some(rail) = nav.rail.map(|c| c.rows) {
                     assert!(
                         shut.rows_h(&RAIL_ROWS, m.rail(), rail)
                             > open.rows_h(&RAIL_ROWS, m.rail(), rail),
@@ -15761,37 +16588,31 @@ mod tests {
                     );
                 }
                 for (which, s) in [("with a colour manager", &open), ("without one", &shut)] {
-                    let nav = s.panes(m, content);
-                    // Folded, the entries are in the flow and the scroll
-                    // answers for them — that is the other test's
-                    // ground. `.rows` since the columns fix: a Column is
-                    // a bed AND the box its rows stand in, and what a
-                    // rail WANTS is measured against the latter.
+                    // THE REGRESSION GUARD. The master keeps its columns
+                    // at every height this program is built for; a fold
+                    // here means the window has gone back to trading its
+                    // whole shape for a rail that would not fit.
                     let Some(rail) = nav.rail.map(|c| c.rows) else {
-                        // …and 1080p is not allowed to be one of those.
-                        // THIS is the fail-closed half now: the height
-                        // fallback in [`Settings::panes`] is a floor for
-                        // a genuinely tiny window, not a way for a rail
-                        // that has outgrown its column to pass quietly.
-                        assert!(
-                            h < 1080.0,
-                            "at {h}px, {which}, {} folded the whole window because \
-                             its rail no longer fits a column — the rail has \
-                             outgrown the size this program is written for",
+                        panic!(
+                            "at {h}px, {which}, {} folded the whole window — the \
+                             master keeps two panels at every height the program \
+                             is built for",
                             p.title
                         );
-                        continue;
                     };
                     measured += 1;
-                    let want = s.rows_h(&RAIL_ROWS, m.rail(), rail);
+                    let want = s.rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
+                    if want > rail.h + 0.01 {
+                        overflowed += 1;
+                    }
                     // The pages the open section unfolds are IN that
                     // number: `rows_h` recurses into the section in
                     // force and into no other ([`Settings::rows_span`]).
                     // Measured against the SAME rail standing on a page
                     // whose section has no pages, so the difference is
                     // exactly what the unfold cost.
-                    let plain =
-                        rail_of(View::Grid, s.color_enabled).rows_h(&RAIL_ROWS, m.rail(), rail);
+                    let plain = rail_of(View::Grid, s.color_enabled)
+                        .rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
                     if kid_acts(s, p.view).is_empty() {
                         assert!(
                             (want - plain).abs() < 0.01,
@@ -15808,13 +16629,6 @@ mod tests {
                             p.title
                         );
                     }
-                    assert!(
-                        want <= rail.h + 0.01,
-                        "at {h}px, {which}, the rail on {} wants {want} px and has \
-                         {} px",
-                        p.title,
-                        rail.h
-                    );
                 }
             }
         }
@@ -15824,6 +16638,59 @@ mod tests {
             "no page in the sweep unfolded a section, so the height this test was \
              widened for was never measured"
         );
+        assert!(
+            overflowed > 0,
+            "the rail never wanted more room than it had anywhere in the ladder, so \
+             the scroll this test is about was never exercised"
+        );
+
+        // AND EVERY ENTRY IS REACHED, off the frames the window really
+        // draws, at the shortest window in the ladder — the one where
+        // the rail overflows hardest. The wheel is what the reader has;
+        // [`rail_stops`] is that wheel, walked to the end.
+        theme::resolved();
+        theme::set_viewport(HEIGHTS[0], 1.0);
+        for p in PAGES.iter() {
+            for colour_manager in [true, false] {
+                let reference = rail_of(p.view, colour_manager);
+                let want: Vec<Act> = nav_row_acts(&reference, &RAIL_ROWS)
+                    .into_iter()
+                    .chain(kid_acts(&reference, p.view))
+                    .collect();
+                assert!(!want.is_empty(), "the rail describes nothing to reach");
+                let stops: Vec<f32> = {
+                    let mut dl = nacelle::draw::DrawList::new();
+                    let ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
+                    let content = content_rect(modal_rect(ctx.w, ctx.h));
+                    let m = Metrics::of(&ctx, content);
+                    let mut out = vec![0.0];
+                    out.extend(rail_stops(&reference, m, content));
+                    out
+                };
+                let mut seen: Vec<Act> = Vec::new();
+                for stop in stops {
+                    let mut s = rail_of(p.view, colour_manager);
+                    s.rail_scroll.set_offset(stop);
+                    let mut dl = nacelle::draw::DrawList::new();
+                    let mut ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
+                    s.draw(&mut ctx);
+                    for &(_, act) in s.hits.iter() {
+                        if !seen.contains(&act) {
+                            seen.push(act);
+                        }
+                    }
+                }
+                if let Some(missing) = want.iter().position(|a| !seen.contains(a)) {
+                    panic!(
+                        "{} at {}px: entry #{missing} of the {} the rail holds is \
+                         reachable at no offset the wheel can take it to",
+                        p.title,
+                        HEIGHTS[0],
+                        want.len()
+                    );
+                }
+            }
+        }
         viewport_home();
     }
 
@@ -15877,7 +16744,7 @@ mod tests {
             fonts: &mut nacelle::font::FontSystem,
             view: View,
             h: f32,
-            stop: f32,
+            stop: (f32, f32),
             named: &[(FocusId, Act)],
         ) -> (Vec<Act>, Vec<Act>) {
             let mut s = furnished();
@@ -15885,7 +16752,11 @@ mod tests {
             // Every `Row::when` condition set at once, so the sweep
             // walks the conditional rows as well.
             editor_ajar(&mut s);
-            s.scroll.set_offset(stop);
+            // The page's offset and the rail's: two scrolls, and a sweep
+            // that drove only one would call the other's far end
+            // unreachable.
+            s.scroll.set_offset(stop.0);
+            s.rail_scroll.set_offset(stop.1);
             let mut fc = FocusCtl::new();
             let mut dl = nacelle::draw::DrawList::new();
             fc.begin_frame();
@@ -15956,6 +16827,19 @@ mod tests {
             }
         }
 
+        // BOTH SHAPES, AND THE FOLDED ONE IS ASKED FOR. The master keeps
+        // its columns at every height the program is built for since the
+        // navigation became one column, so a sweep over HEIGHTS alone
+        // would be five measurements of the SAME shape and this test's
+        // whole claim would be untested. The folded shape is reached the
+        // way the rule is written — through `settings.col_min_w`, the
+        // theme's own threshold ([`folding_theme`]) — and at the two
+        // ends of the ladder, which is enough: what is under test is the
+        // ORDER, and the order is the description's at every height by
+        // construction.
+        for folded in [false, true] {
+            let _t = folded.then(folding_theme);
+            let ladder: &[f32] = if folded { &[HEIGHTS[0], HEIGHTS[4]] } else { &HEIGHTS };
         for p in PAGES.iter() {
             let described: Vec<Act> = {
                 let mut s = furnished();
@@ -15975,14 +16859,14 @@ mod tests {
                 .copied()
                 .filter(|a| !matches!(a, Act::Close | Act::Back))
                 .collect();
-            for h in HEIGHTS {
+            for &h in ladder {
                 theme::resolved();
                 theme::set_viewport(h, 1.0);
                 // Half a viewport per stop, so consecutive stops overlap
                 // — every row is far shorter than half a viewport — and
                 // the far end is the clamp's own, exactly as the
                 // reachability sweep walks a page.
-                let stops: Vec<f32> = {
+                let stops: Vec<(f32, f32)> = {
                     let mut dl = nacelle::draw::DrawList::new();
                     let ctx = probe(&mut dl, &mut fonts, h, 1.0);
                     let content = content_rect(modal_rect(ctx.w, ctx.h));
@@ -15992,13 +16876,14 @@ mod tests {
                     editor_ajar(&mut s);
                     let stride = (s.body_box(p, m, content).h * 0.5).max(1.0);
                     let length = s.flow_h(p, m, content);
-                    let mut out = vec![0.0];
+                    let mut out = vec![(0.0, 0.0)];
                     let mut at = stride;
                     while at < length {
-                        out.push(at);
+                        out.push((at, 0.0));
                         at += stride;
                     }
-                    out.push(f32::MAX / 4.0);
+                    out.push((f32::MAX / 4.0, 0.0));
+                    out.extend(rail_stops(&s, m, content).into_iter().map(|r| (0.0, r)));
                     out
                 };
                 let mut walked: Vec<Act> = Vec::new();
@@ -16026,25 +16911,21 @@ mod tests {
                 all_of_it(&pointed, &pressed, p.title, h, "never became a target");
             }
         }
+        }
 
         // The shapes really are different shapes, or all of the above is
-        // one window measured five times. The WINDOW folds at the
-        // smallest height and stands in two panels at the largest; a
-        // BAND of columns folds with it and stands again once its own
-        // columns have the width. Both sides of M4 are therefore walked
-        // above, because both are true somewhere in the ladder.
-        let mut s = furnished();
-        s.view = View::Color;
-        for (h, window_folded, band_folded) in
-            [(HEIGHTS[0], true, true), (HEIGHTS[4], false, false)]
-        {
+        // one window measured twice over. In COLUMNS at every height the
+        // program is built for; FOLDED — window and columned band alike,
+        // through the one token both read — wherever the theme says the
+        // page cannot have its width.
+        let mut shape = |h: f32, window_folded: bool, band_folded: bool| {
             theme::resolved();
             theme::set_viewport(h, 1.0);
             let mut dl = nacelle::draw::DrawList::new();
             let ctx = probe(&mut dl, &mut fonts, h, 1.0);
             let content = content_rect(modal_rect(ctx.w, ctx.h));
             let m = Metrics::of(&ctx, content);
-            let nav = s.panes(m, content);
+            let nav = Panes::of(m, content);
             assert_eq!(
                 nav.folded, window_folded,
                 "the window at {h}px is not the shape this test is about"
@@ -16054,6 +16935,19 @@ mod tests {
                 band_folded,
                 "the COLOR page's band at {h}px is not the shape this test is about"
             );
+        };
+        // On the master: the WINDOW keeps its columns at both ends of
+        // the ladder, and the BAND inside it folds at the small end and
+        // stands at the large one — so M4's two sides are both walked
+        // above without a theme being asked for anything.
+        shape(HEIGHTS[0], false, true);
+        shape(HEIGHTS[4], false, false);
+        // And the window's own fold, asked for through the threshold
+        // that decides it.
+        {
+            let _t = folding_theme();
+            shape(HEIGHTS[0], true, true);
+            shape(HEIGHTS[4], true, true);
         }
         viewport_home();
     }
@@ -16155,7 +17049,15 @@ mod tests {
                 // half-viewport apart (rows are far shorter than half a
                 // viewport, so consecutive stops overlap), and the far end is
                 // still the clamp's own MAX/4.
-                let stops: Vec<f32> = {
+                //
+                // TWO SCROLLS, TWO SETS OF STOPS since the rail took one
+                // of its own. A sweep that only walked the page would
+                // report every entry past the rail's bottom edge
+                // unreachable, when what was unreachable was the sweep;
+                // and the two lists are walked SEPARATELY rather than
+                // crossed, because the column and the page hold disjoint
+                // controls and no frame needs both offsets at once.
+                let stops: Vec<(f32, f32)> = {
                     let mut dl = nacelle::draw::DrawList::new();
                     let ctx = probe(&mut dl, &mut fonts, h, 1.0);
                     let content = content_rect(modal_rect(ctx.w, ctx.h));
@@ -16163,16 +17065,19 @@ mod tests {
                     let view = reference.body_box(p, m, content);
                     let length = reference.flow_h(p, m, content);
                     let stride = (view.h * 0.5).max(1.0);
-                    let mut out = vec![0.0];
+                    let mut out = vec![(0.0, 0.0)];
                     let mut at = stride;
                     while at < length {
-                        out.push(at);
+                        out.push((at, 0.0));
                         at += stride;
                     }
-                    out.push(f32::MAX / 4.0);
+                    out.push((f32::MAX / 4.0, 0.0));
+                    out.extend(
+                        rail_stops(&reference, m, content).into_iter().map(|r| (0.0, r)),
+                    );
                     out
                 };
-                for stop in stops {
+                for (stop, rail_stop) in stops {
                     let mut s = furnished();
                     s.view = p.view;
                     // Every condition set at once, so the reachability sweep
@@ -16181,6 +17086,9 @@ mod tests {
                     s.editor_basic = basic;
                     if stop > 0.0 {
                         s.scroll.set_offset(stop);
+                    }
+                    if rail_stop > 0.0 {
+                        s.rail_scroll.set_offset(rail_stop);
                     }
                     let mut fc = FocusCtl::new();
                     let mut dl = nacelle::draw::DrawList::new();
@@ -16198,7 +17106,7 @@ mod tests {
                     {
                         panic!(
                             "{} at {h}px: #{i} of the {} controls the window describes \
-                             is not in the chain of the frame at {stop} px",
+                             is not in the chain of the frame at {stop} / {rail_stop} px",
                             p.title,
                             described.len()
                         );
@@ -16225,14 +17133,19 @@ mod tests {
     /// neither seen nor pressable, because Enter reads the hit map and
     /// an unseen row is not in it. So every page is walked with Tab from
     /// end to end, redrawing between presses exactly as the program
-    /// does, and after every press whatever the chain landed on that
-    /// belongs to the FLOW has to stand inside the box the flow is read
-    /// in. What stands in the navigation's own columns is not the
-    /// scroll's to move and is not asked (nor is what the page PINS,
-    /// which is outside that box by construction and always on screen).
+    /// does, and after every press whatever the chain landed on that a
+    /// scroll CARRIES has to stand inside the box that scroll is read
+    /// in. What the page PINS is not asked: it is outside that box by
+    /// construction and always on screen.
+    ///
+    /// TWO SCROLLS AND TWO BOXES since 2026-08-18. A rail entry is
+    /// brought back by the RAIL's offset and into the RAIL's box, and
+    /// that is checked here beside the page's — a chase that moved the
+    /// page to fetch a rail entry would leave the ring exactly where it
+    /// was and carry the page off under it.
     ///
     /// Both shapes again: folded, the navigation is part of the flow and
-    /// is chased with it.
+    /// is chased with it, into the one box there then is.
     #[test]
     fn the_keyboard_scrolls_to_whatever_it_lands_on() {
         let _g = crate::widgets::theme_test_lock();
@@ -16254,7 +17167,7 @@ mod tests {
             s.draw(&mut ctx);
             fc.begin_frame();
         }
-        let mut walked = 0;
+        let (mut walked, mut on_the_rail) = (0, 0);
         for h in [HEIGHTS[0], HEIGHTS[4]] {
             theme::resolved();
             theme::set_viewport(h, 1.0);
@@ -16266,9 +17179,13 @@ mod tests {
                     let mut dl = nacelle::draw::DrawList::new();
                     let ctx = probe(&mut dl, &mut fonts, h, 1.0);
                     let content = content_rect(modal_rect(ctx.w, ctx.h));
-                    s.panes(Metrics::of(&ctx, content), content).folded
+                    Panes::of(Metrics::of(&ctx, content), content).folded
                 };
                 let flowed = flowed_acts(&s, p, folded);
+                // The rail's own, where there is a rail: its entries and
+                // the open section's pages, chased by the rail's offset
+                // into the rail's box.
+                let railed: Vec<Act> = if folded { Vec::new() } else { rail_acts(&s) };
                 let mut fc = FocusCtl::new();
                 frame(&mut fonts, &mut s, &mut fc, h);
                 // Once round the whole chain, and a few presses over.
@@ -16276,25 +17193,40 @@ mod tests {
                     s.key(&tab, &mut fc);
                     frame(&mut fonts, &mut s, &mut fc, h);
                     let Some(id) = fc.focused() else { continue };
-                    let Some(i) = flowed.iter().position(|a| focus_id(*a) == id) else {
-                        continue;
-                    };
+                    let carried = flowed
+                        .iter()
+                        .position(|a| focus_id(*a) == id)
+                        .map(|i| (i, flowed.len(), "the page", s.flow.view))
+                        .or_else(|| {
+                            let i = railed.iter().position(|a| focus_id(*a) == id)?;
+                            Some((i, railed.len(), "the rail", s.rail_flow?.flow.view))
+                        });
+                    let Some((i, of, which, view)) = carried else { continue };
                     let r = fc.rect_of(id).expect("the chain lost what it just landed on");
-                    let view = s.flow.view;
                     walked += 1;
+                    if which == "the rail" {
+                        on_the_rail += 1;
+                    }
                     assert!(
                         r.y >= view.y - 0.01 && r.bottom() <= view.bottom() + 0.01,
-                        "{} at {h}px: the ring on #{i} of the {} rows that flow stands \
-                         {:?} outside the frame {:?} the page is read in",
+                        "{} at {h}px: the ring on #{i} of the {of} rows {which} \
+                         carries stands {:?} outside the frame {:?} it is read in",
                         p.title,
-                        flowed.len(),
                         (r.y, r.bottom()),
                         (view.y, view.bottom())
                     );
                 }
             }
         }
-        assert!(walked > 0, "the walk never landed on a row of any page's flow");
+        assert!(walked > 0, "the walk never landed on a row any scroll carries");
+        // Fail-closed on the half that is new: a walk that never landed
+        // on a rail entry would prove the page's chase and call the
+        // rail's proved with it.
+        assert!(
+            on_the_rail > 0,
+            "the walk never landed on an entry of the navigation column, so the \
+             rail's own chase was never measured"
+        );
         viewport_home();
     }
 
@@ -16306,6 +17238,7 @@ mod tests {
     /// deliberately not one: R6 says it registers nothing at all. Nor is
     /// a shut section's page, which is the same sentence one level up
     /// and the one [`row_acts`] answers with.
+
     fn nav_row_acts(s: &Settings, rows: &'static [Row]) -> Vec<Act> {
         rows.iter().flat_map(|r| row_acts(s, r)).collect()
     }

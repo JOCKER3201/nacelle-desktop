@@ -1896,11 +1896,16 @@ fn main() {
                         // BEHIND the window — and turned a widget nobody
                         // was pointing at, while the settings pages could
                         // not be scrolled at all.
+                        let mouse = screens[si].mouse;
                         if settings.open {
-                            settings.wheel(dy);
+                            // WITH THE POINTER, since 2026-08-18: the
+                            // window has a scrolling page AND a
+                            // scrolling navigation column, and where the
+                            // hand is is the only thing that says which
+                            // of them a notch was aimed at.
+                            settings.wheel(dy, mouse.0, mouse.1);
                             return;
                         }
-                        let mouse = screens[si].mouse;
                         let (w, h) = screens[si].size();
                         let layout = screens[si].content_layout();
                         let Some(pl) = layout.hit(mouse.0, mouse.1) else { return };
