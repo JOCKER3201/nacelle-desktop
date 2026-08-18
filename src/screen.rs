@@ -201,9 +201,15 @@ impl WidgetSet {
 
 /// One monitor's whole desktop.
 pub struct Screen {
-    /// The socket this screen hangs off — its identity in the
-    /// configuration, and how it is told which layaut to take.
+    /// The socket this screen hangs off — a LABEL, and no longer an
+    /// identity: [`Screen::id`] is what the configuration keys by and
+    /// how this screen is told which layaut to take. Kept as a field of
+    /// its own because it is what every caller wants to PRINT, and it
+    /// is the same string `id.connector` holds.
     pub connector: Option<String>,
+    /// What the configuration calls this screen: the monitor's own name
+    /// when its firmware gives one, the socket when it does not.
+    pub id: crate::screens::ScreenId,
     pub window: Window,
     gfx: nacelle_renderer::Gfx,
     /// Resolution + diagonal in inches: what picks a layaut's
@@ -410,8 +416,14 @@ impl Screen {
         // moment the two are taken under different window heights, and
         // then the editor's grid no longer sits on the panels it edits.
         let pad = config::panel_gutter(config::grid_padding_override());
+        // Asked here rather than handed in, so that a screen built by
+        // any door — the desktop's survey, a guest window, a chassis
+        // panel — is keyed the same way. The reading is remembered per
+        // socket, so this costs one kernel file per monitor per run.
+        let id = crate::screens::identify(connector.as_deref());
         let mut sc = Screen {
             connector,
+            id,
             window,
             gfx,
             key,
@@ -446,14 +458,16 @@ impl Screen {
         Some(sc)
     }
 
-    /// Re-reads the layaut this screen's connector is assigned, rebuilds
-    /// its world of boards and brings its widgets into line with it.
+    /// Re-reads the layaut this screen is assigned, rebuilds its world
+    /// of boards and brings its widgets into line with it.
     ///
     /// This is the whole of "one monitor, one room": the configuration
-    /// answers by connector, and a screen nothing was written for takes
-    /// the selected layaut, exactly as the one screen always did.
+    /// answers by the screen's IDENTITY — what the monitor says it is,
+    /// falling back to the socket — and a screen nothing was written
+    /// for takes the selected layaut, exactly as the one screen always
+    /// did.
     pub fn reload_layaut(&mut self) {
-        let (name, def) = config::screen_layaut(self.connector.as_deref());
+        let (name, def) = config::screen_layaut(&self.id);
         self.layaut = name;
         self.rebuild(def);
     }

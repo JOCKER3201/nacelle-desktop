@@ -174,15 +174,39 @@ pub struct DesktopConf {
     /// [`screens`](Self::screens) shows this one.
     #[serde(skip_serializing_if = "is_default")]
     pub layaut: Choice,
-    /// One screen, one desktop: connector name → layaut.
+    /// One screen, one desktop: screen key → layaut.
     ///
     /// A map rather than the old `Layaut[DP-1]=` — a bracket
     /// convention invented because the format had nowhere to put a
-    /// second dimension. The connector (DP-1, eDP-1, HDMI-A-1) is the
-    /// only stable name a screen has; the order screens come up in
-    /// depends on which monitor was switched on first.
+    /// second dimension.
+    ///
+    /// The key is what the MONITOR says it is — `edid:DEL-41B2-
+    /// 0123ABCD` — and a connector name (`DP-1`, `eDP-1`) is the second
+    /// vocabulary, for a monitor that says nothing and for files
+    /// written before 2026-08-18. Both are read, the monitor's own name
+    /// first; [`crate::screens::screen_key`] is the one statement of
+    /// what either looks like.
+    ///
+    /// Neither the ORDER screens come up in nor the position of one in
+    /// this program's list is a name: which monitor is switched on
+    /// first is not a property of anything.
     #[serde(skip_serializing_if = "is_default")]
     pub screens: BTreeMap<String, Choice>,
+    /// Which screen carries the MAIN SCREEN role — a screen key, the
+    /// same vocabulary [`screens`](Self::screens) is keyed by.
+    ///
+    /// What the role MEANS is written down once, in
+    /// [`crate::screens::MainScreenDuty`], and nowhere else.
+    ///
+    /// The three states are all three needed here. Absent hands the
+    /// question to the next file down and finally to the display
+    /// server, which is what answered it alone until this field
+    /// existed. [`Choice::Off`] is a user saying "the display server's
+    /// answer, whatever it is" — an explicit choice that has to beat a
+    /// system file naming a screen, on a machine whose administrator
+    /// named one that is not on this desk.
+    #[serde(skip_serializing_if = "is_default")]
+    pub main_screen: Choice,
     /// The sound set: a directory name under `sounds/`.
     #[serde(skip_serializing_if = "is_default")]
     pub sounds: Choice,
@@ -209,6 +233,7 @@ impl Layered for DesktopConf {
             variant: self.variant.over(base.variant),
             layaut: self.layaut.over(base.layaut),
             screens: self.screens.over(base.screens),
+            main_screen: self.main_screen.over(base.main_screen),
             sounds: self.sounds.over(base.sounds),
             term_font: self.term_font.over(base.term_font),
             ui_font: self.ui_font.over(base.ui_font),
@@ -221,20 +246,86 @@ impl Layered for DesktopConf {
 }
 
 impl DesktopConf {
-    /// The connector → layaut assignments worth acting on: a key that
+    /// The screen → layaut assignments worth acting on: a key that
     /// names no screen is dropped here and nowhere else.
     ///
-    /// `Dell Inc. U2720Q` is a make and a model, not a socket, and a
-    /// key nothing could ever be matched to is worth neither writing
+    /// `Dell Inc. U2720Q` is a make and a model, not a screen key, and
+    /// a key nothing could ever be matched to is worth neither writing
     /// nor reading. Which layaut a screen then takes — and whether
     /// the one named is installed at all — is a separate judgement,
     /// made where it can be reported.
     pub fn screens(&self) -> BTreeMap<String, String> {
         self.screens
             .iter()
-            .filter(|(k, _)| crate::screens::connector_of(k).as_deref() == Some(k.as_str()))
+            .filter(|(k, _)| crate::screens::screen_key(k).is_some())
             .filter_map(|(k, v)| v.name().map(|n| (k.clone(), n.to_string())))
             .collect()
+    }
+
+    /// Rewrites every setting written against a SOCKET into one written
+    /// against the MONITOR now plugged into it.
+    ///
+    /// Answers whether anything moved, so that a machine with nothing
+    /// to migrate is a machine whose configuration file is not touched
+    /// — this runs at every start, and a program that has installed
+    /// nothing must go on having installed nothing.
+    ///
+    /// WITHOUT THIS, EVERY PER-SCREEN ASSIGNMENT WRITTEN BEFORE
+    /// 2026-08-18 WOULD BE ORPHANED the moment the identity took over
+    /// as the key a screen is looked up by. It moves rather than
+    /// copies, so the same file migrated twice is the same file.
+    ///
+    /// Three things it will not do, each for a reason:
+    ///
+    /// It never touches a key whose screen it cannot see. A monitor
+    /// that is off today is not a monitor whose settings are stale, and
+    /// a socket nothing is plugged into is a socket somebody may plug
+    /// something into tomorrow.
+    ///
+    /// It never overwrites an entry that already names the monitor. An
+    /// identity key present in the file was written deliberately and is
+    /// the answer; the socket entry beside it is left exactly where it
+    /// is, because it may be a rule about the SOCKET — "whatever hangs
+    /// off DP-1" — and this is a migration, not an opinion about that.
+    ///
+    /// It never removes anything whose value it has not carried
+    /// somewhere else. Every path here either moves an entry whole or
+    /// leaves it alone.
+    pub fn migrate_screens(&mut self, live: &[crate::screens::ScreenId]) -> bool {
+        let mut moved = false;
+        for id in live {
+            let (Some(edid), Some(connector)) = (&id.edid, &id.connector) else { continue };
+            let new_key = format!("{}{edid}", crate::screens::EDID_PREFIX);
+            if self.screens.keys().any(|k| k.eq_ignore_ascii_case(&new_key)) {
+                continue;
+            }
+            let Some(old_key) = self
+                .screens
+                .keys()
+                .find(|k| k.eq_ignore_ascii_case(connector))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(value) = self.screens.remove(&old_key) else { continue };
+            self.screens.insert(new_key, value);
+            moved = true;
+        }
+        // The role travels the same road, and for the same reason: a
+        // main screen named by its socket stops being that screen the
+        // moment somebody moves a cable.
+        if let Choice::Named(key) = &self.main_screen {
+            if let Some(id) = live.iter().find(|id| {
+                id.connector.as_deref().map(|c| c.eq_ignore_ascii_case(key.trim())).unwrap_or(false)
+                    && id.edid.is_some()
+            }) {
+                let edid = id.edid.as_deref().unwrap_or_default();
+                self.main_screen =
+                    Choice::Named(format!("{}{edid}", crate::screens::EDID_PREFIX));
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// The same document as the old `Key=Value` file said it.
@@ -296,6 +387,12 @@ impl DesktopConf {
             variant: offable("Variant"),
             layaut: text("Layaut"),
             screens: legacy_screen_choices(kv),
+            // The old format had no key for the MAIN SCREEN role and
+            // could not have had one: which screen carried it was the
+            // display server's answer alone, with nowhere in the file to
+            // disagree. An absence here is therefore the truth about
+            // every old file and not a key left unread.
+            main_screen: Choice::Inherit,
             sounds: text("Sounds"),
             term_font: FontConf {
                 size: kv.get("TermFontSize").and_then(|v| v.trim().parse::<f32>().ok()),
@@ -339,7 +436,7 @@ impl DesktopConf {
 /// [`DesktopConf::screens`]'s judgement — this only has to recognise
 /// the syntax it is replacing.
 ///
-/// Empty is an OFF here, mirroring `set_layaut_for_connector`: a screen
+/// Empty is an OFF here, mirroring `set_layaut_for_screen`: a screen
 /// switched off is an answer the settings window can write, and the
 /// abandoned template never carried a key of this family at all.
 fn legacy_screen_choices(
