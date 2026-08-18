@@ -4103,6 +4103,12 @@ pub struct Settings {
     /// config is a decision about a file's shape and belongs with the
     /// rest of `nacelle-desktop.ron`, which is another stage's.
     picker_custom: Vec<nacelle::theme::Color>,
+    /// What the last activation SAID, so that "one press, one sound" can
+    /// be asked of this window instead of assumed of it. Written only by
+    /// [`Settings::say`], cleared at the head of [`Settings::perform`],
+    /// and absent from the shipping build entirely.
+    #[cfg(test)]
+    heard: Vec<nacelle::sound::Event>,
     /// What BASIC's relative move is relative TO: the theme's own
     /// authors, read off the live bake when the page was seeded. `None`
     /// until it has been — an unseeded BASIC writes nothing, the same
@@ -4486,12 +4492,16 @@ impl Settings {
             tone_seeds: None,
             // The picker opens on nothing in particular and is seeded off
             // the theme with everything else the moment the editor is
-            // entered ([`Settings::seed_tone_from_theme`]). Grey, and not
-            // a colour of this file's own: a colour written here would be
-            // a look decided in Rust, and it would be the one on screen
-            // for as long as it took somebody to reach the editor.
-            picker: nacelle::object::color_picker::Picker::of(nacelle::theme::Color::GREY),
+            // entered ([`Settings::seed_tone_from_theme`]). "Nothing in
+            // particular" is `component.picker.rest`, which the toolkit
+            // reads for us: this used to be `Color::GREY`, defended as
+            // neutrality rather than look — but the grey WAS on screen
+            // for as long as it took somebody to reach the editor, and a
+            // neutral is a choice like any other. The theme names its own.
+            picker: nacelle::object::color_picker::Picker::at_rest(),
             picker_custom: Vec::new(),
+            #[cfg(test)]
+            heard: Vec::new(),
             // Nothing dressed until the seeding says so — the same
             // opening neutrality the seeds themselves keep, and the
             // answer the master's own zeroes give.
@@ -5711,12 +5721,11 @@ impl Settings {
         let Some(act) = self.dragging else { return };
         // The picker's areas take BOTH coordinates and then follow the
         // same pulse as the tracks below: a colour dragged across the
-        // field re-bakes the desktop ten times a second, not sixty.
+        // field re-bakes the desktop on the theme's pulse, not on every
+        // frame.
         if let Act::PickerField | Act::PickerValue = act {
             self.set_picker_from(act, x, y);
-            let due = self.editor_pulse.map_or(true, |t| t.elapsed().as_millis() >= 100);
-            if due {
-                self.editor_pulse = Some(Instant::now());
+            if self.preview_pulse_due() {
                 self.apply_editor_preview();
             }
             return;
@@ -5724,19 +5733,41 @@ impl Settings {
         self.set_from_x(act, x);
         self.mark_dirty(act);
         // The editor's tracks show themselves WHILE dragged — the owner asked
-        // for the picture to follow the hand, not the release. Throttled,
-        // because every distinct value is a fresh 76 KB bake that is never
-        // freed: ten a second is ~0.8 MB for a second of active dragging,
-        // sixty a second would be 4.5. The slider itself still moves every
-        // frame; only the desktop behind it updates on the pulse.
+        // for the picture to follow the hand, not the release.
         if let Act::EditorTrack(_) = act {
-            let due = self
-                .editor_pulse
-                .map_or(true, |t| t.elapsed().as_millis() >= 100);
-            if due {
-                self.editor_pulse = Some(Instant::now());
+            if self.preview_pulse_due() {
                 self.apply_editor_preview();
             }
+        }
+    }
+
+    /// Whether a control held under the hand may re-bake the desktop
+    /// behind it yet, and books the pulse if it may.
+    ///
+    /// THE RATE IS `settings.preview_pulse_ms` AND NOT A NUMBER HERE. How
+    /// fast the picture follows the hand is something a person sees, so
+    /// it is the theme's; and it is ONE reader because two controls hold
+    /// this pulse — the editor's sliders and the picker's two areas —
+    /// and they were two copies of `100` in this file until 2026-08-18,
+    /// which is one copy away from the day they disagree.
+    ///
+    /// It lives in `[settings]` and not in `[motion]` although it is a
+    /// time. `[motion]` is a CLOSED catalogue — eighteen effects, eight
+    /// keys each, two globals, counted by a test in the toolkit — and
+    /// this is not an effect. It is a rate limiter, and it must not be
+    /// multiplied by `motion.scale`: reduced motion sets that to zero,
+    /// which for an animation means "show the end state at once" and for
+    /// a limiter would mean "re-bake every frame" — 76 KB a bake, none
+    /// of it freed, ~4.5 MB for a second of dragging. Reduced motion is
+    /// a promise about movement, not about heat.
+    fn preview_pulse_due(&mut self) -> bool {
+        static PULSE: OnceLock<TokenId> = OnceLock::new();
+        let ms = theme::resolved().px(tok(&PULSE, "settings.preview_pulse_ms")).max(0.0) as u128;
+        if self.editor_pulse.map_or(true, |t| t.elapsed().as_millis() >= ms) {
+            self.editor_pulse = Some(Instant::now());
+            true
+        } else {
+            false
         }
     }
 
@@ -5964,6 +5995,22 @@ impl Settings {
         self.perform(act, x, y)
     }
 
+    /// Every sound an activation makes leaves the window through here.
+    ///
+    /// ONE PRESS, ONE SOUND is a statement about the whole of
+    /// [`Settings::perform`] and there was no way to put it TO the
+    /// window: `nacelle::sound::emit` shouts into a queue shared by the
+    /// entire process, so a count taken from it during a test run is a
+    /// count of whatever else the run was doing at the time. So the
+    /// window keeps its own log of what it said, under `cfg(test)`, and
+    /// the test reads that instead of the queue. Nothing about the
+    /// shipping build changes: the log does not exist in it.
+    fn say(&mut self, e: nacelle::sound::Event) {
+        #[cfg(test)]
+        self.heard.push(e);
+        nacelle::sound::emit(e);
+    }
+
     /// The body every activation runs — mouse ([`Settings::click`])
     /// and keyboard ([`Settings::key`]) share it, so the two ways of
     /// pressing a control cannot drift apart (F1 §1.5). `x` is where
@@ -5973,9 +6020,11 @@ impl Settings {
     /// them.
     fn perform(&mut self, act: Act, x: f32, y: f32) -> bool {
         self.flash = Some((act, self.now));
+        #[cfg(test)]
+        self.heard.clear();
         // Every button clicks; the actions below that mean more than a
         // plain press replace it with their own sound.
-        use nacelle::sound::{emit, Event as Sfx};
+        use nacelle::sound::Event as Sfx;
         match act {
             Act::Close | Act::Back => {}
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
@@ -5987,7 +6036,16 @@ impl Settings {
             Act::ColorHdr => {}
             Act::VolumeTrack => {}
             Act::Pick(..) => {}
-            _ => emit(Sfx::Click),
+            // THE PICKER'S TWO GRIDS, for the same reason `Pick` is here:
+            // a ready-made colour moves the theme's live preview, so it
+            // speaks `Theme` in its own arm below. The other five picker
+            // acts are NOT on this list, and that is the whole of the
+            // fix: they were not on it before either, but three of them
+            // emitted a sound of their own anyway, so pressing the
+            // notation plate or the bank cell made two clicks and
+            // pressing a ready-made colour made a click and a theme.
+            Act::PickerBase(_) | Act::PickerCustom(_) => {}
+            _ => self.say(Sfx::Click),
         }
         match act {
             Act::Close => {
@@ -5995,7 +6053,7 @@ impl Settings {
                 // editor's preview is dropped here as well.
                 self.leave_editor_preview();
                 self.open = false;
-                emit(Sfx::PanelClose);
+                self.say(Sfx::PanelClose);
             }
             Act::EditorCancel => {
                 nacelle::theme::clear_preview();
@@ -6060,7 +6118,7 @@ impl Settings {
                 }
             }
             Act::Back => {
-                emit(Sfx::Click);
+                self.say(Sfx::Click);
                 // The same answer Escape peels a layer by, so the two
                 // ways out of a page cannot lead to different places. A
                 // page with no layer above it wears CLOSE and never has
@@ -6110,13 +6168,13 @@ impl Settings {
                         ListId::Borders => {
                             self.current_border = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::Backgrounds => {
                             self.current_background = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         // The whole-theme lists follow the two above: a
@@ -6130,31 +6188,31 @@ impl Settings {
                             // re-aim at the role's stored colour, and only
                             // a slider marks it touched.
                             self.current_severity = Some(name.clone());
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::Corners => {
                             self.current_corner = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::RingStyles => {
                             self.current_ring_style = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::ScrollModes => {
                             self.current_scroll_mode = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         ListId::ScrollEdges => {
                             self.current_scroll_edge = Some(name.clone());
                             self.apply_editor_preview();
-                            emit(Sfx::Theme);
+                            self.say(Sfx::Theme);
                             return false;
                         }
                         // Not a theme: it writes its config line at once,
@@ -6166,12 +6224,12 @@ impl Settings {
                             self.set_space(&name);
                             config::set_color_space(&self.color_space);
                             self.color_dirty = true;
-                            emit(Sfx::Click);
+                            self.say(Sfx::Click);
                             return false;
                         }
                     }
                     self.refresh_current();
-                    emit(Sfx::Theme);
+                    self.say(Sfx::Theme);
                     return true;
                 }
             }
@@ -6239,10 +6297,10 @@ impl Settings {
             // The notation steps. Nothing about the COLOUR moves, so
             // there is no preview to show and no theme to disturb: this
             // is a change to how the value is spelled.
-            Act::PickerFormat => {
-                self.picker.cycle_format();
-                emit(Sfx::Click);
-            }
+            // It takes the plain click from the head of this function
+            // like any other button. It emitted a second one here until
+            // 2026-08-18, which was audible: two clicks for one press.
+            Act::PickerFormat => self.picker.cycle_format(),
             // A target, and for now nothing more: the plate is a place
             // the Tab chain lands and a rect the pointer finds, so that
             // typing into it is a change to what a press DOES and not a
@@ -6256,7 +6314,7 @@ impl Settings {
                     self.picker.set_colour(*c);
                     self.set_tone_from_picker();
                     self.apply_editor_preview();
-                    emit(Sfx::Theme);
+                    self.say(Sfx::Theme);
                 }
             }
             Act::PickerCustom(i) => {
@@ -6264,17 +6322,20 @@ impl Settings {
                     self.picker.set_colour(c);
                     self.set_tone_from_picker();
                     self.apply_editor_preview();
-                    emit(Sfx::Theme);
+                    self.say(Sfx::Theme);
                 }
             }
             // The bank. A colour already in the row is not banked twice
             // — the grid is a set of places to come back to, and two
-            // identical cells are one cell that wastes the other.
+            // identical cells are one cell that wastes the other. The
+            // press still CLICKS either way, from the head of this
+            // function: whether the colour was new is answered by the
+            // row growing or not, and a button that fell silent on the
+            // second press would read as a button that missed it.
             Act::PickerAdd => {
                 let c = self.picker.colour();
                 if !self.picker_custom.iter().any(|k| *k == c) {
                     self.picker_custom.push(c);
-                    emit(Sfx::Click);
                 }
             }
             // The editor's switches: flip the field, show the answer at
@@ -6305,19 +6366,19 @@ impl Settings {
                     }
                 };
                 self.apply_editor_preview();
-                emit(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if on { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ToggleTyping => {
                 self.sound_typing = !self.sound_typing;
                 config::set_sound_typing(self.sound_typing);
                 self.sound_dirty = true;
-                emit(if self.sound_typing { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.sound_typing { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ToggleAmbient => {
                 self.sound_ambient = !self.sound_ambient;
                 config::set_sound_ambient(self.sound_ambient);
                 self.sound_dirty = true;
-                emit(if self.sound_ambient { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.sound_ambient { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::OpenColor => {
                 if self.color_enabled {
@@ -6344,7 +6405,7 @@ impl Settings {
                     config::set_color_depth(self.color_depth);
                 }
                 self.color_dirty = true;
-                emit(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ColorLutNext => {
                 // None -> first -> ... -> last -> None again.
@@ -6385,7 +6446,7 @@ impl Settings {
             Act::ToggleSnap => {
                 self.grid_snap = !self.grid_snap;
                 config::set_grid_snap(self.grid_snap);
-                emit(if self.grid_snap { Sfx::ToggleOn } else { Sfx::ToggleOff });
+                self.say(if self.grid_snap { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::EditGrid => {
                 self.edit_requested = true;
@@ -11605,6 +11666,7 @@ mod tests {
         s
     }
 
+
     /// ŻYCZENIE 2, the switch. It stands at the HEAD of the page, before
     /// every section, and it is the ONE control both modes share with the
     /// footer — press it and the page under it is the other page.
@@ -11825,6 +11887,124 @@ mod tests {
             );
         }
         nacelle::theme::clear_preview();
+    }
+
+    /// ONE PRESS, ONE SOUND — and the picker's seven were the exception.
+    ///
+    /// `perform` gives every activation a plain click and exempts the
+    /// ones that mean more than a press and say so themselves. None of
+    /// the picker's acts was on that exemption list, and three of them
+    /// emitted a sound of their own regardless: the notation plate and
+    /// the bank cell made TWO CLICKS for one press, and a ready-made
+    /// colour made a click and a theme. The comment two lines above that
+    /// catch-all already stated the rule the code was breaking — "a
+    /// press that clicked AND toggled would be the only one in the
+    /// window that made two sounds".
+    ///
+    /// Counted off [`Settings::heard`] and not off `nacelle::sound`'s
+    /// queue: that queue belongs to the whole process and every other
+    /// test in this binary shouts into it, so a count taken from there
+    /// would be a count of the test run.
+    #[test]
+    fn every_press_on_the_picker_makes_exactly_one_sound() {
+        use nacelle::sound::Event as Sfx;
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.picker_custom = vec![nacelle::theme::Color::WHITE, nacelle::theme::Color::BLACK];
+        // Named by hand because `Act` carries no `Debug` and this window
+        // has never wanted one; the names are what a failure has to say.
+        for (name, act) in [
+            ("the field", Act::PickerField),
+            ("the value bar", Act::PickerValue),
+            ("the notation plate", Act::PickerFormat),
+            ("the value plate", Act::PickerText),
+            ("a ready-made colour", Act::PickerBase(0)),
+            ("a banked colour", Act::PickerCustom(0)),
+            ("the bank cell", Act::PickerAdd),
+            // Pressed a second time: the colour is already banked, so
+            // the row does not grow — and the press is still a press.
+            ("the bank cell again", Act::PickerAdd),
+        ] {
+            s.perform(act, 0.5, 0.5);
+            assert_eq!(
+                s.heard.len(),
+                1,
+                "{name} made {:?}, and a press makes one sound",
+                s.heard
+            );
+        }
+        // AND THE RIGHT ONE. The two grids move the live preview, which
+        // is what `Theme` is the window's word for; the rest are plain
+        // presses. A test that only counted would pass on a picker that
+        // clicked when it should have spoken.
+        for (name, act, want) in [
+            ("a ready-made colour", Act::PickerBase(0), Sfx::Theme),
+            ("a banked colour", Act::PickerCustom(1), Sfx::Theme),
+            ("the notation plate", Act::PickerFormat, Sfx::Click),
+            ("the value plate", Act::PickerText, Sfx::Click),
+        ] {
+            s.perform(act, 0.5, 0.5);
+            assert_eq!(s.heard, vec![want], "{name} said the wrong thing");
+        }
+        nacelle::theme::clear_preview();
+    }
+
+    /// The picker opens on a colour THE THEME NAMED.
+    ///
+    /// It opened on `Color::GREY` — 0.5, 0.5, 0.5, written into this
+    /// file — and the defence was that the value is neutral rather than
+    /// decorative and lives only until `seed_editor_from_theme` runs.
+    /// Both halves of that are true and neither makes it not a look: the
+    /// grey is on the screen for as long as it takes somebody to reach
+    /// the editor, and a neutral is a colour somebody chose. On a page
+    /// whose entire thesis is that no colour lives in Rust, it was the
+    /// one colour that did.
+    #[test]
+    fn the_picker_opens_on_a_colour_the_theme_named() {
+        let _g = crate::widgets::theme_test_lock();
+        let want = theme::resolved().color(
+            nacelle::theme::id("component.picker.rest")
+                .expect("the master names what a picker holds at rest"),
+        );
+        let shown = Settings::new().picker.colour();
+        for (got, want, ch) in
+            [(shown.r, want.r, 'r'), (shown.g, want.g, 'g'), (shown.b, want.b, 'b')]
+        {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "the picker opened on channel {ch} = {got}, the theme says {want}"
+            );
+        }
+    }
+
+    /// How fast a dragged control re-bakes the desktop is the THEME's
+    /// number.
+    ///
+    /// It was `100` written twice in this file — once for the editor's
+    /// sliders, once for the picker's two areas — which is one edit away
+    /// from two controls that follow the hand at different speeds. A
+    /// rate a person can see is a look, and looks live in the theme.
+    #[test]
+    fn the_drag_pulse_is_the_themes_number() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = furnished();
+        {
+            // A theme that asks for no throttle at all: every drag frame
+            // re-bakes, so two calls running are both due.
+            let _t = crate::widgets::Themed::new("pulse-open", "[settings]\npreview_pulse_ms = 0ms\n");
+            assert!(s.preview_pulse_due(), "the first drag frame is always due");
+            assert!(s.preview_pulse_due(), "at 0 ms every frame is due");
+        }
+        {
+            // And one that asks for a pulse longer than this test takes:
+            // the second call is refused.
+            let _t =
+                crate::widgets::Themed::new("pulse-slow", "[settings]\npreview_pulse_ms = 5000ms\n");
+            s.editor_pulse = None;
+            assert!(s.preview_pulse_due(), "the first drag frame is always due");
+            assert!(!s.preview_pulse_due(), "at 5 s the next frame waits");
+        }
     }
 
     /// A COLOUR POINTED AT BECOMES THE DISTANCE TO IT — the one line
@@ -16076,4 +16256,5 @@ fn next_of(list: &[String], current: Option<String>) -> Option<String> {
             _ => None,
         },
     }
+
 }
