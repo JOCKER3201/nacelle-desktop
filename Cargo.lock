@@ -890,7 +890,6 @@ dependencies = [
 [[package]]
 name = "nacelle-renderer"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-renderer#d8358a2d18ddf3769943d3e4f410beb8f9c7a4e5"
 dependencies = [
  "ash",
  "ash-window",

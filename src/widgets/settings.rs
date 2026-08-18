@@ -1579,6 +1579,14 @@ const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
     Row { ctrl, after: Gap::Row, enabled: always, when }
 }
 
+/// …and the same with a break under it. Both halves of a row's own
+/// description at once, for a conditional control that ends a group:
+/// the COLOR page's HDR switch closes the controls and opens the two
+/// lines that report on them.
+const fn row_shown_after(ctrl: Ctrl, when: fn(&Settings) -> bool, after: Gap) -> Row {
+    Row { ctrl, after, enabled: always, when }
+}
+
 /// The corner button a page wears, and what the body does about it.
 #[derive(Clone, Copy, PartialEq)]
 enum Chrome {
@@ -1798,7 +1806,7 @@ struct Page {
 /// The headings are `Ctrl::Section`, which takes its own gap under it
 /// (`panel.title.block_h`) — hence `Gap::None` after every one of them,
 /// exactly as the FONT page writes its two.
-static RAIL_ROWS: [Row; 9] = [
+static RAIL_ROWS: [Row; 10] = [
     row_after(Ctrl::Section { title: "APPEARANCE" }, Gap::None),
     row(Ctrl::Button {
         label: Text::Fixed("LOOK AND FEEL"),
@@ -1814,6 +1822,16 @@ static RAIL_ROWS: [Row; 9] = [
             act: Act::OpenColor,
         },
         |s| s.color_enabled,
+    ),
+    // …and WHY it is shut, on the machines where it is. R6 paints an
+    // unofferable section grey and takes it out of the focus chain, and
+    // that is right — but grey alone says "not now" and the truth is
+    // "not here, and nothing you press will change it". One short line
+    // under the inscription, and only there: a rail carrying it on every
+    // machine would be a permanent apology for a feature that works.
+    row_shown(
+        Ctrl::Note { text: Text::Fixed("NO COLOR MANAGER") },
+        |s| !s.color_enabled,
     ),
     row_after(
         Ctrl::Button {
@@ -3160,7 +3178,7 @@ static BOARDS_HINT: [Row; 1] = [row(Ctrl::Hint {
 /// separated), which is why they are one column and not three rows of a
 /// wider one. The range is last because it is a statement ABOUT the list
 /// above it, and because turning it changes both of the other two.
-static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
+static COLOR_SWAPCHAIN_ROWS: [Row; 5] = [
     row(Ctrl::Chips {
         label: "DEPTH",
         values: depth_values,
@@ -3176,11 +3194,52 @@ static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
     // `row_shown` and not `row_when`: a compositor that cannot be asked
     // for a single high-range space is a machine with no HDR on it, and
     // the screen decision forbids a grey ghost offered "just in case".
-    row_shown(
+    row_shown_after(
         Ctrl::Toggle { label: "HDR", get: |s| s.color_hdr, act: Act::ColorHdr },
         hdr_possible,
+        Gap::Section,
     ),
+    // WHAT CAME OF IT. Every control above this pair can be turned
+    // without the picture moving — a compositor may refuse a space, or
+    // never answer for one, and a surface may have no format above eight
+    // bits — and until these two lines existed the program said so on
+    // stderr and the window said nothing at all. That is the difference
+    // between a setting and a control that pretends: these rows are the
+    // page's answer, not its question.
+    row_shown(Ctrl::Note { text: Text::Of(color_space_note) }, color_was_answered),
+    row_shown(Ctrl::Note { text: Text::Of(color_depth_note) }, color_depth_fell_short),
 ];
+
+/// Whether the application has told this window anything about the last
+/// request. `Row::when` and not an empty string inside the note, because
+/// an empty note is still a row: it would reserve its height and open a
+/// hole under the switch on every page that has nothing to report.
+fn color_was_answered(s: &Settings) -> bool {
+    !s.color_status.is_empty()
+}
+
+/// What the compositor did with the space that was last asked for.
+fn color_space_note(s: &Settings) -> String {
+    format!("space: {}", s.color_status)
+}
+
+/// Whether the swapchain gave less than the page asked for. Zero is "not
+/// measured" — no legal depth is zero — so a window the application has
+/// not told yet says nothing rather than claiming a shortfall of eight
+/// bits it has not seen.
+fn color_depth_fell_short(s: &Settings) -> bool {
+    s.color_depth_now != 0 && s.color_depth_now != s.color_depth_asked
+}
+
+/// Asked against given. Only ever drawn where the two disagree
+/// ([`color_depth_fell_short`]) — a line repeating the number already
+/// standing in the DEPTH chips would be noise.
+fn color_depth_note(s: &Settings) -> String {
+    format!(
+        "depth: {} bits asked, {} in the swapchain — the surface offers no more",
+        s.color_depth_asked, s.color_depth_now
+    )
+}
 
 /// The depths the swapchain may be asked for, and the whole of that
 /// question ([`Ctrl::Chips`]).
@@ -4022,6 +4081,29 @@ pub struct Settings {
     pub color_enabled: bool,
     /// The COLOR view changed something; the application applies it.
     pub color_dirty: bool,
+    /// **What came of the last colour request**, in the compositor's own
+    /// terms, for the page to say out loud.
+    ///
+    /// Written by the application after every `apply` and read by one
+    /// note row. It exists because every failure on this page is
+    /// INVISIBLE otherwise: a space the compositor will not take, a
+    /// description it never answers for, an ICC profile quietly
+    /// outranking the list — each of them leaves the picture exactly as
+    /// it was while the list draws its mark on the new name. The
+    /// program used to say all of it on stderr, and a desktop session
+    /// has nowhere to show a stderr (the same reason ADDONS carries the
+    /// loader's complaints).
+    pub color_status: String,
+    /// The depth the swapchain was ASKED for, and the depth it GAVE.
+    ///
+    /// Two numbers because they disagree, and the disagreement is the
+    /// interesting part: a surface offering nothing above eight bits
+    /// answers eight to a page showing sixteen, and a user hunting for
+    /// the difference would find none. The first is the configuration's
+    /// (`ColorConf::depth`), the second is read off the renderer's own
+    /// swapchain format a frame after the rebuild.
+    pub color_depth_asked: u32,
+    pub color_depth_now: u32,
     /// The BLUR sliders moved; main re-reads blur_settings().
     pub blur_dirty: bool,
     color_depth: u32,
@@ -4257,6 +4339,14 @@ impl Settings {
             boards: Vec::new(),
             color_enabled: false,
             color_dirty: false,
+            // Empty and not a cheerful word: nothing has been applied
+            // yet, and the note reads that as "nothing to report".
+            color_status: String::new(),
+            // Zero is "not measured", which is exactly true until the
+            // application has told this window. Neither number is a
+            // legal depth, so neither can be mistaken for one.
+            color_depth_asked: 0,
+            color_depth_now: 0,
             blur_dirty: false,
             color_depth: 8,
             color_space: "auto".to_string(),
@@ -10162,6 +10252,135 @@ mod tests {
             (a.color_hdr, a.color_space.clone(), a.names(ListId::Spaces).to_vec()),
             (b.color_hdr, b.color_space.clone(), b.names(ListId::Spaces).to_vec()),
             "being told the same offer twice moved the page"
+        );
+    }
+
+    /// Every line one set of rows is currently saying, in order —
+    /// `Row::when` obeyed, so a note that is not on screen is not here
+    /// either.
+    fn notes_of(s: &Settings, rows: &'static [Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| (r.when)(s))
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
+                _ => None,
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// The same for a whole page, band by band. `page_rows` walks the
+    /// description and leaves `Row::when` to its caller — the way
+    /// `row_acts` does — so the filter is here.
+    fn page_notes(s: &Settings, page: &'static Page) -> Vec<String> {
+        page_rows(page, s)
+            .filter(|r| (r.when)(s))
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
+                _ => None,
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// **The page says what came of the request, and says nothing when
+    /// there is nothing to say.**
+    ///
+    /// This is the owner's report ("changing HDR and the colour space
+    /// changes nothing") turned into a rule the window has to keep. A
+    /// space the compositor refuses, one it never answers for, an ICC
+    /// profile outranking the list — each leaves the picture exactly as
+    /// it was while the SPACE list draws its mark on the new name, and
+    /// the program used to say so on stderr alone. Whatever the
+    /// application reports has to reach the page.
+    #[test]
+    fn the_color_page_repeats_what_the_compositor_answered() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = color_open();
+        // Nothing applied yet is nothing to report — a window under
+        // test, and a session in its first frame.
+        assert!(
+            page_notes(&s, page(View::Color))
+                .iter()
+                .all(|n| !n.contains("space:")),
+            "a page nobody has told reported on a request nobody made"
+        );
+
+        s.color_status = "the compositor refused bt2020 pq: unsupported".to_string();
+        let said = page_notes(&s, page(View::Color));
+        assert!(
+            said.iter().any(|n| n.contains("the compositor refused bt2020 pq")),
+            "the compositor's refusal never reached the page — the control \
+             keeps its mark and the user is told nothing: {said:?}"
+        );
+    }
+
+    /// **Asked and given, and only when they differ.**
+    ///
+    /// A surface with no format above eight bits answers eight to a page
+    /// showing sixteen. Repeating the number already standing in the
+    /// DEPTH chips would be noise, so the line appears exactly when the
+    /// two numbers disagree — and never before the application has
+    /// measured anything, because zero is "not measured" and not a
+    /// depth.
+    #[test]
+    fn the_depth_line_stands_only_where_the_swapchain_gave_less() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = color_open();
+        let depth_lines = |s: &Settings| -> Vec<String> {
+            page_notes(s, page(View::Color))
+                .into_iter()
+                .filter(|n| n.starts_with("depth:"))
+                .collect()
+        };
+        assert!(depth_lines(&s).is_empty(), "an unmeasured window claimed a depth");
+
+        s.color_depth_asked = 16;
+        s.color_depth_now = 16;
+        assert!(
+            depth_lines(&s).is_empty(),
+            "the page repeated a number the DEPTH chips already carry"
+        );
+
+        s.color_depth_now = 8;
+        let said = depth_lines(&s);
+        assert_eq!(said.len(), 1, "expected one line about the depth: {said:?}");
+        assert!(
+            said[0].contains("16") && said[0].contains('8'),
+            "the line has to carry BOTH numbers — the wish alone is what the \
+             page was already saying wrongly: {}",
+            said[0]
+        );
+    }
+
+    /// **A section painted shut says why.**
+    ///
+    /// R6 greys a section the machine cannot offer and takes it out of
+    /// the focus chain, and that stands. But grey alone reads as "not
+    /// now", and the truth is "not here, and nothing you press will
+    /// change it" — a compositor that does not speak the Color
+    /// Management protocol is not a state the user can leave. The line
+    /// is there on exactly those machines and on no other: a rail
+    /// carrying it where the feature works would be a permanent apology.
+    #[test]
+    fn the_shut_color_section_says_why_it_is_shut() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = furnished();
+        assert!(s.color_enabled, "the furnished window has a colour manager");
+        assert!(
+            notes_of(&s, &RAIL_ROWS).is_empty(),
+            "the rail apologised on a machine where COLOR SPACE works"
+        );
+
+        s.color_enabled = false;
+        let said = notes_of(&s, &RAIL_ROWS);
+        assert!(
+            said.iter().any(|n| n.contains("NO COLOR MANAGER")),
+            "COLOR SPACE is painted shut and the rail gives no reason: {said:?}"
+        );
+        assert!(
+            !rail_acts(&s).contains(&Act::OpenColor),
+            "this test is measuring nothing: the section is still a target"
         );
     }
 

@@ -590,34 +590,6 @@ fn main() {
             _ => None,
         }
     };
-    // Applied on start and after every change in the COLOR view. Every
-    // screen shows the same picture, so every screen's renderer is told.
-    macro_rules! apply_color {
-        () => {{
-            if let Some(mgr) = color_mgr.as_mut() {
-                let prefs = config::color_prefs();
-                let lut = prefs
-                    .lut
-                    .as_deref()
-                    .and_then(|name| config::color_file_path("lut", name))
-                    .and_then(|path| std::fs::read_to_string(path).ok())
-                    .and_then(|text| nacelle_renderer::parse_cube(&text));
-                if prefs.lut.is_some() && lut.is_none() {
-                    eprintln!("nacelle-desktop: the chosen .cube did not parse — no grading");
-                }
-                for sc in screens.iter_mut() {
-                    sc.set_color_depth(prefs.depth);
-                    sc.set_lut(lut.clone());
-                }
-                let icc = prefs
-                    .icc
-                    .as_deref()
-                    .and_then(|name| config::color_file_path("icc", name));
-                mgr.apply(&prefs.space, icc.as_deref());
-            }
-        }};
-    }
-    apply_color!();
 
     // Under gamescope every launched program takes the whole screen —
     // that is the compositor's own model, and leaning into it replaced
@@ -727,6 +699,65 @@ fn main() {
             .map(|space| space.to_string())
             .collect()
     }));
+    // Applied on start and after every change in the COLOR view. Every
+    // screen shows the same picture, so every screen's renderer is told.
+    //
+    // TWO PREFERENCES AND TWO ADDRESSEES, and the split is the point.
+    // The depth and the grading LUT are the RENDERER's — a swapchain
+    // format and a 3D texture, neither of which any compositor is asked
+    // about. The space and the ICC profile are the COMPOSITOR's. This
+    // block used to sit whole inside `if let Some(mgr)`, so a session
+    // under a compositor that does not speak colour management threw
+    // away the depth and the LUT as well: a file that said `depth: 10`
+    // was read, parsed, validated by `ColorConf::depth` — and then
+    // never reached a swapchain, because an unrelated Wayland global
+    // was missing. Written and never read is the worst of the failures
+    // this page can have, because nothing anywhere says so.
+    macro_rules! apply_color {
+        () => {{
+            let prefs = config::color_prefs();
+            let lut = prefs
+                .lut
+                .as_deref()
+                .and_then(|name| config::color_file_path("lut", name))
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|text| nacelle_renderer::parse_cube(&text));
+            if prefs.lut.is_some() && lut.is_none() {
+                eprintln!("nacelle-desktop: the chosen .cube did not parse — no grading");
+            }
+            for sc in screens.iter_mut() {
+                sc.set_color_depth(prefs.depth);
+                sc.set_lut(lut.clone());
+            }
+            // What the swapchain was ASKED for. What it gave is read off
+            // the renderer a frame later, once the rebuild has happened
+            // (`Gfx::color_depth`), and the page shows both.
+            settings.color_depth_asked = prefs.depth;
+            settings.color_status = match color_mgr.as_mut() {
+                Some(mgr) => {
+                    let icc = prefs
+                        .icc
+                        .as_deref()
+                        .and_then(|name| config::color_file_path("icc", name));
+                    mgr.apply(&prefs.space, icc.as_deref())
+                }
+                // Unreachable from the COLOR page — the rail entry is
+                // painted shut without a colour manager — but stated
+                // rather than left blank, because the page IS reachable
+                // by other roads (a restored view, a later relaxation of
+                // that rule) and a blank line would read as "fine".
+                None => "this compositor does not announce colour management".to_string(),
+            };
+        }};
+    }
+
+    // The colour preferences, applied for the first time. It stands HERE
+    // and not beside the macro that carries it, because the macro now
+    // writes what came of it into the settings window, and the window
+    // has to exist first. Its other caller is the frame loop, whenever
+    // the COLOR page has written a line.
+    apply_color!();
+
     // Frosted-glass preferences: the radius goes to the renderer, the
     // opacity into the tint of every glass quad drawn this frame.
     let (blur_radius, blur_opacity) = config::blur_prefs();
@@ -2839,6 +2870,19 @@ fn main() {
                         // The application's own interface is drawn on
                         // ONE screen — the one the hand is on.
                         let hosts_ui = si == ui_screen;
+                        // What the swapchain GAVE, as against what the
+                        // page asked for. Read here rather than where
+                        // the depth is set, because the format moves at
+                        // the rebuild and the rebuild happens inside the
+                        // next `render` — asked in the same breath as it
+                        // is set, the renderer would truthfully answer
+                        // with the depth that is on its way out. Of the
+                        // screen ABOUT TO DRAW the page, so what the
+                        // number describes is the picture being looked
+                        // at and not another monitor's.
+                        if hosts_ui {
+                            settings.color_depth_now = screens[si].color_depth();
+                        }
                         let (grid_now, drained) = draw_screen(
                             &mut screens[si],
                             &mut fonts,

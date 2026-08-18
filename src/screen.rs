@@ -815,6 +815,15 @@ impl Screen {
         self.gfx.set_color_depth(bits);
     }
 
+    /// The bit depth this screen's swapchain really carries — which is
+    /// not always the one just asked for, because a surface answers with
+    /// the formats it has. The COLOR page shows both numbers; a page
+    /// that showed only the wish would say "16" over a picture nothing
+    /// in the machine can render.
+    pub fn color_depth(&self) -> u32 {
+        self.gfx.color_depth()
+    }
+
     pub fn set_lut(&mut self, lut: Option<(u32, Vec<f32>)>) {
         self.gfx.set_lut(lut);
     }

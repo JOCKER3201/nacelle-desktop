@@ -93,3 +93,19 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
+
+# ------------------------------------------------------------------------
+# TEMPORARY — MUST COME OUT BEFORE THIS BRANCH IS MERGED.
+#
+# The COLOR page's honest depth line reads `Gfx::color_depth`, which is
+# new on the `fix/hdr-effect` branch of nacelle-renderer and not on the
+# commit this lock file pins. Until that branch is merged and the pin
+# bumped, the desktop cannot build against the published renderer, so it
+# is pointed at the sibling worktree.
+#
+# A forgotten [patch] has already cost this project once: the repository
+# stops building on its own and nobody notices until somebody clones it.
+# MERGE ORDER: nacelle-renderer first, then bump the pin in Cargo.lock,
+# then delete this block, then merge nacelle-desktop.
+[patch."https://github.com/JOCKER3201/nacelle-renderer"]
+nacelle-renderer = { path = "../nacelle-renderer" }
