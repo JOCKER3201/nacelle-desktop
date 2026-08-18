@@ -2084,6 +2084,16 @@ fn keep_broken_text(path: &Path, text: &[u8]) -> Option<PathBuf> {
 /// program's own previous output. A header sending somebody to a file
 /// for comments that are no longer in it is worse than one that says
 /// nothing.
+///
+/// "However many settings you change afterwards" outlives the process
+/// as well, and for a while it did not: see [`is_generated`], which is
+/// how a file this program wrote LAST WEEK is recognised as its own.
+///
+/// WHICH MAKES THIS TEXT PART OF A PROMISE AND NOT ONLY PROSE. Editing
+/// a word of it means putting the old text into [`CONF_HEADERS`], or
+/// every file the previous release wrote stops being recognised and the
+/// first save after the upgrade spends the user's copy on one of them.
+/// A test refuses to let that be forgotten.
 const CONF_HEADER: &str = "\
 // nacelle-desktop settings \u{2014} Rusty Object Notation.
 //
@@ -2157,10 +2167,7 @@ fn write_conf(path: &Path, doc: &DesktopConf) -> std::io::Result<()> {
             eprintln!("nacelle-desktop: cannot keep a copy of {}: {e}", path.display());
         }
     }
-    let body = ron_options()
-        .to_string_pretty(doc, ron_pretty())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let text = format!("{CONF_HEADER}{body}\n");
+    let text = conf_text(doc)?;
     let (tmp, mut f) = claim_tmp(path)?;
     // A temporary left behind under a name this function may hand out
     // again is a file the next write appends its luck to, so every way
@@ -2294,17 +2301,110 @@ const CONF_WRITTEN_MAX: usize = 64;
 /// PROGRAM DID NOT WRITE. One file, no generations, no pruning, holding
 /// the only version that was ever irreplaceable.
 ///
-/// A path never written by this process answers false, so a program
-/// restarted between two saves takes one backup more than it needed.
-/// That is the side to be wrong on — and it is why the bound above
-/// EVICTS rather than refuses: the entry a full table would have
-/// dropped is the one just written, which is the only one anybody is
-/// about to ask about.
+/// The table is asked FIRST and is not the whole answer, because it
+/// lives in this process and the file does not. A program restarted
+/// between two saves used to find an empty table, read its own file
+/// from last week as a stranger's, and copy it over the `.bak` that
+/// held the only hand-written version there was — the exact loss the
+/// paragraph above describes, one restart wide instead of one keypress
+/// wide, and the header in the file went on pointing at the copy. So
+/// the second question is asked of the BYTES, by [`is_generated`], and
+/// the table stays for the case that one cannot cover: a file this
+/// process wrote and something else has since changed underneath it.
+///
+/// The bound above EVICTS rather than refuses for the same reason: the
+/// entry a full table would have dropped is the one just written,
+/// which is the only one anybody is about to ask about.
 fn ours(path: &Path, on_disk: &str) -> bool {
-    CONF_WRITTEN
+    let remembered = CONF_WRITTEN
         .lock()
         .map(|w| w.iter().any(|e| e.path == path && e.text == on_disk))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    remembered || is_generated(on_disk)
+}
+
+/// EVERY HEADER THIS PROGRAM HAS EVER WRITTEN, newest first, and the
+/// reason [`is_generated`] does not simply compare against the current
+/// one.
+///
+/// Recognition is a question about a file written by SOME build of this
+/// program, not necessarily this one, so anything the recognition rests
+/// on is frozen the moment it ships. The prose above is not frozen —
+/// it is prose, and the paragraph explaining the `.bak` was rewritten
+/// twice while this very defect was being fixed. Compared against the
+/// current text alone, the first save after any release that touches a
+/// word of it reads last week's file as a stranger's and spends the
+/// user's only copy on it: the same loss as the one below, one release
+/// wide instead of one restart wide.
+///
+/// So editing [`CONF_HEADER`] means COPYING ITS OLD TEXT IN HERE, as a
+/// new entry after the current one, and files that went out wearing it
+/// go on being recognised. The test
+/// `the_recognition_is_pinned_to_what_was_shipped` fails the moment the
+/// header or the serialiser's output changes without that being done,
+/// and says so; it is a tripwire and nothing else.
+const CONF_HEADERS: &[&str] = &[CONF_HEADER];
+
+/// Whether `text` is EXACTLY what some build of [`write_conf`] produces
+/// from the document inside it: read back, written out again, compared
+/// byte for byte under each header in [`CONF_HEADERS`].
+///
+/// The question this has to answer is not "does it look like ours" but
+/// "is there anything of the USER'S in it", and the round trip answers
+/// that one precisely, because everything a person can add is
+/// something the serialiser drops: a comment, a field a newer build
+/// knows and this one has never heard of, a number written `40` where
+/// the writer writes it differently, one blank line more than the
+/// writer leaves. Any of them and the two texts differ, the file is
+/// treated as a stranger's, and the copy is taken — which is the side
+/// to be wrong on.
+///
+/// Matching the HEADER alone would have been shorter and wrong in the
+/// one case that matters: a person who opens the file the program
+/// wrote and adds their own lines under that header would have had
+/// them silently replaced with no copy kept at all. Ignoring the header
+/// and comparing only what follows it would have been wrong in the same
+/// case for the same reason — the line they added is likeliest to be a
+/// comment, and a comment goes at the top.
+fn is_generated(text: &str) -> bool {
+    is_generated_under(text, CONF_HEADERS)
+}
+
+/// [`is_generated`] with the list of known headers handed in, so that
+/// what the list DOES can be stated by a test — the const holds exactly
+/// one entry today, and the whole point of it is what happens on the
+/// day it holds two.
+fn is_generated_under(text: &str, headers: &[&str]) -> bool {
+    let Ok(doc) = ron_options().from_str::<DesktopConf>(text) else { return false };
+    let Ok(body) = conf_body(&doc) else { return false };
+    headers
+        .iter()
+        .any(|header| text.strip_prefix(*header) == Some(body.as_str()))
+}
+
+/// The bytes of a written configuration: the header, then [`conf_body`].
+///
+/// One function because two callers must agree forever — [`write_conf`]
+/// produces this and [`is_generated`] recognises it — and a difference
+/// of a single byte between them would turn every save into a backup
+/// of the previous save, which is the defect this whole page is about.
+fn conf_text(doc: &DesktopConf) -> std::io::Result<String> {
+    Ok(format!("{CONF_HEADER}{}", conf_body(doc)?))
+}
+
+/// The document and the newline that ends the file — everything a
+/// written configuration is APART from its header.
+///
+/// Split off because the header is the part that changes between
+/// releases and this part is the part that carries the meaning:
+/// [`is_generated`] compares this against what follows each header it
+/// knows, so a file from an older build is recognised by the bytes that
+/// were never prose.
+fn conf_body(doc: &DesktopConf) -> std::io::Result<String> {
+    let body = ron_options()
+        .to_string_pretty(doc, ron_pretty())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(format!("{body}\n"))
 }
 
 /// Remembers the text [`write_conf`] just wrote, for [`ours`].
@@ -4464,6 +4564,197 @@ mod tests {
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_CONFIG_DIRS");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A RESTART IS NOT A REASON TO SPEND THE USER'S COPY.
+    ///
+    /// The rule was kept in a table in memory, so the first save after
+    /// every start read this program's own file — written the day
+    /// before, header and all — as a stranger's and copied it over the
+    /// `.bak`. Whatever the user had written by hand, and the header in
+    /// the file went on naming that copy as the place it was kept.
+    ///
+    /// The half this leaves standing is the one the header promises:
+    /// a file the program did not write is copied aside, once, however
+    /// many saves follow — across restarts as well now, which is what
+    /// the second half of this test is about.
+    #[test]
+    fn a_restart_does_not_turn_the_programs_own_file_into_the_backup() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("restart-backup");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Session one: a document of the user's own — it parses, so
+        // nothing here rests on a file being broken — and one save.
+        let mine = "// mine, and nobody else's\n(\n    theme: Named(\"crimson\"),\n)\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+        set_engine_theme("azure");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON_BACKUP)).unwrap(),
+            mine,
+            "the copy is of what the user wrote"
+        );
+
+        // The restart, which is exactly this: a process that did not
+        // write the file standing on the disk.
+        CONF_WRITTEN.lock().unwrap().clear();
+
+        set_engine_theme("pure");
+        let kept = std::fs::read_to_string(dir.join(CONF_RON_BACKUP)).unwrap();
+        assert_eq!(kept, mine, "a new process spent the user's only copy");
+        assert!(
+            !kept.contains("REWRITES this file"),
+            "the copy holds this program's own output: {kept}"
+        );
+        assert_eq!(conf().theme.name(), Some("pure"), "and the setting still landed");
+        assert!(leftover_tmp(&dir).is_empty(), "no write left a temporary behind");
+
+        // What the recognition rests on, said directly. A file wearing
+        // the header is not thereby the program's: a person who opens
+        // what was written and adds a line of their own still gets
+        // their copy, because the round trip does not reproduce it.
+        let doctored = format!(
+            "{CONF_HEADER}// and a note of my own\n(\n    theme: Named(\"pure\"),\n)\n"
+        );
+        assert!(!is_generated(&doctored), "a header is not a signature");
+        assert!(
+            is_generated(&conf_text(&DesktopConf::default()).unwrap()),
+            "and what the writer produces must be recognised as its own"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A RELEASE IS THE OTHER WAY THIS COPY CAN BE SPENT, AND WHAT THE
+    /// LIST OF HEADERS IS FOR.
+    ///
+    /// The restart was one half. The other half is the upgrade:
+    /// recognition compares the file against a header this program
+    /// WROTE, and if that meant the header the current build writes,
+    /// then the first save after any release that edited a word of that
+    /// prose would read the previous release's file as a stranger's and
+    /// copy it over the `.bak` — the same loss as the restart's, moved
+    /// from every start to every upgrade that touches a comment.
+    ///
+    /// So the recogniser asks a LIST, and this test is about the day
+    /// that list has two entries on it. Both directions are stated: the
+    /// old release's file is ours once its header is on the list, and it
+    /// is NOT ours while the list has never heard of it — which is
+    /// exactly the loss, and exactly why editing [`CONF_HEADER`] without
+    /// putting the old text into [`CONF_HEADERS`] is a thing a test has
+    /// to refuse. That test is
+    /// `the_recognition_is_pinned_to_what_was_shipped`.
+    #[test]
+    fn a_file_from_a_release_with_other_prose_in_its_header_is_still_ours() {
+        fixture_registry();
+        let doc = DesktopConf::default();
+        // Last release's output: this build's body under a header whose
+        // prose was since edited — one word, which is all it takes.
+        let shipped = CONF_HEADER.replacen("REWRITES", "rewrites", 1);
+        let last_release = format!("{shipped}{}", conf_body(&doc).unwrap());
+        assert_ne!(last_release, conf_text(&doc).unwrap(), "the drift is real");
+
+        assert!(
+            !is_generated_under(&last_release, &[CONF_HEADER]),
+            "this is the loss: one word of prose and last week's file is a stranger"
+        );
+        assert!(
+            is_generated_under(&last_release, &[CONF_HEADER, &shipped]),
+            "a header this program shipped is a header it recognises"
+        );
+
+        // And the list does not become a way in. What makes a file the
+        // user's is the same under two headers as under one: their text
+        // is in the body, and the body has to round-trip whichever
+        // header stands above it.
+        let doctored = format!("{shipped}// and a note of my own\n(\n    theme: Named(\"pure\"),\n)\n");
+        assert!(
+            !is_generated_under(&doctored, &[CONF_HEADER, &shipped]),
+            "a known header is not a signature either"
+        );
+        // Nor is a header the right prefix of somebody else's document:
+        // the bytes after it are compared, all of them.
+        let truncated = format!("{shipped}(\n)\n");
+        assert!(!is_generated_under(&truncated, &[CONF_HEADER, &shipped]));
+    }
+
+    /// THE TRIPWIRE. It has no other job.
+    ///
+    /// [`is_generated`] recognises a file by the bytes some build of
+    /// this program wrote, so two things it does not own are frozen the
+    /// moment a release ships: the header's prose, and the exact shape
+    /// [`ron_pretty`] serialises in. Change either and every file
+    /// already on disk stops being recognised — the first save after the
+    /// upgrade takes it for a stranger's document and copies it over the
+    /// `.bak` that held the user's real one.
+    ///
+    /// Neither of those is a thing anybody would think of as a promise
+    /// while editing it, which is why this test states it instead of the
+    /// comment. What to do when it fails is in the message.
+    #[test]
+    fn the_recognition_is_pinned_to_what_was_shipped() {
+        // FNV-1a, chosen for being four lines rather than for being
+        // strong: this compares against a number written down, it does
+        // not defend against anybody.
+        fn fingerprint(s: &str) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in s.as_bytes() {
+                h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+            h
+        }
+
+        assert_eq!(
+            fingerprint(CONF_HEADER),
+            0x6c08_0c76_913a_f370,
+            "CONF_HEADER changed. Every file the previous release wrote wears \
+             the OLD text, and is now a stranger's document whose first save \
+             overwrites the user's .bak. Put the old header — `git show \
+             HEAD:src/config.rs` — into CONF_HEADERS as a second entry, then \
+             pin the new fingerprint here."
+        );
+        // A document with something IN it, and nested: the empty one
+        // serialises to two characters, so an indentor or a separator
+        // could change under it without moving a byte.
+        let doc = DesktopConf {
+            theme: Choice::Named("crimson".into()),
+            variant: Choice::Off,
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))]
+                .into_iter()
+                .collect(),
+            term_font: model::FontConf { size: Some(112.5), ..Default::default() },
+            color: model::ColorConf {
+                space: Choice::Named("bt2020 pq".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            fingerprint(&conf_body(&doc).unwrap()),
+            0x9b8c_4760_84d8_3f4a,
+            "the serialised shape changed — ron_pretty, a renamed field, a new \
+             one with a default. Files already on disk carry the old shape and \
+             no longer round-trip, so they read as strangers' and their saves \
+             spend the .bak. If the change is deliberate, this number is the \
+             thing to update, and CONF_HEADERS cannot help: only a reader of \
+             the old shape could."
+        );
+        // And the list is a list of DISTINCT headers, the current one at
+        // its head — an entry equal to another buys nothing and an
+        // entry that is not the current one being first would mean the
+        // writer and the recogniser had come apart.
+        assert_eq!(CONF_HEADERS.first(), Some(&CONF_HEADER));
+        for (i, a) in CONF_HEADERS.iter().enumerate() {
+            for b in &CONF_HEADERS[i + 1..] {
+                assert_ne!(a, b, "the same header twice in CONF_HEADERS");
+            }
+        }
     }
 
     /// Every temporary file left standing in a directory. Matched on

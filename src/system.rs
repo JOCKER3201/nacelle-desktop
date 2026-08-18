@@ -101,6 +101,35 @@ fn read_procs() -> Vec<RawProc> {
     out
 }
 
+/// The sysinfo handle this sampler keeps, holding what this sampler
+/// actually asks it for: the cpus and the memory totals.
+///
+/// `System::new_all()` is what stood here, and `_all` means EVERY
+/// PROCESS AND EVERY THREAD — which on Linux sysinfo does not merely
+/// read but KEEPS OPEN: each `Process` it builds holds its
+/// `/proc/<pid>/stat` file so that the next refresh can reuse the
+/// handle instead of reopening it. There is no next refresh. The loop
+/// below asks this handle for cpu and memory only and reads processes
+/// itself through [`read_procs`], so 511 process and 1091 task handles
+/// were opened at startup and held until the program exited: about
+/// 1600 descriptors serving nobody, on a cache nothing ever hit again.
+///
+/// They were not free. sysinfo raises the process's soft descriptor
+/// limit to the hard one before it starts storing them, and every
+/// descriptor the program opened afterwards — the per-frame dance
+/// around the driver included — was numbered above the plateau they
+/// left behind.
+///
+/// The priming pair is what `new_all` also did and the loop still
+/// needs: cpu usage is the difference between two readings, so the
+/// first pass has to have something to subtract from.
+fn probe() -> sysinfo::System {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_cpu();
+    sys.refresh_memory();
+    sys
+}
+
 pub fn start() -> Arc<Mutex<Snapshot>> {
     let snap = Arc::new(Mutex::new(Snapshot::default()));
     let shared = snap.clone();
@@ -111,7 +140,7 @@ pub fn start() -> Arc<Mutex<Snapshot>> {
     // rather than left to inherit the process name in every profile.
     let started = crate::threads::spawn(crate::threads::TELEMETRY, move || {
         use sysinfo::System;
-        let mut sys = System::new_all();
+        let mut sys = probe();
         let mut networks = sysinfo::Networks::new_with_refreshed_list();
         let mut components = sysinfo::Components::new_with_refreshed_list();
 
@@ -376,5 +405,65 @@ mod tests {
             "child run did not report a pass\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+
+    /// Every descriptor this process is holding on ANOTHER process's
+    /// `/proc` entry, by what it points at.
+    ///
+    /// The names rather than the count, because the count alone cannot
+    /// say what leaked; `/proc/self/fd` is read through its own
+    /// directory handle, which points at `/proc/<us>/fd` and so matches
+    /// none of the files below.
+    fn proc_handles() -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir("/proc/self/fd") else { return Vec::new() };
+        let mut out: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| std::fs::read_link(e.path()).ok())
+            .map(|t| t.to_string_lossy().into_owned())
+            .filter(|t| {
+                t.starts_with("/proc/")
+                    && (t.ends_with("/stat")
+                        || t.ends_with("/statm")
+                        || t.ends_with("/io")
+                        || t.contains("/task/"))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// THE TELEMETRY LEAVES NO DESCRIPTOR BEHIND.
+    ///
+    /// Both halves of the sampler are asked here, and only one of them
+    /// was ever wrong: the process scan opens a file per process and
+    /// closes it, while the sysinfo handle used to be built with
+    /// `new_all` and kept a `/proc/<pid>/stat` open for every process
+    /// and every thread on the machine — about 1600 of them — for the
+    /// whole life of the program. The handle is alive at the assertion
+    /// on purpose: this is not a question about `Drop`, it is about
+    /// what the sampler carries while it runs.
+    #[test]
+    fn the_telemetry_holds_no_proc_handles_while_it_runs() {
+        let before = proc_handles();
+        let mut sys = probe();
+        sys.refresh_cpu();
+        sys.refresh_memory();
+        assert_eq!(
+            proc_handles(),
+            before,
+            "the sysinfo handle is holding /proc files open (was {} before)",
+            before.len()
+        );
+
+        // And the scan that DOES read every process gives back what it
+        // takes. Fail-closed: a scan that read nothing would satisfy
+        // any assertion about descriptors.
+        let seen = read_procs().len();
+        assert!(seen > 0, "no process was read at all — the assertion below proves nothing");
+        assert_eq!(proc_handles(), before, "the process scan left handles open");
+
+        // Held to here so the assertions above are about a LIVE probe.
+        assert!(sys.total_memory() > 0, "the probe must still answer what the loop asks it");
     }
 }
