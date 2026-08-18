@@ -93,3 +93,20 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
+
+# TEMPORARY, AND IT MUST NOT SURVIVE THE MERGE.
+#
+# `save_theme_as` does not exist in the libnacelle this manifest PINS
+# (`main` = f0f349a): it is added on the branch `fix/save-halo`, next to
+# it in this worktree. Without this line the crate does not compile, so a
+# gate run here would say nothing about the fix — which is exactly the
+# criticism the previous round earned.
+#
+# The merge order is therefore fixed and one-way: libnacelle first, then
+# the pin in Cargo.lock, then this crate — AND THIS BLOCK COMES OUT with
+# the pin bump. A forgotten [patch] has already cost this project a
+# repository that would not build on its own; the path resolves against
+# the container, so it goes on working locally long after it stops being
+# true anywhere else.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }

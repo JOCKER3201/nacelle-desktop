@@ -5049,12 +5049,52 @@ impl Settings {
         c.is_ascii_alphanumeric() || c == '-' || c == '_'
     }
 
+    /// The theme the editor is EDITING — the file the preview on screen is
+    /// standing on — or `None` when that is the master, which is no file.
+    ///
+    /// A save patches this theme's own bytes, so naming it is how SAVE AS
+    /// stays a copy of what the person is looking at.
+    fn editor_source_theme(&self) -> Option<String> {
+        Self::editor_source_of(
+            config::current_engine_theme().as_deref(),
+            &nacelle::theme::available_themes(),
+        )
+    }
+
+    /// The rule behind [`Self::editor_source_theme`], asked as a question
+    /// about two lists instead of about two process-wide stores — the
+    /// configuration file and the theme search path — so it can be read and
+    /// tested without steering a process.
+    ///
+    /// The three ways there is nothing to copy are the three ways there is
+    /// no file: nothing configured, the master (which is compiled in), and
+    /// a `theme:` naming a file that no longer exists — for which the
+    /// loader ALREADY fell back to the master, so the person is looking at
+    /// the master whatever the line says. `Act::EditorSave` makes the same
+    /// test for the same reason when it decides that SAVE is really SAVE
+    /// AS: what is in force, not what is written down.
+    fn editor_source_of(current: Option<&str>, known: &[String]) -> Option<String> {
+        let name = current?;
+        if name.eq_ignore_ascii_case("default") {
+            return None;
+        }
+        known.iter().find(|n| n.eq_ignore_ascii_case(name)).cloned()
+    }
+
     /// Writes the edit set under `name` and, when the write lands, makes
     /// the saved theme the one in force. Answers whether the
     /// configuration changed — the caller's cue to re-resolve, which is
     /// what reloads the theme off the file just written.
+    ///
+    /// `name` is where it LANDS; [`Self::editor_source_theme`] is what is
+    /// being saved. They are one for SAVE and two for SAVE AS, and passing
+    /// only the first is how a SAVE AS onto a taken name came out wearing
+    /// that name's halo instead of the one on screen — the set is silent
+    /// about a dress the theme wore itself, and a silence is answered by
+    /// whichever file the save is laid against.
     fn editor_save_named(&mut self, name: &str) -> bool {
-        match nacelle::theme::save_theme(name, &self.editor_edits()) {
+        let source = self.editor_source_theme();
+        match nacelle::theme::save_theme_as(source.as_deref(), name, &self.editor_edits()) {
             Ok(path) => {
                 eprintln!("nacelle-desktop: theme saved to {}", path.display());
                 config::set_engine_theme(name);
@@ -11048,19 +11088,34 @@ mod tests {
     /// state off the live bake and this is the one way to give it a bake
     /// that is not the master's without a file on disk.
     ///
-    /// WHAT THIS PINS IS THE OVERLAY, AND ONLY THE OVERLAY. An edit set
-    /// laid over a bake keeps whatever it does not mention, so saying
-    /// nothing about a radius is how a dress survives. A FILE keeps
-    /// nothing it does not mention — `nacelle::theme::save_theme` writes
-    /// the whole file out of this same set — so a dressed theme saved
-    /// under a new name loses its radius and alpha to the same silence
-    /// that protects it here. That is a hole at the seam between this
-    /// window's set and what `libnacelle`'s `theme::edit` puts in it, it
-    /// is NOT a thing this test is content with, and closing it belongs
-    /// on the other side of the boundary: `edit.rs` has to hand the
-    /// dressed numbers back for a save the way it withholds them for an
-    /// overlay. Whichever way that lands, the assertions below change
-    /// with it — they are the overlay's contract, not the file's.
+    /// WHAT THIS PINS IS THE OVERLAY. An edit set laid over a bake keeps
+    /// whatever it does not mention, so saying nothing about a radius is
+    /// how a dress survives.
+    ///
+    /// THE HOLE THIS DOC USED TO DESCRIBE IS CLOSED ON THE OTHER SIDE OF
+    /// THE BOUNDARY, and it closed the other way round from the guess
+    /// written here. The guess was that `edit.rs` would have to hand the
+    /// dressed numbers back for a save, because a FILE keeps nothing it
+    /// does not mention. What was wrong was the second half:
+    /// `nacelle::theme::save_theme` regenerated the file whole, and the
+    /// 2026-08-18 change makes it PATCH — the values the set names are
+    /// replaced where they stand and every other byte, comments included,
+    /// is left alone, in the theme's OWN file whatever name the save
+    /// lands under (`save_theme_as`). A file keeps what it is not told
+    /// about, exactly like a bake, so the set below is right for both and
+    /// the assertions did not have to change after all. The owner's
+    /// report that forced it: "the halo does not blink any more, but it
+    /// disappears when I press save."
+    ///
+    /// WHAT THIS TEST CAN AND CANNOT SEE. It is the OVERLAY's contract,
+    /// and that is all it runs: this crate pins `libnacelle` by git commit
+    /// (`Cargo.toml`), so until that pin is bumped past the save change,
+    /// the library this file is compiled against is the one that still
+    /// regenerates. The paragraph above is a statement about libnacelle's
+    /// branch, not about this crate's build, and the two only become the
+    /// same statement in the merge order the plan fixes: libnacelle, then
+    /// the pin, then here. The file half is pinned where it lives —
+    /// `libnacelle/tests/theme_save_patch.rs` and `theme_save_as.rs`.
     #[test]
     fn a_theme_that_dressed_its_own_halo_keeps_its_numbers() {
         let _g = crate::widgets::theme_test_lock();
@@ -11093,6 +11148,37 @@ mod tests {
             edits.iter().any(|e| e.token == "glow.panel_edge.enabled" && e.value == "true"),
             "NEON did not switch the halo on"
         );
+    }
+
+    /// And WHICH theme that dress belongs to, which is this window's half
+    /// of the same question.
+    ///
+    /// A save patches a file, and the set above is silent about the dress,
+    /// so the file it is laid against decides what the dress ends up being.
+    /// Hand the save the name it is WRITING and a SAVE AS onto a taken name
+    /// answers that silence out of somebody else's theme. Hand it the theme
+    /// the editor has OPEN and the answer is the one on screen. What is
+    /// pinned here is that this window names the second one — and the three
+    /// cases where there is no file to name, each of which means the person
+    /// is looking at the master.
+    #[test]
+    fn a_save_is_a_save_of_the_theme_the_editor_has_open() {
+        let known: Vec<String> =
+            ["default", "cockpit", "azure"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            Settings::editor_source_of(Some("cockpit"), &known).as_deref(),
+            Some("cockpit"),
+            "the editor could not name the theme it has open, so SAVE AS \
+             would be laid against whatever file the new name already had"
+        );
+        // The master is compiled in; there is no file to copy.
+        assert_eq!(Settings::editor_source_of(Some("default"), &known), None);
+        // Nothing configured at all — the master again, by omission.
+        assert_eq!(Settings::editor_source_of(None, &known), None);
+        // A `theme:` naming a file that is gone. The loader already fell
+        // back to the master, so the master is what is on screen, and
+        // pointing a save at the missing name would resurrect it.
+        assert_eq!(Settings::editor_source_of(Some("skasowany"), &known), None);
     }
 
     /// The two crossings between the editor's sRGB tracks and the file's
