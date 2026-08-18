@@ -64,6 +64,7 @@ x11rb::atom_manager! {
         _NET_ACTIVE_WINDOW,
         _NET_CLOSE_WINDOW,
         _NET_MOVERESIZE_WINDOW,
+        _NET_FRAME_EXTENTS,
         _NET_CURRENT_DESKTOP,
         _NET_WM_DESKTOP,
         _NET_WM_NAME,
@@ -135,11 +136,41 @@ enum Step {
     Root { atom: Atom, window: u32, data: [u32; 5] },
 }
 
+/// How thick the manager's frame is around a window: left, right, top,
+/// bottom, in the order `_NET_FRAME_EXTENTS` gives them.
+///
+/// Zero for a window with no frame, which is every window under a
+/// compositor that draws no decorations — and every Wayland toplevel,
+/// which is why [`Place`] means the client rectangle and this
+/// conversion lives here rather than in the vocabulary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Frame {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+impl Frame {
+    fn of(prop: &[u32]) -> Frame {
+        if prop.len() < 4 {
+            return Frame::default();
+        }
+        Frame {
+            left: prop[0] as i32,
+            right: prop[1] as i32,
+            top: prop[2] as i32,
+            bottom: prop[3] as i32,
+        }
+    }
+}
+
 /// Which EWMH request carries which order.
 ///
 /// Pure, so the message can be read in a test. `window` is the native
-/// X11 id, already resolved from the [`WindowId`] the interface holds.
-fn route(act: Act, window: u32, atoms: &Atoms) -> Step {
+/// X11 id, already resolved from the [`WindowId`] the interface holds;
+/// `frame` is what the manager has drawn around it.
+fn route(act: Act, window: u32, atoms: &Atoms, frame: Frame) -> Step {
     let root = |atom: Atom, data: [u32; 5]| Step::Root { atom, window, data };
     match act {
         // data[2] is "the window that was active when this was asked",
@@ -176,9 +207,26 @@ fn route(act: Act, window: u32, atoms: &Atoms) -> Step {
                 0,
             ],
         ),
+        // `_NET_MOVERESIZE_WINDOW` mixes two coordinate systems in one
+        // message, and nothing warns you: the width and height are the
+        // CLIENT's, but x and y place the FRAME's corner. Handing a
+        // rectangle straight back to the manager therefore walks the
+        // window down and right by the thickness of its own decoration,
+        // every single time. Measured against KWin 6.7.4 by the probe
+        // below: asked for (300, 200), the client landed at (304, 228).
+        //
+        // [`Place`] means the client rectangle on both sides of the
+        // seam — it has to, because a Wayland toplevel has no frame to
+        // mean anything else by — so the frame is taken off here.
         Act::Place(_, p) => root(
             atoms._NET_MOVERESIZE_WINDOW,
-            [MOVERESIZE_ALL, p.x as u32, p.y as u32, p.w, p.h],
+            [
+                MOVERESIZE_ALL,
+                (p.x - frame.left) as u32,
+                (p.y - frame.top) as u32,
+                p.w,
+                p.h,
+            ],
         ),
         Act::SendToBoard(_, board) => {
             root(atoms._NET_WM_DESKTOP, [board, SOURCE_PAGER, 0, 0, 0])
@@ -569,7 +617,9 @@ impl Backend for Ewmh {
         let Some(native) = self.names.native(act.who()) else {
             return Outcome::Unknown(act.who());
         };
-        match route(act, native as u32, &self.atoms) {
+        let frame =
+            Frame::of(&read32(&self.conn, native as u32, self.atoms._NET_FRAME_EXTENTS));
+        match route(act, native as u32, &self.atoms, frame) {
             Step::Nothing => Outcome::Unsupported,
             Step::Root { atom, window, data } => {
                 self.tell(window, atom, data);
@@ -630,6 +680,7 @@ mod tests {
             _NET_ACTIVE_WINDOW: 103,
             _NET_CLOSE_WINDOW: 104,
             _NET_MOVERESIZE_WINDOW: 105,
+            _NET_FRAME_EXTENTS: 130,
             _NET_CURRENT_DESKTOP: 106,
             _NET_WM_DESKTOP: 107,
             _NET_WM_NAME: 108,
@@ -672,7 +723,7 @@ mod tests {
         for verb in Verb::ALL {
             let Some(act) = Act::specimen(verb, WindowId(1)) else { continue };
             let offered = Ewmh::KNOWS.contains(&verb);
-            let routed = route(act, 0x4200, &atoms) != Step::Nothing;
+            let routed = route(act, 0x4200, &atoms, Frame::default()) != Step::Nothing;
             assert_eq!(
                 offered, routed,
                 "'{}' is offered={offered} but routed={routed} — one of the \
@@ -696,7 +747,7 @@ mod tests {
         let id = WindowId(1);
 
         assert_eq!(
-            route(Act::Focus(id), w, &a),
+            route(Act::Focus(id), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_ACTIVE_WINDOW,
                 window: w,
@@ -707,7 +758,7 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::Close(id), w, &a),
+            route(Act::Close(id), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_CLOSE_WINDOW,
                 window: w,
@@ -719,13 +770,13 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::Minimize(id, true), w, &a),
+            route(Act::Minimize(id, true), w, &a, Frame::default()),
             Step::Root { atom: a.WM_CHANGE_STATE, window: w, data: [ICONIC_STATE, 0, 0, 0, 0] },
             "minimizing is ICCCM's WM_CHANGE_STATE; _NET_WM_STATE_HIDDEN is \
              the manager's to set and ignores anyone who asks for it"
         );
         assert_eq!(
-            route(Act::Minimize(id, false), w, &a),
+            route(Act::Minimize(id, false), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_ACTIVE_WINDOW,
                 window: w,
@@ -736,7 +787,7 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::Fullscreen(id, true), w, &a),
+            route(Act::Fullscreen(id, true), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_WM_STATE,
                 window: w,
@@ -744,7 +795,7 @@ mod tests {
             }
         );
         assert_eq!(
-            route(Act::Fullscreen(id, false), w, &a),
+            route(Act::Fullscreen(id, false), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_WM_STATE,
                 window: w,
@@ -755,7 +806,7 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::Maximize(id, true), w, &a),
+            route(Act::Maximize(id, true), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_WM_STATE,
                 window: w,
@@ -772,7 +823,7 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::Place(id, Place { x: -20, y: 5, w: 800, h: 600 }), w, &a),
+            route(Act::Place(id, Place { x: -20, y: 5, w: 800, h: 600 }), w, &a, Frame::default()),
             Step::Root {
                 atom: a._NET_MOVERESIZE_WINDOW,
                 window: w,
@@ -789,8 +840,67 @@ mod tests {
         );
 
         assert_eq!(
-            route(Act::SendToBoard(id, 3), w, &a),
+            route(Act::SendToBoard(id, 3), w, &a, Frame::default()),
             Step::Root { atom: a._NET_WM_DESKTOP, window: w, data: [3, SOURCE_PAGER, 0, 0, 0] }
+        );
+    }
+
+    /// **A rectangle read off a window and handed straight back must
+    /// leave the window where it was.**
+    ///
+    /// This is the defect the live probe below caught, and it is worth
+    /// the words because nothing else would have. `_NET_MOVERESIZE_WINDOW`
+    /// mixes two coordinate systems in one message: width and height are
+    /// the client's, but x and y place the FRAME. The reader reports the
+    /// client rectangle, because that is the only rectangle a Wayland
+    /// toplevel has — so a `Place` taken from [`Backend::windows`] and
+    /// passed to [`Backend::act`] unaltered used to walk the window down
+    /// and right by the thickness of its own title bar, every time.
+    /// Measured against KWin 6.7.4: asked for (300, 200), the client
+    /// landed at (304, 228).
+    ///
+    /// "Drag a window and drop it back where it was" is exactly that
+    /// round trip, and it would have crept.
+    #[test]
+    fn a_place_handed_back_unaltered_moves_nothing() {
+        let a = bench();
+        let dressed = Frame { left: 4, right: 4, top: 28, bottom: 4 };
+        let where_it_is = Place { x: 300, y: 200, w: 240, h: 160 };
+
+        let Step::Root { data, .. } = route(Act::Place(WindowId(1), where_it_is), 9, &a, dressed)
+        else {
+            panic!("a move produced no request")
+        };
+        // What the manager will put the client at: the frame corner it
+        // was given, plus the frame it draws.
+        assert_eq!(
+            (data[1] as i32 + dressed.left, data[2] as i32 + dressed.top),
+            (where_it_is.x, where_it_is.y),
+            "the window came back somewhere other than where it was asked to \
+             stay — the frame was not taken off the request"
+        );
+        assert_eq!((data[3], data[4]), (where_it_is.w, where_it_is.h), "the size is the client's");
+
+        // An undecorated window — every Wayland toplevel, and every X11
+        // window under a compositor that draws no chrome — must not be
+        // shifted by a correction for a frame that is not there.
+        let Step::Root { data, .. } =
+            route(Act::Place(WindowId(1), where_it_is), 9, &a, Frame::default())
+        else {
+            panic!("a move produced no request")
+        };
+        assert_eq!(
+            (data[1], data[2]),
+            (where_it_is.x as u32, where_it_is.y as u32),
+            "a window with no frame was moved to correct for one"
+        );
+
+        assert_eq!(Frame::of(&[]), Frame::default(), "an absent property invented a frame");
+        assert_eq!(Frame::of(&[4, 4, 28]), Frame::default(), "a truncated property was believed");
+        assert_eq!(
+            Frame::of(&[1, 2, 3, 4]),
+            Frame { left: 1, right: 2, top: 3, bottom: 4 },
+            "_NET_FRAME_EXTENTS is left, right, top, bottom — in that order"
         );
     }
 
@@ -1037,6 +1147,26 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        // The control half, on this test's own window and nobody
+        // else's: ask for a move, and see whether the manager did it.
+        // Everything else about the orders is checked on a bench, which
+        // proves the five words are right and proves nothing about
+        // whether a window manager acts on them.
+        let mut moved = None;
+        if let Some(w) = seen.as_ref() {
+            let want = Place { x: 300, y: 200, w: 240, h: 160 };
+            let answer = wm.act(Act::Place(w.id, want));
+            for _ in 0..200 {
+                Backend::poll(&mut wm);
+                let now = wm.windows().iter().find(|c| c.id == w.id).and_then(|c| c.place);
+                if now == Some(want) {
+                    moved = Some((answer.clone(), now));
+                    break;
+                }
+                moved = Some((answer.clone(), now));
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         let _ = conn.destroy_window(win);
         let _ = conn.flush();
 
@@ -1046,6 +1176,15 @@ mod tests {
              read it",
         );
         println!("read back: {seen:?}");
+        let (answer, after) = moved.expect("the move was never attempted");
+        println!("move answered {answer:?}, geometry became {after:?}");
+        assert_eq!(answer, Outcome::Sent, "the order never left");
+        assert_eq!(
+            after,
+            Some(Place { x: 300, y: 200, w: 240, h: 160 }),
+            "the manager did not move the window this test asked it to move — \
+             the whole control half is words on a wire that nobody acts on"
+        );
         assert_eq!(
             seen.title, "nacelle łącznik — ątę",
             "the title came back mangled — _NET_WM_NAME is UTF-8 and WM_NAME \
