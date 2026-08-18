@@ -3574,6 +3574,12 @@ struct Metrics {
     /// One line of the empty-state role: what a page with nothing in it
     /// yet reserves for saying so.
     hint_inset: f32,
+    /// The width of the chrome button — BACK or CLOSE — WHERE THE
+    /// WINDOW HAS FOLDED, from `settings.back_w_frac` and its two
+    /// floors. Unfolded, that button is the head of the RAIL and takes
+    /// the rail's own room instead ([`Panes`]): a button one width and
+    /// the bed under it another is the "amatorka" the owner reported on
+    /// 2026-08-18.
     corner_w: f32,
     /// `settings.list_w_frac` itself, NOT a width. A listed button is a
     /// fraction of the REGION it stands in — and since the window grew
@@ -3646,9 +3652,25 @@ struct RowCtx {
     m: Metrics,
 }
 
-/// Where a page's body starts: under the chrome's own row.
-fn body_top(page: &Page, m: Metrics, content: Rect) -> f32 {
-    content.y + m.btn_h + m.space(page.lead)
+/// Where a page's body starts: under the chrome's own row, and under
+/// the row WHEREVER IT STANDS.
+///
+/// ASKED OF THE BUTTON AND NOT OF THE BOX. This used to read
+/// `content.y + button.h + lead`, which is the same sentence only while
+/// the chrome button starts at the top edge of the content box. Since
+/// 2026-08-18 it does not: unfolded it is the head of the RAIL and
+/// stands `settings.band_pad_y` down from the top of the rail's bed
+/// ([`Panes::of`]), so a body still measured from the box would leave
+/// the page's first row `lead - band_pad_y` under the button instead of
+/// `lead` — 5.4 px of the master's 16.2 at 1080p — and would put it a
+/// whole `band_pad_y` ABOVE the rail's first entry, which the two used
+/// to share a line with. Both faults come from asking the wrong
+/// rectangle, so this asks the rectangle the button was really given.
+///
+/// Folded there is no bed and no air, `Panes::of` puts the corner back
+/// at the head of the content box, and this is the old sentence again.
+fn body_top(page: &Page, m: Metrics, nav: &Panes) -> f32 {
+    nav.corner.bottom() + m.space(page.lead)
 }
 
 /// The body box of the window: the modal less its title band and its
@@ -3684,13 +3706,64 @@ fn nav_w(content: Rect, cell: &'static OnceLock<TokenId>, frac: &'static str) ->
         .max(th.px(tok(&MIN_PX, "settings.rail_w_min_min_px")))
 }
 
+/// The air a navigation column's bed keeps around what stands on it:
+/// `settings.band_pad_x` across and `settings.band_pad_y` down.
+///
+/// TWO NUMBERS AND NOT ONE, because they answer two different questions.
+/// The horizontal one competes with `settings.col_gap` — the gutter to
+/// the next column — and has to stay under it or the two columns fuse;
+/// the vertical one competes with `modal.row_gap` between the buttons
+/// themselves. A theme that wants them equal says so by giving them one
+/// value, which is what the master does.
+fn band_pad() -> (f32, f32) {
+    static PAD_X: OnceLock<TokenId> = OnceLock::new();
+    static PAD_Y: OnceLock<TokenId> = OnceLock::new();
+    let th = theme::resolved();
+    (
+        th.px(tok(&PAD_X, "settings.band_pad_x")).max(0.0),
+        th.px(tok(&PAD_Y, "settings.band_pad_y")).max(0.0),
+    )
+}
+
+/// One navigation column: the bed that is painted, and the box the rows
+/// that stand on it are laid in.
+///
+/// TWO RECTANGLES BECAUSE THERE ARE TWO QUESTIONS, and the window used
+/// to answer both with one. "Where does the column's colour go" is the
+/// whole column, top edge to bottom edge; "where do its buttons go" is
+/// that box less the bed's own air and less the corner button's row.
+/// While one rect answered both, the bed could only start where the
+/// buttons started — which is what left `button.h + modal.row_gap`
+/// (45.4 + 16.2 = 61.6 px at 1080p) of bare window body above every
+/// navigation band and none above the page, the islands the owner
+/// photographed on 2026-08-18 — and a button could only ever sit flush
+/// against the bed's sides, which is the other half of the same report.
+#[derive(Clone, Copy)]
+struct Column {
+    /// What [`Settings::draw_bands`] paints: the column's whole
+    /// rectangle of the content box.
+    bed: Rect,
+    /// What [`Settings::draw_nav`] clips to and lays rows in: the bed
+    /// less `settings.band_pad_*`, and less the corner button's row at
+    /// the top.
+    rows: Rect,
+}
+
 /// Where the window's three panels stand this frame.
 ///
-/// The rail hangs one ordinary row gap under the corner button — a
-/// FIXED lead, not the page's, so the sections do not step up and down
-/// as the pages behind them change what they lead with. The second
-/// column stands beside it when the section has pages of its own, and
-/// what is left over is the page.
+/// The rows of both navigation columns hang one ordinary row gap under
+/// the corner button — a FIXED lead, not the page's, so the sections do
+/// not step up and down as the pages behind them change what they lead
+/// with. The second column stands beside the rail when the section has
+/// pages of its own, and what is left over is the page.
+///
+/// THE BEDS FILL THE CONTENT BOX FROM TOP TO BOTTOM. The corner button
+/// is the head of the rail and stands ON the rail's bed rather than in a
+/// notch cut out of it, so all three columns start on one line and end
+/// on one line. Nothing here reaches past `content_rect`, which keeps
+/// `modal.pad` clear of the frame on the sides and the bottom and drops
+/// `modal.body_top` for the title band: the bands fill their AREA, and
+/// the window's own margin is still the window's.
 ///
 /// FOLDED is the whole window's word, not one section's: the room is
 /// measured against BOTH columns whether the section shows the second
@@ -3698,13 +3771,21 @@ fn nav_w(content: Rect, cell: &'static OnceLock<TokenId>, frac: &'static str) ->
 /// under the reader's hand. Below the threshold there are no columns at
 /// all — the navigation goes into the flow as bands ahead of the page,
 /// and the window is the one vertical list it has always been able to
-/// fall back to.
+/// fall back to. There is no bed then and no bed's air either, so the
+/// corner button goes back to the head of the content box at its own
+/// width (`settings.back_w_frac`).
 #[derive(Clone, Copy)]
 struct Panes {
-    rail: Option<Rect>,
-    sub: Option<Rect>,
+    rail: Option<Column>,
+    sub: Option<Column>,
     /// What the page has: the whole content box when folded.
     page: Rect,
+    /// Where the chrome's own button — BACK or CLOSE — stands. Said
+    /// here because it is the head of the rail and has to keep the
+    /// rail's own air; a second opinion about it in [`Settings::draw`]
+    /// is how a button ends up flush with a bed it is supposed to be
+    /// lying on.
+    corner: Rect,
     folded: bool,
 }
 
@@ -3718,21 +3799,39 @@ impl Panes {
         // Both columns, always: the fold is the WINDOW's shape.
         let folded = content.w - rail_w - sub_w - 2.0 * gap < col_min_w();
         if folded {
-            return Panes { rail: None, sub: None, page: content, folded: true };
+            return Panes {
+                rail: None,
+                sub: None,
+                page: content,
+                corner: Rect::new(content.x, content.y, m.corner_w, m.btn_h),
+                folded: true,
+            };
         }
-        let top = content.y + m.btn_h + m.gap;
-        let h = (content.bottom() - top).max(0.0);
-        let rail = Rect::new(content.x, top, rail_w, h);
-        let mut x = rail.right() + gap;
+        let (pad_x, pad_y) = band_pad();
+        // The bed is the whole column; the rows are the bed less its air
+        // and less the corner button's row, which the rail carries and
+        // the column beside it aligns to.
+        let rows_top = content.y + pad_y + m.btn_h + m.gap;
+        let rows_h = (content.bottom() - pad_y - rows_top).max(0.0);
+        let column = |x: f32, w: f32| Column {
+            bed: Rect::new(x, content.y, w, content.h),
+            rows: Rect::new(x + pad_x, rows_top, (w - 2.0 * pad_x).max(0.0), rows_h),
+        };
+        let rail = column(content.x, rail_w);
+        let mut x = rail.bed.right() + gap;
         let sub = subrail_rows(view).map(|_| {
-            let r = Rect::new(x, top, sub_w, h);
-            x = r.right() + gap;
-            r
+            let c = column(x, sub_w);
+            x = c.bed.right() + gap;
+            c
         });
         Panes {
             rail: Some(rail),
             sub,
             page: Rect::new(x, content.y, (content.right() - x).max(0.0), content.h),
+            // The head of the rail, at the rail's own width inside its
+            // air — not `settings.back_w_frac`, which is the width of a
+            // column that no longer exists once the rail does.
+            corner: Rect::new(rail.rows.x, content.y + pad_y, rail.rows.w, m.btn_h),
             folded: false,
         }
     }
@@ -6154,7 +6253,11 @@ impl Settings {
 
         let content = content_rect(modal);
         let m = Metrics::of(ctx, content);
-        let corner = Rect::new(content.x, content.y, m.corner_w, m.btn_h);
+        // The panels are cut BEFORE the corner button is placed, because
+        // the corner button is the head of the rail and stands inside the
+        // rail's own air ([`Panes`]).
+        let nav = Panes::of(page.view, m, content);
+        let corner = nav.corner;
         let (chrome_act, chrome_label) = match chrome_of(page.view) {
             Chrome::Close => (Act::Close, "CLOSE"),
             Chrome::Back => (Act::Back, "BACK"),
@@ -6172,9 +6275,10 @@ impl Settings {
         // window has folded the columns are empty and the same entries
         // are the first bands of the flow instead — same order, one
         // shape fewer.
-        let nav = Panes::of(page.view, m, content);
-        // The beds first, under everything: three shades of one colour
-        // where the window has its columns, one bed where it has folded.
+        //
+        // The beds first, under everything: one bed under both
+        // navigation columns where the window has them, none where it
+        // has folded.
         self.draw_bands(ctx, &nav);
         self.draw_nav(ctx, page, m, &nav);
         self.draw_body(ctx, page, m, content);
@@ -6286,12 +6390,16 @@ impl Settings {
     /// of it here, so every caller — the drawing, the scroll, the tests
     /// — asks one question and gets the box the flow really has.
     fn body_box(&self, page: &'static Page, m: Metrics, content: Rect) -> Rect {
-        let box_ = Panes::of(page.view, m, content).page;
+        // The WHOLE split and not the page column alone: the body starts
+        // under the chrome button, and where that button stands is the
+        // rail's business ([`body_top`]).
+        let nav = Panes::of(page.view, m, content);
+        let box_ = nav.page;
         // The box is the FULL one — the clip and the bar are drawn on it
         // — but what a pinned band COSTS is measured where its rows
         // stand, which is beside the bar's lane ([`rows_box`]).
         let rows = rows_box(box_);
-        let top = body_top(page, m, box_);
+        let top = body_top(page, m, &nav);
         let mut bottom = box_.bottom();
         for zone in page.zones {
             if matches!(zone, Zone::Pinned { .. }) {
@@ -6486,27 +6594,31 @@ impl Settings {
         self.draw_scrollbar(ctx, view, length);
     }
 
-    /// The three columns' beds: ONE COLOUR OF THE THEME'S AT THREE OF
-    /// ITS SHADES, which is the owner's ask in his own words — "hue ten
-    /// sam, odcień koloru inny".
+    /// The three columns' beds: ONE COLOUR UNDER BOTH NAVIGATION
+    /// COLUMNS, which is the owner's ask in his own words (2026-08-18) —
+    /// "obie w jednakowym kolorze, tym w środkowej kolumnie".
     ///
-    /// Nothing here decides what those shades are. THREE COLUMNS, THREE
-    /// NAMES: `component.settings.rail_fill`, `.sub_fill` and
-    /// `.page_fill`, all three the master's, so a theme re-shades any
-    /// one of them on its own. Naming a rung here instead would weld the
+    /// Nothing here decides what that colour is, or that there is one of
+    /// it rather than two. THREE COLUMNS, THREE NAMES:
+    /// `component.settings.rail_fill`, `.sub_fill` and `.page_fill`, all
+    /// three the master's, so a theme re-beds any one of them on its
+    /// own. The master answers the first two with the SAME colour —
+    /// `rail_fill` points at `sub_fill` — and this loop cannot tell,
+    /// which is the point: naming a rung here instead would weld the
     /// settings columns to the desktop field and no theme could ever
     /// part them again.
     ///
-    /// The master writes the three as ONE EXPRESSION off ONE ANCHOR —
-    /// the window body, lifted by `settings.band_lift` once and twice —
-    /// which is what keeps them a ladder when a theme, BASIC or the
-    /// editor's BACKGROUND section moves the body. That is the master's
-    /// arrangement and not this function's: what stands here is a name,
-    /// a box and a paint.
+    /// The master writes both off ONE ANCHOR — the window body, lifted
+    /// once by `settings.band_lift` — which is what keeps them together
+    /// when a theme, BASIC or the editor's BACKGROUND section moves the
+    /// body. That is the master's arrangement and not this function's:
+    /// what stands here is a name, a box and a paint.
     ///
     /// Painted BEFORE the navigation and the body, and over each
-    /// column's whole rectangle exactly as [`Panes`] cut it: the beds
-    /// are the ground everything else in the window stands on.
+    /// column's whole rectangle exactly as [`Panes`] cut it — top edge
+    /// of the content box to bottom edge, the corner button included,
+    /// because the button lies ON the rail and not in a notch out of it.
+    /// The beds are the ground everything else in the window stands on.
     ///
     /// FOLDED, there are no columns at all. Below `settings.col_min_w`
     /// the rail's rows become the first bands of one vertical flow, so
@@ -6537,20 +6649,21 @@ impl Settings {
     /// the radius and `settings.band_corner_mode` the cut, both read
     /// through the toolkit's own pair so that SQUARE, ROUND and CHAMFER
     /// all answer here exactly as they answer everywhere else. All four
-    /// corners take it: the bands are laid inside `content_rect`, which
-    /// holds `modal.pad` clear of the frame on every side one could
-    /// meet, so no band corner ever reaches the modal's own edge — a
-    /// band is a plate lying ON the body, not a piece cut out of it.
-    /// The master carries the measurement and the one case that would
-    /// change the answer.
+    /// corners take it, and that survived the bands growing to full
+    /// height: they are laid inside `content_rect`, which holds
+    /// `modal.pad` clear of the frame on every side one could meet and
+    /// `modal.body_top` clear at the top, so no band corner reaches the
+    /// modal's own edge — a band is a plate lying ON the body, not a
+    /// piece cut out of it. The master carries the measurement and the
+    /// one case that would change the answer.
     fn draw_bands(&self, ctx: &mut Ctx, nav: &Panes) {
         static RAIL_FILL: OnceLock<TokenId> = OnceLock::new();
         static SUB_FILL: OnceLock<TokenId> = OnceLock::new();
         static PAGE_FILL: OnceLock<TokenId> = OnceLock::new();
         let th = theme::resolved();
         let bands = [
-            (nav.rail, &RAIL_FILL, "component.settings.rail_fill"),
-            (nav.sub, &SUB_FILL, "component.settings.sub_fill"),
+            (nav.rail.map(|c| c.bed), &RAIL_FILL, "component.settings.rail_fill"),
+            (nav.sub.map(|c| c.bed), &SUB_FILL, "component.settings.sub_fill"),
             (Some(nav.page), &PAGE_FILL, "component.settings.page_fill"),
         ];
         let mut sf = CtxSurface::new(ctx);
@@ -6572,11 +6685,14 @@ impl Settings {
 
     /// The two navigation columns, where the window has not folded.
     ///
-    /// Each is clipped to its own box — a rail longer than the window is
-    /// cut off, not painted over the page — and each is walked by the
-    /// SAME row walker the pages are, so an entry is a button, a heading
-    /// is a heading and a disabled section is grey by exactly the rules
-    /// a setting is.
+    /// Each is clipped to its ROWS box and not to its bed — the bed is
+    /// the paint, the rows box is the room, and the difference between
+    /// them is the air `settings.band_pad_*` keeps. A rail longer than
+    /// the room is cut off, not painted over the page, and no entry can
+    /// bleed into the padding it is supposed to stand inside. Each is
+    /// walked by the SAME row walker the pages are, so an entry is a
+    /// button, a heading is a heading and a disabled section is grey by
+    /// exactly the rules a setting is.
     ///
     /// Drawn before the body, so the chain runs corner button, rail,
     /// section pages, page — reading order, and the same order the
@@ -6586,8 +6702,8 @@ impl Settings {
             (nav.rail, Some(&RAIL_ROWS[..])),
             (nav.sub, subrail_rows(page.view)),
         ];
-        for (box_, rows) in columns {
-            let (Some(box_), Some(rows)) = (box_, rows) else { continue };
+        for (col, rows) in columns {
+            let (Some(box_), Some(rows)) = (col.map(|c| c.rows), rows) else { continue };
             ctx.dl.push_clip(box_.x, box_.y, box_.w, box_.h);
             self.clip = Some(box_);
             // Not the flow's: a column stands where it stands, and the
@@ -11238,7 +11354,9 @@ mod tests {
 
     /// ŻYCZENIE 2b, END TO END AND ON THE REAL PIPELINE: a drag of
     /// BASIC's HUE slider turns what this window actually paints, and
-    /// leaves the interface ONE HUE in DIFFERENT SHADES.
+    /// leaves the interface ONE HUE in DIFFERENT SHADES — the page's bed
+    /// under the one bed both navigation columns share (owner,
+    /// 2026-08-18), and both of those a long way under a button's plate.
     ///
     /// libnacelle measures the same claim over the master's cascade;
     /// this measures the WINDOW's chain — slider, `editor_edits`,
@@ -11269,7 +11387,7 @@ mod tests {
     /// hue the three are supposed to SHARE spreads nearly three degrees
     /// instead of standing on one.
     #[test]
-    fn a_basic_hue_drag_turns_the_window_and_keeps_one_hue_in_three_shades() {
+    fn a_basic_hue_drag_turns_the_window_and_keeps_one_hue_across_its_columns() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         theme::set_viewport(1080.0, 1.0);
@@ -11330,15 +11448,21 @@ mod tests {
                 sub.l,
                 plate.l
             );
-            // And the three columns are still three shades of it,
-            // climbing outward: the page is the well, the navigation the
-            // rim.
+            // And the two navigation columns are still ONE bed of it,
+            // one step above the page: the page is the well and the
+            // navigation the rim, and the rim is not split down the
+            // middle (owner, 2026-08-18).
             assert!(
-                page.l < sub.l && sub.l < rail.l,
-                "at {turn} deg the three columns stopped being a ladder: {} {} {}",
+                (rail.l - sub.l).abs() < 1e-3,
+                "at {turn} deg the two navigation columns are two shades: {} vs {}",
+                rail.l,
+                sub.l
+            );
+            assert!(
+                page.l < sub.l,
+                "at {turn} deg the navigation stopped standing off the page: {} {}",
                 page.l,
-                sub.l,
-                rail.l
+                sub.l
             );
             // AND NOT ONE OF THEM IS BLACK. The rotation this test drives
             // cannot darken anything, so a black band here is a black
@@ -11479,13 +11603,19 @@ mod tests {
                 page.h
             );
         }
-        // Still three shades, still climbing outward, still not black.
+        // Still ONE bed under both navigation columns, still one step
+        // above the page, still not black.
         assert!(
-            sub.l - page.l > 0.03 && rail.l - sub.l > 0.03,
-            "the three columns stopped being three shades: {} {} {}",
+            (rail.l - sub.l).abs() < 1e-3,
+            "the moved body parted the two navigation columns: {} vs {}",
+            rail.l,
+            sub.l
+        );
+        assert!(
+            sub.l - page.l > 0.03,
+            "the navigation flattened onto the page it lies on: {} {}",
             page.l,
-            sub.l,
-            rail.l
+            sub.l
         );
         let black = nacelle::theme::Color::from_hex("#000000").expect("black");
         for (name, c) in [
@@ -12890,9 +13020,12 @@ mod tests {
         let content = content_rect(modal_rect(ctx.w, ctx.h));
         let m = Metrics::of(&ctx, content);
         let with = Panes::of(View::LookFeel, m, content);
+        // The BEDS are what a column IS: where the gutter falls and how
+        // wide the column reads are questions about the paint, not about
+        // the room its rows were given inside it.
         let (rail, sub) = (
-            with.rail.expect("no rail"),
-            with.sub.expect("LOOK AND FEEL has pages and no column for them"),
+            with.rail.expect("no rail").bed,
+            with.sub.expect("LOOK AND FEEL has pages and no column for them").bed,
         );
         assert!(!with.folded, "the window folded at a width it fits in");
         assert!(
@@ -12940,18 +13073,27 @@ mod tests {
         viewport_home();
     }
 
-    /// ŻYCZENIE 1, MEASURED HERE. The three columns are three DIFFERENT
-    /// colours of ONE hue, every one of the three comes out of the theme,
-    /// and — since the owner's screenshot of 2026-08-17 — not one of them
-    /// is BLACK.
+    /// ŻYCZENIE 1, MEASURED HERE — AND RE-DECIDED ON 2026-08-18. The two
+    /// NAVIGATION columns are painted in ONE colour, the page keeps the
+    /// window body under it, every colour comes out of the theme, and not
+    /// one of them is BLACK.
+    ///
+    /// THE ONE-COLOUR CLAIM IS READ OFF THE PAINT, not off the token
+    /// names. The two beds are pulled out of a recorded draw list and
+    /// their channels compared: a test that compared the names would pass
+    /// a master that had quietly gone back to two shades through a third
+    /// token, and the owner's complaint was about the SCREEN. His words:
+    /// "mają być po całości i obie w jednakowym kolorze, tym w środkowej
+    /// kolumnie".
     ///
     /// The window's half of the claim is what this can check: that each
     /// bed is the box [`Panes`] cut, wears the corner the THEME states,
     /// and carries the colour ITS OWN TOKEN resolves to — no fourth
-    /// colour mixed in Rust, no radius written here, and no two beds
-    /// sharing a token. That the three tokens are three shades of one
-    /// ladder is the MASTER's claim, measured over the master in
-    /// libnacelle (`the_three_settings_bands_are_three_shades_of_one_hue`).
+    /// colour mixed in Rust, no radius written here, and no bed painted
+    /// off a name it does not own. That the two navigation tokens resolve
+    /// to one colour a step above the body is the MASTER's arrangement,
+    /// measured over the master in libnacelle
+    /// (`the_two_navigation_bands_are_one_bed_over_the_body`).
     ///
     /// TWO OF THE THREE ARE PAINTED under the master and the third is
     /// NAMED: `component.settings.page_fill` ships as the sentinel `none`
@@ -12963,7 +13105,7 @@ mod tests {
     /// well: a name with no reader is exactly what the previous shape of
     /// this window was rightly held to account for.
     ///
-    /// WHY BLACKNESS IS AN ASSERTION OF ITS OWN. The step gates below read
+    /// WHY BLACKNESS IS AN ASSERTION OF ITS OWN. The step gate below reads
     /// OKLab L, and OKLab L cannot tell a dark shade from black — the two
     /// beds the owner photographed were an honest 0.063 apart by that
     /// ruler and the sRGB codes 6 and 19 on the screen. `off_black` is
@@ -12972,10 +13114,10 @@ mod tests {
     ///
     /// Every lightness and hue below is read in LINEAR light: OKLCh is
     /// defined over it, the bake answers sRGB-encoded, and the two are
-    /// far apart — the master's three beds are 0.2320 / 0.2784 / 0.3341
-    /// decoded, and the first of them alone reads 0.4840 encoded.
+    /// far apart — the master's two beds are 0.2320 and 0.2784 decoded,
+    /// and the first of them alone reads 0.4840 encoded.
     #[test]
-    fn the_three_columns_are_three_shades_the_theme_chose() {
+    fn the_two_navigation_columns_are_one_bed_the_theme_chose() {
         let _g = crate::widgets::theme_test_lock();
         // The MASTER's own bands, so a theme-editor preview left standing
         // by another test is not what this measures — a preview moves
@@ -13053,8 +13195,8 @@ mod tests {
             b.iter().zip(want.iter()).all(|(a, w)| (a - w).abs() < 0.01)
         };
         for (name, r) in [
-            ("rail", nav.rail.expect("no rail")),
-            ("sub", nav.sub.expect("no column of pages")),
+            ("rail", nav.rail.expect("no rail").bed),
+            ("sub", nav.sub.expect("no column of pages").bed),
         ] {
             assert!(
                 boxes.iter().any(|b| same(b, r)),
@@ -13156,39 +13298,55 @@ mod tests {
             once.to_hex(),
             twice.to_hex()
         );
-        // THREE COLOURS, ONE HUE — the owner's "hue ten sam, odcień
-        // koloru inny", read off what the window really shows: the two
-        // beds it laid, and the BODY standing where the page is.
-        let (page, rail, sub) = (lch(body), lch(want[0]), lch(want[1]));
-        for (a, b, n) in [(page, rail, "page/rail"), (page, sub, "page/sub"), (rail, sub, "rail/sub")]
+        // THE OWNER'S FIRST ASK, READ OFF THE PAINT AND NOT OFF THE
+        // TOKENS: the two beds this frame really laid are ONE COLOUR,
+        // channel for channel and alpha included. `want` came from the
+        // theme and `drawn` from the recorded draw list, and the loop
+        // above already tied each `want` to the band it was painted in —
+        // so this is the window's own pixels answering.
+        let (a, b) = (drawn[0].2, drawn[1].2);
+        for (ch, x, y) in
+            [("r", a.r, b.r), ("g", a.g, b.g), ("b", a.b, b.b), ("a", a.a, b.a)]
         {
-            // Two degrees, which is what libnacelle holds each rung to
-            // against the SEED over the master — read in linear light
-            // the three sit on ONE number because they come out of ONE
-            // token, and the tolerance is float noise and the sRGB
-            // rounding. Read encoded they spread nearly three degrees
-            // and this assertion would fail, which is the point of the
-            // space.
             assert!(
-                hue_gap(a.h, b.h) < 2.0,
-                "{n}: two settings beds are two COLOURS ({} vs {} deg), not two shades",
-                a.h,
-                b.h
-            );
-            // The master's three, decoded: 0.2320 / 0.2784 / 0.3341, so
-            // the smaller of the two steps is 0.046.
-            assert!(
-                (a.l - b.l).abs() > 0.03,
-                "{n}: two settings beds are the same shade ({} vs {})",
-                a.l,
-                b.l
+                (x - y).abs() < 1e-6,
+                "the two navigation columns were painted apart on {ch}: \
+                 {x} vs {y} — the owner asked for one colour across both"
             );
         }
-        // AND THE STAIRCASE CLIMBS OUTWARD: the page is the well, the
-        // navigation the rim.
+        // ONE HUE, AND THE NAVIGATION A STEP OFF THE PAGE — the owner's
+        // "hue ten sam, odcień koloru inny", read off what the window
+        // really shows: the bed it laid twice, and the BODY standing
+        // where the page is.
+        let (page, rail, sub) = (lch(body), lch(want[0]), lch(want[1]));
+        for (x, y, n) in [(page, rail, "page/rail"), (page, sub, "page/sub")] {
+            // Two degrees, which is what libnacelle holds each rung to
+            // against the SEED over the master — read in linear light
+            // they sit on ONE number because they come out of ONE token,
+            // and the tolerance is float noise and the sRGB rounding.
+            // Read encoded they spread nearly three degrees and this
+            // assertion would fail, which is the point of the space.
+            assert!(
+                hue_gap(x.h, y.h) < 2.0,
+                "{n}: two settings beds are two COLOURS ({} vs {} deg), not two shades",
+                x.h,
+                y.h
+            );
+            // The master's two, decoded: 0.2320 and 0.2784, a step of
+            // 0.046.
+            assert!(
+                (x.l - y.l).abs() > 0.03,
+                "{n}: the navigation and the page are the same shade ({} vs {})",
+                x.l,
+                y.l
+            );
+        }
+        // AND THE NAVIGATION LIES ON THE PAGE, not under it: the page is
+        // the well and the chrome you steer with lies on the thing you
+        // are steering.
         assert!(
-            page.l < sub.l && sub.l < rail.l,
-            "the columns are not a staircase: {} {} {}",
+            page.l < sub.l && (sub.l - rail.l).abs() < 1e-3,
+            "the columns are not one bed over the body: {} {} {}",
             page.l,
             sub.l,
             rail.l
@@ -13293,6 +13451,342 @@ mod tests {
         viewport_home();
     }
 
+    /// "PO CAŁOŚCI" (owner, 2026-08-18). A navigation column's bed fills
+    /// the column it beds — the top edge of the content box to the bottom
+    /// edge — and the paint really lands there, at every window height
+    /// the program is built for.
+    ///
+    /// WHAT MADE THE ISLANDS, measured rather than remembered. One
+    /// rectangle used to answer two questions — where a column's colour
+    /// goes and where its buttons go — so the bed could only begin where
+    /// the first button did: `content.y + button.h + modal.row_gap`. On
+    /// the master at 1080p that is 45.4 + 16.2 = 61.6 px of bare window
+    /// body above EVERY navigation band and none at all above the PAGE
+    /// column, which was always cut from `content.y`. Two columns short
+    /// at the top beside one that was not is exactly the "wyspy" in the
+    /// screenshot. [`Column`] splits the two questions, and this is the
+    /// assertion that says so.
+    ///
+    /// THE BOTTOM EDGE WAS NEVER THE FAULT and is asserted all the same,
+    /// so a later change cannot open the gap at the other end instead.
+    ///
+    /// THE WINDOW'S OWN MARGIN IS NOT IN THIS CLAIM. `content_rect` keeps
+    /// `modal.pad` clear of the frame on the sides and the bottom and
+    /// drops `modal.body_top` for the title band. A band fills its AREA;
+    /// the window's margin is still the window's, which is also why
+    /// `settings.band_corner` still describes a plate lying ON the body
+    /// rather than a piece cut out of it.
+    #[test]
+    fn every_navigation_bed_fills_the_column_it_beds() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let s = furnished();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut measured = 0;
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            // Recorded, so the question is what was PAINTED and not only
+            // what was computed.
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let nav = Panes::of(View::LookFeel, m, content);
+            if nav.folded {
+                continue;
+            }
+            measured += 1;
+            s.draw_bands(&mut ctx, &nav);
+            let painted: Vec<[f32; 4]> = ctx
+                .dl
+                .cmds()
+                .iter()
+                .filter_map(|c| match c {
+                    nacelle::draw::DrawCmd::RingFill { r, .. } => Some(*r),
+                    _ => None,
+                })
+                .collect();
+            for (name, bed) in [
+                ("rail", nav.rail.expect("no rail").bed),
+                ("sub", nav.sub.expect("no column of pages").bed),
+            ] {
+                assert!(
+                    (bed.y - content.y).abs() < 0.01,
+                    "at {h}px the {name} bed starts {} px below the content box",
+                    bed.y - content.y
+                );
+                assert!(
+                    (bed.bottom() - content.bottom()).abs() < 0.01,
+                    "at {h}px the {name} bed stops {} px above the content box",
+                    content.bottom() - bed.bottom()
+                );
+                assert!(
+                    painted.iter().any(|r| (r[1] - bed.y).abs() < 0.01
+                        && (r[3] - bed.h).abs() < 0.01
+                        && (r[0] - bed.x).abs() < 0.01
+                        && (r[2] - bed.w).abs() < 0.01),
+                    "at {h}px the {name} bed was not painted over the whole column: \
+                     wanted {:?}, painted {painted:?}",
+                    [bed.x, bed.y, bed.w, bed.h]
+                );
+            }
+            // AND ALL THREE COLUMNS START AND END ON ONE LINE. The page
+            // is the one that never had the notch, so it is the ruler.
+            assert!(
+                (nav.page.y - content.y).abs() < 0.01
+                    && (nav.page.bottom() - content.bottom()).abs() < 0.01,
+                "at {h}px the page column no longer spans the content box"
+            );
+        }
+        assert!(measured > 0, "no window height in HEIGHTS stands in columns at all");
+        viewport_home();
+    }
+
+    /// "ŻADNYCH PADDINGÓW NIE MA, TOTALNA AMATORKA" (owner, 2026-08-18):
+    /// nothing standing in a navigation column touches the bed it stands
+    /// on, on any of its four sides.
+    ///
+    /// WHAT THIS IS ABOUT. A control flush with the plate under it stops
+    /// reading as a thing LYING ON the plate and starts reading as a
+    /// slice OF it — which is what the rail's entries and the section
+    /// headings did, left edge to right edge, because the box they were
+    /// laid in WAS the box that was painted.
+    ///
+    /// The air comes from the theme (`settings.band_pad_x` and
+    /// `band_pad_y`) and is asserted to be a real length first: a test
+    /// that only checked "inside the bed" would pass a theme, or a Rust
+    /// reader, that had quietly gone back to no padding at all.
+    ///
+    /// READ OFF THE FRAME THE WINDOW REALLY DREW. `Settings::draw` fills
+    /// the hit map, so every entry, every heading's row and the chrome
+    /// button at the head of the rail are asked the same question — and
+    /// the chrome button matters most, because it is the one that used to
+    /// be placed by a rule of its own (`settings.back_w_frac` against the
+    /// content box) with no idea a bed was under it.
+    ///
+    /// AT EVERY HEIGHT, like its twin above. The air is a THEME LENGTH
+    /// (`@space.4`), so it doubles with the viewport — 10.8 px at 1080p,
+    /// 21.6 at 2160p — while the widths it has to stay inside of scale
+    /// on a different rule (`rail_w_frac` against the content box, under
+    /// two floors in device px). A reader that took the padding once and
+    /// spent it at every scale would pass at 1080p and eat the column
+    /// somewhere else, and a measurement taken at one height could not
+    /// tell.
+    #[test]
+    fn nothing_in_a_navigation_column_touches_the_bed_it_stands_on() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut measured = 0;
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            // Read INSIDE the sweep: the air is a viewport length, so the
+            // number this height was drawn with is the only one that can
+            // judge it.
+            let (pad_x, pad_y) = band_pad();
+            assert!(
+                pad_x > 0.5 && pad_y > 0.5,
+                "at {h}px the theme states no air around a column's bed \
+                 ({pad_x} x {pad_y}) — the fault the owner reported is the \
+                 absence of it"
+            );
+
+            let mut s = furnished();
+            s.view = View::LookFeel;
+            let mut fc = FocusCtl::new();
+            let mut dl = nacelle::draw::DrawList::new();
+            fc.begin_frame();
+            let mut ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            ctx.focus = Some(&mut fc);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            let nav = Panes::of(View::LookFeel, m, content);
+            // Folded there is no bed and nothing stands on one: the
+            // entries are ordinary bands in the flow, which is the
+            // scroll's ground and another test's.
+            if nav.folded {
+                continue;
+            }
+            measured += 1;
+            s.draw(&mut ctx);
+
+            for (name, col_) in [
+                ("rail", nav.rail.expect("no rail")),
+                ("sub", nav.sub.expect("no column of pages")),
+            ] {
+                // The room inside the paint, stated once: the rows box is
+                // the bed less its air, and every side of it is checked,
+                // because a fix that only insets the sides leaves the
+                // owner's other complaint — the heading welded to the top
+                // edge — standing.
+                let (bed, rows) = (col_.bed, col_.rows);
+                for (side, got) in [
+                    ("left", rows.x - bed.x),
+                    ("right", bed.right() - rows.right()),
+                    ("top", rows.y - bed.y),
+                    ("bottom", bed.bottom() - rows.bottom()),
+                ] {
+                    let want =
+                        if side == "left" || side == "right" { pad_x } else { pad_y };
+                    assert!(
+                        got >= want - 0.01,
+                        "at {h}px the {name} column's rows stand {got} px from the \
+                         {side} edge of their bed; the theme asked for {want}"
+                    );
+                }
+                // AND THE FRAME AGREES. Everything the window registered
+                // inside this column — its entries and, for the rail, the
+                // chrome button at its head — stands inside that room.
+                let air = Rect::new(
+                    bed.x + pad_x,
+                    bed.y + pad_y,
+                    bed.w - 2.0 * pad_x,
+                    bed.h - 2.0 * pad_y,
+                );
+                let mut seen = 0;
+                for (r, act) in s.hits.iter() {
+                    if !bed.contains(r.cx(), r.y + r.h / 2.0) {
+                        continue;
+                    }
+                    seen += 1;
+                    // Named by the id the chain knows it as: `Act` has no
+                    // Debug and giving it one drags four more enums with
+                    // it, and the id is the same handle the focus tests
+                    // print.
+                    assert!(
+                        r.x >= air.x - 0.01
+                            && r.right() <= air.right() + 0.01
+                            && r.y >= air.y - 0.01
+                            && r.bottom() <= air.bottom() + 0.01,
+                        "at {h}px a control ({}) in the {name} column is flush with \
+                         the bed it stands on: {:?} against the room {:?}",
+                        focus_id(*act).0,
+                        [r.x, r.y, r.w, r.h],
+                        [air.x, air.y, air.w, air.h]
+                    );
+                }
+                assert!(
+                    seen > 0,
+                    "at {h}px the {name} column registered nothing to measure"
+                );
+            }
+            // THE CHROME BUTTON IS ONE OF THEM, named rather than left to
+            // the sweep: it is the head of the RAIL and the one control
+            // this window used to place against the content box instead.
+            assert!(
+                s.hits.iter().any(|(_, a)| matches!(a, Act::Back | Act::Close)),
+                "at {h}px the frame carried no way out, so the sweep never \
+                 measured it"
+            );
+        }
+        assert!(measured > 0, "no window height in HEIGHTS stands in columns at all");
+        viewport_home();
+    }
+
+    /// THE PAGE FOLLOWS THE BUTTON IT HANGS UNDER. A page's first row
+    /// stands its own lead below the chrome button's row — wherever that
+    /// row is — and where the page leads with the ordinary row gap, it
+    /// stands on the SAME LINE as the rail's first entry.
+    ///
+    /// THE FAULT THIS CATCHES was made by the fix beside it. Moving the
+    /// chrome button onto the rail's bed (`settings.band_pad_y` down from
+    /// the bed's top edge) left [`body_top`] still measuring the page
+    /// from `content.y`, so the room under the button shrank by the whole
+    /// padding — 16.2 px to 5.4 at 1080p on the master — and the first
+    /// rail entry, which had always started on the page's first line,
+    /// dropped `band_pad_y` below it. Two spacing faults introduced by a
+    /// spacing fix, neither of them visible to a test that asked only
+    /// where the beds and the rows boxes were.
+    ///
+    /// BOTH SIDES OF IT ARE ASSERTED. The computed side sweeps every page
+    /// at every height, because `lead` differs page by page and the
+    /// padding is a viewport length; the drawn side takes the frame the
+    /// window really laid at 1080p and compares the rect the CHROME
+    /// BUTTON was registered with against the box the flow was really
+    /// given ([`Flow`]), so a `body_top` that agreed with `Panes` while
+    /// the drawing did something else would still be caught.
+    #[test]
+    fn a_page_starts_its_own_lead_under_the_chrome_row_it_shares_with_the_rail() {
+        let _g = crate::widgets::theme_test_lock();
+        nacelle::theme::clear_preview();
+        let s = furnished();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut lined_up = 0;
+        for h in HEIGHTS {
+            theme::resolved();
+            theme::set_viewport(h, 1.0);
+            let ctx = probe(&mut dl, &mut fonts, h, 1.0);
+            let content = content_rect(modal_rect(ctx.w, ctx.h));
+            let m = Metrics::of(&ctx, content);
+            for p in PAGES.iter() {
+                let nav = Panes::of(p.view, m, content);
+                let top = s.body_box(p, m, content).y;
+                let want = nav.corner.bottom() + m.space(p.lead);
+                assert!(
+                    (top - want).abs() < 0.01,
+                    "{} at {h}px: the body starts {} px under the chrome button \
+                     and the page asked for {}",
+                    p.title,
+                    top - nav.corner.bottom(),
+                    m.space(p.lead)
+                );
+                // ONE LINE, where the two ask for the same gap. The rail
+                // hangs a FIXED row gap under the button ([`Panes::of`]),
+                // so a page that leads with `Gap::Row` and the rail's
+                // first entry are the same line — the alignment the
+                // window has always had and the one the move broke.
+                if let (Some(rail), true) = (nav.rail, p.lead == Gap::Row) {
+                    lined_up += 1;
+                    assert!(
+                        (top - rail.rows.y).abs() < 0.01,
+                        "{} at {h}px: the page's first row stands {} px off the \
+                         rail's first entry",
+                        p.title,
+                        top - rail.rows.y
+                    );
+                }
+            }
+        }
+        assert!(lined_up > 0, "no page in HEIGHTS ever stood beside a rail at all");
+
+        // AND THE FRAME AGREES, read off one real draw: the rect the
+        // chrome button was registered with, against the box the flow was
+        // given.
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        let page = page(View::LookFeel);
+        let mut fc = FocusCtl::new();
+        let mut dl = nacelle::draw::DrawList::new();
+        fc.begin_frame();
+        theme::set_viewport(1080.0, 1.0);
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        ctx.focus = Some(&mut fc);
+        let content = content_rect(modal_rect(ctx.w, ctx.h));
+        let m = Metrics::of(&ctx, content);
+        assert!(
+            !Panes::of(View::LookFeel, m, content).folded,
+            "the window folded at a width it fits in"
+        );
+        s.draw(&mut ctx);
+        let corner = s
+            .hits
+            .iter()
+            .find(|(_, a)| matches!(a, Act::Back | Act::Close))
+            .map(|(r, _)| *r)
+            .expect("the frame carried no way out to measure from");
+        let slack = s.flow.view.y - corner.bottom();
+        assert!(
+            (slack - m.space(page.lead)).abs() < 0.01,
+            "the frame left {slack} px between the chrome button and the page, \
+             where the page's lead is {} px",
+            m.space(page.lead)
+        );
+        viewport_home();
+    }
+
 
     /// The rail shows every section it has, at every window height the
     /// program is built for.
@@ -13318,7 +13812,11 @@ mod tests {
                 let nav = Panes::of(view, m, content);
                 // Folded, the entries are in the flow and the scroll
                 // answers for them — that is the other test's ground.
-                let Some(rail) = nav.rail else { continue };
+                // The ROWS box and not the bed: the bed grew to the whole
+                // column on 2026-08-18, and a rail that fits its PAINT
+                // but not the room inside the paint is still a rail with
+                // sections nobody can reach.
+                let Some(rail) = nav.rail.map(|c| c.rows) else { continue };
                 measured += 1;
                 let want = s.rows_h(&RAIL_ROWS, m, rail);
                 assert!(
@@ -13326,7 +13824,9 @@ mod tests {
                     "at {h}px the rail wants {want} px and has {} px",
                     rail.h
                 );
-                if let (Some(box_), Some(rows)) = (nav.sub, subrail_rows(view)) {
+                if let (Some(box_), Some(rows)) =
+                    (nav.sub.map(|c| c.rows), subrail_rows(view))
+                {
                     let want = s.rows_h(rows, m, box_);
                     assert!(
                         want <= box_.h + 0.01,

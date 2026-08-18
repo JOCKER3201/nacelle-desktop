@@ -109,3 +109,10 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
+
+# TEMPORARY — fleet worktree only, branch fix/settings-columns.
+# The settings-columns fix needs the `settings.band_pad_*` tokens and the
+# one-bed `settings.rail_fill` from the libnacelle branch beside this one.
+# REMOVE before the merge, together with the Cargo.lock pin it produces.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }
