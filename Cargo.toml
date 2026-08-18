@@ -93,19 +93,3 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
-# ------------------------------------------------------------------------
-# TEMPORARY — MUST BE REMOVED BEFORE THIS BRANCH IS MERGED.
-#
-# `fix/column-beds` changes libnacelle and nacelle-desktop together: the
-# settings window's three column beds are declared in libnacelle's master
-# theme (`component.settings.*_fill`, `settings.band_lift`,
-# `settings.band_corner*`) and read by `widgets/settings.rs` here. Until
-# the libnacelle side is merged and this repository's `Cargo.lock` is
-# re-pinned to that commit, the desktop cannot build against the pinned
-# revision at all — it does not carry the tokens.
-#
-# THE ORDER AT MERGE TIME: libnacelle first, then bump the pin in
-# Cargo.lock, then delete this block. A forgotten `[patch]` has already
-# once left a repository in this tree unable to build on its own.
-[patch."https://github.com/JOCKER3201/libnacelle"]
-libnacelle = { path = "../libnacelle" }

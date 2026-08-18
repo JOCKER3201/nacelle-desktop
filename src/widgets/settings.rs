@@ -10347,12 +10347,12 @@ mod tests {
             assert!(
                 s.hits.iter().any(|&(_, a)| a == Act::ListBtn(list)),
                 "the BASIC page drew no {} anchor",
-                list.label()
+                list.label(&s)
             );
             assert!(
                 s.current_row(list).is_some(),
                 "the {} list opened on {:?}, which is not one of {:?}",
-                list.label(),
+                list.label(&s),
                 s.current_of(list),
                 s.names(list)
             );
@@ -10397,12 +10397,12 @@ mod tests {
                 .iter()
                 .find(|&&(_, a)| a == Act::ListBtn(list))
                 .map(|&(r, _)| r)
-                .unwrap_or_else(|| panic!("the BASIC page drew no {} anchor", list.label()));
+                .unwrap_or_else(|| panic!("the BASIC page drew no {} anchor", list.label(&s)));
             s.click(anchor.cx(), anchor.y + anchor.h / 2.0, w, h, None);
             assert!(
                 matches!(s.dropdown, Some(Dropdown::List(l)) if l == list),
                 "the {} anchor did not open its list",
-                list.label()
+                list.label(&s)
             );
             // A second frame: the list is drawn and its rows registered.
             let mut dl2 = nacelle::draw::DrawList::new();
@@ -10419,19 +10419,19 @@ mod tests {
                 .find(|&&(_, a)| a == Act::Pick(list, i))
                 .map(|&(r, _)| r)
                 .unwrap_or_else(|| {
-                    panic!("the open {} list registered no row {i}", list.label())
+                    panic!("the open {} list registered no row {i}", list.label(&s))
                 });
             assert!(
                 !s.click(row.cx(), row.y + row.h / 2.0, w, h, None),
                 "a {} pick reported a configuration change — main will reload \
                  the theme and erase the preview the pick just set",
-                list.label()
+                list.label(&s)
             );
             assert_eq!(
                 s.current_of(list),
                 Some(&want),
                 "the {} pick did not set the kind",
-                list.label()
+                list.label(&s)
             );
         }
     }
@@ -12384,7 +12384,7 @@ mod tests {
                                     }
                                     Ctrl::Chips { label, values, .. } => {
                                         segments += 1;
-                                        let first = chip_rects(values.len(), rc);
+                                        let first = chip_rects(values(&s).len(), rc);
                                         let first =
                                             first.first().expect("a row of no segments");
                                         Some((label, first.x))
