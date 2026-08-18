@@ -333,9 +333,8 @@ impl Dispatch<WpColorManagerV1, ()> for State {
     }
 }
 
-/// What one event from an image description says about its fate: `Ok`
-/// for ready, `Err(reason)` for failed, `None` for anything that is not
-/// about the fate at all.
+/// The fate of an image description, written into the state the
+/// roundtrips in [`ColorMgr::apply_space`] are waiting on.
 ///
 /// **BOTH ready events, and this is the whole bug.** The protocol has
 /// two: `ready` carries a 32-bit identity and `ready2` a 64-bit one, and
@@ -350,18 +349,14 @@ impl Dispatch<WpColorManagerV1, ()> for State {
 /// was. That is the "changing HDR and the colour space does nothing"
 /// the owner reported: not a wrong picture, no picture at all.
 ///
-/// A free function because it is the only part of this module a test can
-/// reach. Everything else here needs a compositor on the other end of a
-/// socket; this needs an event, and an event is data.
-fn desc_outcome(event: &wp_image_description_v1::Event) -> Option<Result<(), String>> {
-    use wp_image_description_v1::Event;
-    match event {
-        Event::Ready { .. } | Event::Ready2 { .. } => Some(Ok(())),
-        Event::Failed { msg, .. } => Some(Err(msg.clone())),
-        _ => None,
-    }
-}
-
+/// The match sits HERE, in the handler itself, and not in a pure helper
+/// beside it. A helper would be the easier thing to test and would test
+/// the wrong thing: the bug was never in a table of events, it was in
+/// this handler being deaf, and a test that reads a helper would pass
+/// with the handler put back the way it was. The three arguments this
+/// body ignores are the reason it looked untestable — a proxy, a
+/// connection and a queue handle — and none of them needs a compositor:
+/// a socket pair and a null object id make all three (see the tests).
 impl Dispatch<WpImageDescriptionV1, ()> for State {
     fn event(
         state: &mut Self,
@@ -371,13 +366,14 @@ impl Dispatch<WpImageDescriptionV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        match desc_outcome(&event) {
-            Some(Ok(())) => state.desc_done = Some(true),
-            Some(Err(msg)) => {
+        use wp_image_description_v1::Event;
+        match event {
+            Event::Ready { .. } | Event::Ready2 { .. } => state.desc_done = Some(true),
+            Event::Failed { msg, .. } => {
                 state.desc_done = Some(false);
                 state.desc_error = Some(msg);
             }
-            None => {}
+            _ => {}
         }
     }
 }
@@ -420,8 +416,58 @@ impl Dispatch<WpImageDescriptionCreatorIccV1, ()> for State {
 
 #[cfg(test)]
 mod tests {
-    use super::{desc_outcome, preset};
+    use super::*;
+    use std::os::unix::net::UnixStream;
     use wayland_protocols::wp::color_management::v1::client::wp_image_description_v1 as desc;
+
+    /// Everything the description handler is handed and does not look
+    /// at: a proxy, a connection and a queue handle. None of it needs a
+    /// compositor.
+    ///
+    /// A SOCKET PAIR AND A NULL ID, and both halves are deliberate.
+    /// `Connection::from_socket` performs no handshake — the display
+    /// object is made on this side — so the far end of the pair is never
+    /// written to and never read; it is held open only so the near end
+    /// is not a hung-up socket. And `Proxy::from_id` accepts the null id
+    /// by design (`!same_interface(..) && !id.is_null()`), which is what
+    /// makes a proxy without a server possible at all.
+    ///
+    /// This is the difference between testing the fix and testing a
+    /// paraphrase of it: the assertions below run THE HANDLER, so the
+    /// handler going deaf again is a failure and not a silent
+    /// regression.
+    struct Wire {
+        conn: Connection,
+        _queue: EventQueue<State>,
+        qh: QueueHandle<State>,
+        desc: WpImageDescriptionV1,
+        _far_end: UnixStream,
+    }
+
+    impl Wire {
+        fn new() -> Wire {
+            let (near, far) = UnixStream::pair().expect("a socket pair");
+            let conn = Connection::from_socket(near).expect("a connection to nobody");
+            let queue: EventQueue<State> = conn.new_event_queue();
+            let qh = queue.handle();
+            let desc = WpImageDescriptionV1::from_id(&conn, ObjectId::null())
+                .expect("a null proxy");
+            Wire { conn, _queue: queue, qh, desc, _far_end: far }
+        }
+
+        /// One event through `Dispatch::event`, exactly as the queue
+        /// would deliver it.
+        fn deliver(&self, state: &mut State, event: desc::Event) {
+            <State as Dispatch<WpImageDescriptionV1, ()>>::event(
+                state,
+                &self.desc,
+                event,
+                &(),
+                &self.conn,
+                &self.qh,
+            );
+        }
+    }
 
     /// **Every space the window offers can be turned into a request.**
     ///
@@ -460,32 +506,77 @@ mod tests {
         }
     }
 
-    /// **A compositor speaking version 2 or later says `ready2`, and it
-    /// has to count.**
+    /// **A compositor speaking version 2 or later says `ready2`, and the
+    /// handler has to hear it.**
     ///
-    /// This is the regression the owner reported. Nothing about it is
-    /// visible from the outside: the description IS built, the compositor
-    /// DOES answer, and the answer is thrown away — so the picture stays
-    /// as it was and every control on the page keeps its new mark.
+    /// This is the regression the owner reported, and it is measured
+    /// where it lived: the event goes through `Dispatch::event` and the
+    /// assertion is on `State`, the same field `apply_space` reads after
+    /// its roundtrips. Nothing about the bug is visible from the outside
+    /// — the description IS built, the compositor DOES answer, and the
+    /// answer is dropped on the floor — so the picture stays as it was
+    /// while every control on the page keeps its new mark.
+    ///
+    /// Both ready events, because a version-1 compositor still says the
+    /// old one and the fix must not trade one deafness for another.
     #[test]
-    fn both_ready_events_mean_ready_and_failed_carries_its_reason() {
+    fn the_handler_hears_both_ready_events() {
+        let wire = Wire::new();
+
+        let mut old = State::default();
+        wire.deliver(&mut old, desc::Event::Ready { identity: 7 });
         assert_eq!(
-            desc_outcome(&desc::Event::Ready { identity: 7 }),
-            Some(Ok(())),
+            old.desc_done,
+            Some(true),
             "a version-1 compositor's answer stopped counting"
         );
-        assert_eq!(
-            desc_outcome(&desc::Event::Ready2 { identity_hi: 0, identity_lo: 7 }),
-            Some(Ok(())),
-            "a version-2 compositor's answer was not heard — the colour \
-             space is built, accepted, and never set on the surface"
+
+        let mut new = State::default();
+        wire.deliver(
+            &mut new,
+            desc::Event::Ready2 { identity_hi: 0, identity_lo: 7 },
         );
         assert_eq!(
-            desc_outcome(&desc::Event::Failed {
+            new.desc_done,
+            Some(true),
+            "a version-2 compositor's answer was not heard — the colour \
+             space is built, accepted, and never set on the surface, which \
+             is exactly what the owner saw"
+        );
+    }
+
+    /// **A refusal carries the compositor's own words, and silence is a
+    /// third thing.**
+    ///
+    /// Three outcomes and not two: ready, refused, and never answered
+    /// for. `apply_space` tells them apart to write three different
+    /// lines under the SPACE list — "in force", "the compositor refused
+    /// X: <its words>", "no answer about X" — so a state nobody has told
+    /// must stay `None`, and a refusal must arrive with its message
+    /// intact. Dropping the message would leave the page saying "refused
+    /// … no reason given" over a compositor that gave one.
+    #[test]
+    fn a_refusal_reaches_the_state_with_its_reason() {
+        let wire = Wire::new();
+
+        let untold = State::default();
+        assert_eq!(
+            untold.desc_done, None,
+            "silence has to be its own answer, not a refusal"
+        );
+
+        let mut refused = State::default();
+        wire.deliver(
+            &mut refused,
+            desc::Event::Failed {
                 cause: wayland_client::WEnum::Value(desc::Cause::Unsupported),
-                msg: "no".to_string(),
-            }),
-            Some(Err("no".to_string())),
+                msg: "no such transfer function".to_string(),
+            },
+        );
+        assert_eq!(refused.desc_done, Some(false), "a refusal read as a success");
+        assert_eq!(
+            refused.desc_error.as_deref(),
+            Some("no such transfer function"),
             "a refusal must carry the compositor's own words to the window"
         );
     }

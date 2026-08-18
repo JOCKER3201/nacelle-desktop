@@ -648,8 +648,27 @@ pub fn color_depths(hdr: bool) -> &'static [u32] {
     &COLOR_DEPTHS[cut..]
 }
 
-/// The colour pipeline: a Wayland-session matter throughout — read,
-/// shown and applied only there.
+/// The colour pipeline — and it has TWO addressees, not one.
+///
+/// [`ColorConf::depth`] and [`ColorConf::lut`] are the RENDERER's: a
+/// swapchain format and a 3D texture, neither of which any compositor is
+/// asked about, so both apply in EVERY session — under gamescope, under
+/// X11, under a Wayland compositor that has never heard of colour
+/// management. [`ColorConf::space`] and [`ColorConf::icc`] are the
+/// compositor's, over the Color Management protocol, and exist only in a
+/// native Wayland session that announces it (`wl_color.rs`).
+///
+/// This whole struct used to be described as the second kind, and the
+/// application matched the description: `apply_color!` sat inside `if
+/// let Some(mgr)`, so a missing Wayland global threw away the depth and
+/// the LUT along with the space. A `depth: 10` was read, parsed and
+/// validated by [`ColorConf::depth`] — and then reached no swapchain,
+/// with nothing anywhere saying so. Split apart 2026-08-18; the two
+/// halves are applied separately in `main.rs`.
+///
+/// The visible consequence, worth knowing before changing it back: a
+/// file that says `depth: 16` now rebuilds a swapchain in sessions where
+/// it used to be silently ignored.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorConf {

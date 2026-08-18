@@ -729,11 +729,15 @@ fn main() {
                 sc.set_color_depth(prefs.depth);
                 sc.set_lut(lut.clone());
             }
-            // What the swapchain was ASKED for. What it gave is read off
-            // the renderer a frame later, once the rebuild has happened
-            // (`Gfx::color_depth`), and the page shows both.
-            settings.color_depth_asked = prefs.depth;
-            settings.color_status = match color_mgr.as_mut() {
+            // What the swapchain was ASKED for — and, in the same call,
+            // the standing measurement thrown away when the number
+            // moved. It is read back after a frame has been DRAWN, which
+            // is the earliest moment the rebuild has happened; until
+            // then the window would be holding a new wish beside an old
+            // measurement, which is a sentence about a swapchain nobody
+            // asked yet (`Settings::color_asked`).
+            settings.color_asked(prefs.depth);
+            settings.color_answered(match color_mgr.as_mut() {
                 Some(mgr) => {
                     let icc = prefs
                         .icc
@@ -747,7 +751,7 @@ fn main() {
                 // by other roads (a restored view, a later relaxation of
                 // that rule) and a blank line would read as "fine".
                 None => "this compositor does not announce colour management".to_string(),
-            };
+            });
         }};
     }
 
@@ -2870,19 +2874,6 @@ fn main() {
                         // The application's own interface is drawn on
                         // ONE screen — the one the hand is on.
                         let hosts_ui = si == ui_screen;
-                        // What the swapchain GAVE, as against what the
-                        // page asked for. Read here rather than where
-                        // the depth is set, because the format moves at
-                        // the rebuild and the rebuild happens inside the
-                        // next `render` — asked in the same breath as it
-                        // is set, the renderer would truthfully answer
-                        // with the depth that is on its way out. Of the
-                        // screen ABOUT TO DRAW the page, so what the
-                        // number describes is the picture being looked
-                        // at and not another monitor's.
-                        if hosts_ui {
-                            settings.color_depth_now = screens[si].color_depth();
-                        }
                         let (grid_now, drained) = draw_screen(
                             &mut screens[si],
                             &mut fonts,
@@ -2900,6 +2891,24 @@ fn main() {
                             // that always exists.
                             si == 0,
                         );
+                        // What the swapchain GAVE, as against what the
+                        // page asked for.
+                        //
+                        // AFTER THE DRAW, and that is the whole of it:
+                        // `set_color_depth` only arms a rebuild, and the
+                        // rebuild happens inside `render`, which is
+                        // inside the call above. Asked before it, the
+                        // renderer answers truthfully with the format on
+                        // its way out — and the page would put "the
+                        // surface offers no more" under a swapchain that
+                        // had not been asked yet, for as long as it took
+                        // something to redraw the page. Of the screen
+                        // that just DREW the page, so the number
+                        // describes the picture being looked at and not
+                        // another monitor's.
+                        if hosts_ui {
+                            settings.color_measured(screens[si].color_depth());
+                        }
                         drop(snap_held);
                         // Every other screen's renderer holds its own
                         // copy of the glyph atlas; whatever this frame
