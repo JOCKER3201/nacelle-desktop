@@ -514,18 +514,139 @@ impl GridConf {
     }
 }
 
-/// The colour spaces the COLOR view offers, in display order. Names
-/// map to the Color Management protocol's named primaries + transfer
-/// function pairs in the application.
-pub const COLOR_SPACES: [&str; 7] = [
-    "auto",
-    "srgb",
-    "display p3",
-    "adobe rgb",
-    "bt2020 pq",
-    "bt2020 hlg",
-    "scrgb linear",
+/// The dynamic range a colour space asks the display for.
+///
+/// The COLOR view offers ONE list of spaces and the HDR switch decides
+/// which half of the table it holds, so the half a space belongs to is
+/// part of the space's own record and not a second table written out
+/// beside it: a space added to [`COLOR_SPACE_TABLE`] cannot go missing
+/// from an offer, because the row does not compile without saying which
+/// offer it stands in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpaceRange {
+    /// A standard-range space: the offer the switch shows when it is off.
+    Sdr,
+    /// A high-range space: the offer the switch shows when it is on.
+    Hdr,
+    /// Neither, and therefore both. Only "auto", which names no space at
+    /// all — it hands the choice back to the compositor — so it is never
+    /// the wrong one to be looking at and stands in both offers.
+    Either,
+}
+
+impl SpaceRange {
+    /// Whether a space of this range stands in the offer the switch is
+    /// showing.
+    pub const fn in_offer(self, hdr: bool) -> bool {
+        match self {
+            SpaceRange::Either => true,
+            SpaceRange::Sdr => !hdr,
+            SpaceRange::Hdr => hdr,
+        }
+    }
+}
+
+/// The colour spaces the COLOR view offers, in display order, each with
+/// the dynamic range it asks for. Names map to the Color Management
+/// protocol's named primaries + transfer function pairs in the
+/// application.
+///
+/// THE one statement of the split. Both offers are read off this table
+/// ([`color_spaces`]) and so is the switch's own state
+/// ([`space_range`]); nothing anywhere lists three names of its own.
+pub const COLOR_SPACE_TABLE: [(&str, SpaceRange); 7] = [
+    ("auto", SpaceRange::Either),
+    ("srgb", SpaceRange::Sdr),
+    ("display p3", SpaceRange::Sdr),
+    ("adobe rgb", SpaceRange::Sdr),
+    // ST 2084 is the display's own curve; HLG is a broadcast one and
+    // scRGB linear is a compositing space — all three are high range,
+    // and which of them a switch should reach for is the settings
+    // window's business, not this table's.
+    ("bt2020 pq", SpaceRange::Hdr),
+    ("bt2020 hlg", SpaceRange::Hdr),
+    ("scrgb linear", SpaceRange::Hdr),
 ];
+
+/// Every name the table holds, in the same order — what a written value
+/// is validated against, which is a question about the whole vocabulary
+/// and not about either offer. DERIVED, so it cannot fall behind.
+pub const COLOR_SPACES: [&str; COLOR_SPACE_TABLE.len()] = {
+    let mut out = [""; COLOR_SPACE_TABLE.len()];
+    let mut i = 0;
+    while i < COLOR_SPACE_TABLE.len() {
+        out[i] = COLOR_SPACE_TABLE[i].0;
+        i += 1;
+    }
+    out
+};
+
+/// The range a name asks for. A name from outside the table asks for
+/// nothing this program knows — and cannot reach here from the
+/// configuration, because [`ColorConf::space`] has already turned such a
+/// name into "auto".
+pub fn space_range(name: &str) -> SpaceRange {
+    COLOR_SPACE_TABLE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, r)| r)
+        .unwrap_or(SpaceRange::Either)
+}
+
+/// The names ONE offer holds, in the table's display order.
+pub fn color_spaces(hdr: bool) -> Vec<&'static str> {
+    COLOR_SPACE_TABLE
+        .iter()
+        .filter(|(_, r)| r.in_offer(hdr))
+        .map(|&(n, _)| n)
+        .collect()
+}
+
+/// Every bit depth the swapchain may be asked for, ASCENDING — which is
+/// what makes an offer a slice of this and not a second list.
+///
+/// Twelve rides in sixteen-bit float buffers (Vulkan has no twelve-bit
+/// swapchain format) and what the wire carries is between the compositor
+/// and the display; the numbers here are what the program asks for.
+pub const COLOR_DEPTHS: [u32; 4] = [8, 10, 12, 16];
+
+impl SpaceRange {
+    /// The fewest bits a picture of this range can be given in.
+    ///
+    /// ST 2084 spends its code points over a range eight bits has no
+    /// steps for, so eight-bit PQ bands visibly — and neither the
+    /// settings window nor the swapchain has anywhere to say so. THE
+    /// ONE STATEMENT of that floor: the COLOR page takes its depth offer
+    /// from it ([`color_depths`]) and so does the reading of the
+    /// configuration ([`ColorConf::depth`]), which is why a file cannot
+    /// hand the two of them different answers.
+    ///
+    /// "auto" ([`SpaceRange::Either`]) names no space at all and asks
+    /// the compositor for nothing in particular, so it carries the
+    /// standard floor: which range a window showing "auto" stands on is
+    /// the switch's business, not the name's.
+    pub const fn depth_floor(self) -> u32 {
+        match self {
+            SpaceRange::Hdr => HDR_DEPTH_FLOOR,
+            _ => COLOR_DEPTHS[0],
+        }
+    }
+}
+
+/// Ten bits, and the reason is in [`SpaceRange::depth_floor`].
+const HDR_DEPTH_FLOOR: u32 = 10;
+
+/// The depths ONE offer holds. A floor cuts a prefix off an ascending
+/// table, so an offer is a slice of [`COLOR_DEPTHS`] rather than a
+/// second list that could fall behind it.
+pub fn color_depths(hdr: bool) -> &'static [u32] {
+    let floor = if hdr { SpaceRange::Hdr } else { SpaceRange::Sdr }.depth_floor();
+    let cut = COLOR_DEPTHS
+        .iter()
+        .position(|&d| d >= floor)
+        .unwrap_or(COLOR_DEPTHS.len());
+    &COLOR_DEPTHS[cut..]
+}
 
 /// The colour pipeline: a Wayland-session matter throughout — read,
 /// shown and applied only there.
@@ -570,12 +691,27 @@ impl ColorConf {
     /// Leave the compositor's own choice in place.
     pub const SPACE: &'static str = "auto";
 
-    /// Twelve rides in sixteen-bit float buffers — Vulkan has no
-    /// twelve-bit swapchain format — and what the wire carries is
-    /// between the compositor and the display. A depth this program
-    /// cannot ask for is not a reason to fail to start.
+    /// The depth to ask the swapchain for — READ AGAINST THE SPACE
+    /// BESIDE IT, because the two are one statement and the file writes
+    /// them as two lines.
+    ///
+    /// A depth this program cannot ask for is not a reason to fail to
+    /// start, so an unknown number falls back to [`ColorConf::DEPTH`].
+    /// And a legal number can still be the wrong one FOR THE SPACE THIS
+    /// FILE NAMES: `depth: 8` with `space: "bt2020 pq"` passes any test
+    /// either field can make alone, and asks for a picture that bands
+    /// (`SpaceRange::depth_floor`). This is the place that can rule on
+    /// the pair — both fields are here — and it is the reason there is
+    /// no `hdr` field for the file to contradict the space with: the
+    /// range is READ OFF the space, and the depth is raised to what that
+    /// range needs. The settings window and the swapchain read through
+    /// this one method, so neither can be handed the banded picture.
+    ///
+    /// It raises and never lowers: a depth is a floor to meet, and what
+    /// the user wrote above it is theirs.
     pub fn depth(&self) -> u32 {
-        self.depth.filter(|d| matches!(d, 8 | 10 | 12 | 16)).unwrap_or(Self::DEPTH)
+        let bits = self.depth.filter(|d| COLOR_DEPTHS.contains(d)).unwrap_or(Self::DEPTH);
+        bits.max(space_range(&self.space()).depth_floor())
     }
 
     /// A name the application can actually turn into primaries and a

@@ -353,7 +353,10 @@ enum Act {
     BlurRadiusTrack,
     BlurOpacityTrack,
     ColorDepth(u32),
-    ColorSpaceNext,
+    /// COLOR's HDR switch. It persists NOTHING of its own: what it
+    /// writes is a colour space, and "HDR is on" is read back off that
+    /// space. See [`Settings::flip_hdr`] for the whole of it.
+    ColorHdr,
     ColorLutNext,
     ColorIccNext,
     BoardGo((i32, i32)),
@@ -556,6 +559,10 @@ fn focus_id(act: Act) -> FocusId {
             ListId::RingStyles => "settings.editor.ring.style",
             ListId::ScrollModes => "settings.editor.scrollbar.mode",
             ListId::ScrollEdges => "settings.editor.scrollbar.edge",
+            // ONE id across the switch, deliberately: the anchor keeps
+            // its place in the Tab round when HDR turns, because it is
+            // the same control wearing a different word.
+            ListId::Spaces => "settings.color.space",
         }),
         // A name's row is its index, with nothing added: the list
         // object is handed the names alone, so `base.item(i)` is what
@@ -570,7 +577,7 @@ fn focus_id(act: Act) -> FocusId {
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
         BlurOpacityTrack => FocusId::of("settings.blur.opacity"),
         ColorDepth(bits) => FocusId::of("settings.color.depth").item(bits as usize),
-        ColorSpaceNext => FocusId::of("settings.color.space"),
+        ColorHdr => FocusId::of("settings.color.hdr"),
         ColorLutNext => FocusId::of("settings.color.lut"),
         ColorIccNext => FocusId::of("settings.color.icc"),
         BoardGo(k) => board_id("settings.boards.go", k),
@@ -622,6 +629,7 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::RingStyles) => "settings.editor.ring.style.list",
         Dropdown::List(ListId::ScrollModes) => "settings.editor.scrollbar.mode.list",
         Dropdown::List(ListId::ScrollEdges) => "settings.editor.scrollbar.edge.list",
+        Dropdown::List(ListId::Spaces) => "settings.color.space.list",
     })
 }
 
@@ -1213,7 +1221,7 @@ impl Unit {
 /// the word its anchor wears, what it carries in front of those names
 /// and the words for "there are none" are all one decision, so they are
 /// one value.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ListId {
     Looks,
     Layauts,
@@ -1237,6 +1245,14 @@ enum ListId {
     ScrollModes,
     /// Which side of the content the bar sits on (`scrollbar.edge`).
     ScrollEdges,
+    /// COLOR's colour space. The one list in the window whose NAME and
+    /// whose CONTENTS both move: the HDR switch under it turns SPACE
+    /// into SPACE HDR and swaps the half of `config::COLOR_SPACE_TABLE`
+    /// it offers. ONE list and not two rows — the owner's rule is that
+    /// SPACE and SPACE HDR may never stand on the screen together, and
+    /// a hidden row beside a shown one is exactly the arrangement where
+    /// they could.
+    Spaces,
 }
 
 /// §5.10's severity roles in declaration order: the name the list offers,
@@ -1262,7 +1278,14 @@ const EDITOR_ROW: &str = "THEMES EDITOR";
 
 impl ListId {
     /// The word its anchor wears — the whole of it (decision §2b).
-    fn label(self) -> &'static str {
+    ///
+    /// A QUESTION put to the window and no longer a property of the
+    /// identity alone, because one list's word is not one word: COLOR's
+    /// SPACE wears SPACE HDR while the switch under it is on. The list
+    /// is the SAME list either way — same `ListId`, same focus id, same
+    /// anchor rect — and that is the point of asking here rather than
+    /// describing a second row that would sometimes be hidden.
+    fn label(self, s: &Settings) -> &'static str {
         match self {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
@@ -1280,6 +1303,8 @@ impl ListId {
             ListId::RingStyles => "RING STYLE",
             ListId::ScrollModes => "SCROLLBAR MODE",
             ListId::ScrollEdges => "SCROLLBAR EDGE",
+            ListId::Spaces if s.color_hdr => "SPACE HDR",
+            ListId::Spaces => "SPACE",
         }
     }
 
@@ -1298,6 +1323,11 @@ impl ListId {
             ListId::RingStyles => "NO RING STYLES",
             ListId::ScrollModes => "NO SCROLLBAR MODES",
             ListId::ScrollEdges => "NO SCROLLBAR EDGES",
+            // Reachable, unlike the built-in sets above: a compositor
+            // that offers none of the spaces this program can name
+            // leaves the list holding nothing. The switch is gone by
+            // then, so this is the standard-range side saying so.
+            ListId::Spaces => "NO COLOUR SPACES",
         }
     }
 
@@ -1342,15 +1372,25 @@ enum Ctrl {
         /// Writes the value to nacelle-desktop.ron.
         save: fn(&Settings),
     },
-    /// A row of fixed segments, one of them on: COLOR's DEPTH.
+    /// A row of segments, one of them on: COLOR's DEPTH.
+    ///
+    /// `values` is a QUESTION and not a table, for the reason
+    /// [`Ctrl::Slider`]'s `step` is one: the set on offer is not the
+    /// same set in every state of the page. Eight bits is not among the
+    /// depths while HDR is on ([`Settings::flip_hdr`] says why), and a
+    /// segment that cannot give a good picture is not shown greyed —
+    /// what the machine cannot do is not on the screen.
     Chips {
         label: &'static str,
-        values: &'static [u32],
+        values: fn(&Settings) -> &'static [u32],
         get: fn(&Settings) -> u32,
         act: fn(u32) -> Act,
     },
-    /// A value that steps to the next on every press: COLOR's SPACE,
-    /// LUT and ICC.
+    /// A value that steps to the next on every press: COLOR's LUT and
+    /// ICC, and the theme editor's BASIC/ADVANCED. SPACE was one of
+    /// these until it grew a second offer — a cycler cannot say which
+    /// of two sets it is stepping through, and the HDR switch needs a
+    /// control that can ([`Ctrl::Drop`]).
     Cycle { label: &'static str, get: fn(&Settings) -> String, act: Act },
     /// One of LOOK AND FEEL's three lists: an anchor wearing the LIST'S
     /// OWN NAME (decision §2b), and the list itself unfolding from its
@@ -3114,23 +3154,60 @@ static BOARDS_HINT: [Row; 1] = [row(Ctrl::Hint {
     text: Text::Fixed("HOLD THE LEFT BUTTON AND DRAG TO SWITCH BOARDS"),
 })];
 
-/// What the swapchain is asked for: its depth and the space it is asked
-/// in. The two are one question and stand together (§2 of the screen
-/// decision — DEPTH and SPACE are not to be separated), which is why
-/// they are one column and not two rows of a wider one.
-static COLOR_SWAPCHAIN_ROWS: [Row; 2] = [
+/// What the swapchain is asked for: its depth, the space it is asked in
+/// and the range that space is of. The three are one question and stand
+/// together (§2 of the screen decision — DEPTH and SPACE are not to be
+/// separated), which is why they are one column and not three rows of a
+/// wider one. The range is last because it is a statement ABOUT the list
+/// above it, and because turning it changes both of the other two.
+static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
     row(Ctrl::Chips {
         label: "DEPTH",
-        values: &[8, 10, 12, 16],
+        values: depth_values,
         get: |s| s.color_depth,
         act: Act::ColorDepth,
     }),
-    row(Ctrl::Cycle {
-        label: "SPACE",
-        get: |s| s.color_space.clone(),
-        act: Act::ColorSpaceNext,
-    }),
+    // ONE list, whatever the switch under it says. Its word and its
+    // members both come from the window's state, so SPACE and SPACE HDR
+    // are two readings of this row and never two rows.
+    row(Ctrl::Drop { list: ListId::Spaces }),
+    // And the switch itself, UNDER the list it turns, so the eye reads
+    // "these spaces, and the range they are for" in that order.
+    // `row_shown` and not `row_when`: a compositor that cannot be asked
+    // for a single high-range space is a machine with no HDR on it, and
+    // the screen decision forbids a grey ghost offered "just in case".
+    row_shown(
+        Ctrl::Toggle { label: "HDR", get: |s| s.color_hdr, act: Act::ColorHdr },
+        hdr_possible,
+    ),
 ];
+
+/// The depths the swapchain may be asked for, and the whole of that
+/// question ([`Ctrl::Chips`]).
+///
+/// Eight bits is missing from the HDR offer. PQ spends its code points
+/// on a range eight bits does not have, so eight-bit HDR bands visibly
+/// — and this page has no way to say so: it carries no warning control,
+/// only a fixed note about where the LUT and ICC files live. The owner's
+/// rule settles it (`decyzja-ustawienia-ekranu.md`): what cannot give a
+/// picture is not on the screen.
+///
+/// The floor itself is the MODEL's (`SpaceRange::depth_floor`), not this
+/// page's. The configuration is read through the same statement, so a
+/// depth the page will not offer is also a depth the swapchain will not
+/// be asked for, however the file arrived at it.
+fn depth_values(s: &Settings) -> &'static [u32] {
+    config::color_depths(s.color_hdr)
+}
+
+/// Whether this machine can be asked for high dynamic range at all: at
+/// least one space of the table's HDR half survived the compositor's
+/// report of what it offers. When none did, the switch IS NOT THERE.
+fn hdr_possible(s: &Settings) -> bool {
+    config::COLOR_SPACE_TABLE
+        .iter()
+        .any(|&(n, r)| r == config::SpaceRange::Hdr && s.space_offered(n))
+}
 
 /// The files that grade what the swapchain produced, and where they are
 /// read from. A different subject from the column beside it: those are
@@ -3949,6 +4026,39 @@ pub struct Settings {
     pub blur_dirty: bool,
     color_depth: u32,
     color_space: String,
+    /// Which half of `config::COLOR_SPACE_TABLE` the SPACE list is
+    /// offering, which is also what the HDR switch shows.
+    ///
+    /// NOT a setting and not written anywhere: the configuration names
+    /// a colour space and nothing else, and `bt2020 pq` in the file IS
+    /// this being on. It is a field only because the file cannot say
+    /// which side "auto" belongs to — "auto" belongs to both — so
+    /// somebody has to remember which half the user is looking at while
+    /// they look at it. Every other name settles it on sight
+    /// ([`Settings::set_space`]).
+    color_hdr: bool,
+    /// The names the SPACE list is offering right now, rebuilt whenever
+    /// the switch turns or the compositor's report arrives. Held as a
+    /// field because [`Settings::names`] answers with a reference into
+    /// the window, the way every other list does.
+    color_spaces: Vec<String>,
+    /// The colour spaces THIS compositor said it can be asked for, or
+    /// None while nobody has said — no colour manager, or a window
+    /// under test. None is not "none of them": a window that has not
+    /// been told has learnt nothing, and offers the whole table, which
+    /// is what it did before it could ask at all.
+    color_supported: Option<Vec<String>>,
+    /// The space last standing on each side of the switch, so a trip
+    /// across and back is not a trip to the default. Window state and
+    /// not configuration: after a restart the file is the only memory
+    /// there is, and it says "auto".
+    last_sdr: Option<String>,
+    last_hdr: Option<String>,
+    /// The depth the HDR switch RAISED, kept so that turning HDR off
+    /// gives back what turning it on took — and nothing else. Cleared
+    /// the moment the user presses a depth themselves, because a depth
+    /// they chose is theirs and must survive the switch.
+    depth_before_hdr: Option<u32>,
     color_lut: Option<String>,
     color_icc: Option<String>,
     color_luts: Vec<String>,
@@ -4150,6 +4260,19 @@ impl Settings {
             blur_dirty: false,
             color_depth: 8,
             color_space: "auto".to_string(),
+            // The standard-range half, matching the "auto" above: a
+            // window that has read nothing is a window nobody has asked
+            // for high range. `set_space` holds the three in step from
+            // here on.
+            color_hdr: false,
+            color_spaces: config::color_spaces(false)
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            color_supported: None,
+            last_sdr: None,
+            last_hdr: None,
+            depth_before_hdr: None,
             color_lut: None,
             color_icc: None,
             color_luts: Vec::new(),
@@ -5250,6 +5373,10 @@ impl Settings {
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
             // The editor's switches speak toggle, like every other switch.
             Act::EditorFlip(_) => {}
+            // And COLOR's, which is a switch whatever it goes on to
+            // write: a press that clicked AND toggled would be the only
+            // one in the window that made two sounds.
+            Act::ColorHdr => {}
             Act::VolumeTrack => {}
             Act::Pick(..) => {}
             _ => emit(Sfx::Click),
@@ -5422,6 +5549,18 @@ impl Settings {
                             emit(Sfx::Theme);
                             return false;
                         }
+                        // Not a theme: it writes its config line at once,
+                        // like the depth chips beside it, and answers
+                        // FALSE because nothing about the THEME changed
+                        // — true is main's word for "re-resolve the
+                        // theme", and a swapchain is not a theme.
+                        ListId::Spaces => {
+                            self.set_space(&name);
+                            config::set_color_space(&self.color_space);
+                            self.color_dirty = true;
+                            emit(Sfx::Click);
+                            return false;
+                        }
                     }
                     self.refresh_current();
                     emit(Sfx::Theme);
@@ -5518,30 +5657,30 @@ impl Settings {
             }
             Act::OpenColor => {
                 if self.color_enabled {
-                    let prefs = config::color_prefs();
-                    self.color_depth = prefs.depth;
-                    self.color_space = prefs.space;
-                    self.color_lut = prefs.lut;
-                    self.color_icc = prefs.icc;
+                    self.seed_color(config::color_prefs());
                     self.color_luts = config::color_files("lut", &[".cube"]);
                     self.color_iccs = config::color_files("icc", &[".icc", ".icm"]);
                     self.go(View::Color);
                 }
             }
             Act::ColorDepth(bits) => {
-                self.color_depth = bits;
+                self.set_depth(bits);
                 config::set_color_depth(bits);
                 self.color_dirty = true;
             }
-            Act::ColorSpaceNext => {
-                let list = config::COLOR_SPACES;
-                let i = list
-                    .iter()
-                    .position(|s| *s == self.color_space)
-                    .unwrap_or(0);
-                self.color_space = list[(i + 1) % list.len()].to_string();
+            // The switch turns the window's state ([`Settings::flip_hdr`]
+            // holds the whole decision); this writes what came of it. The
+            // depth line is written only when the flip actually moved the
+            // depth — a press that leaves it alone leaves the file alone
+            // too, rather than writing out a number nobody chose.
+            Act::ColorHdr => {
+                let depth_moved = self.flip_hdr();
                 config::set_color_space(&self.color_space);
+                if depth_moved {
+                    config::set_color_depth(self.color_depth);
+                }
                 self.color_dirty = true;
+                emit(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
             }
             Act::ColorLutNext => {
                 // None -> first -> ... -> last -> None again.
@@ -6528,11 +6667,14 @@ impl Settings {
         match ctrl {
             Ctrl::Toggle { act, .. } => vec![(rc.band, *act)],
             Ctrl::Slider { act, .. } => vec![(track_rect(rc), *act)],
-            Ctrl::Chips { values, act, .. } => chip_rects(values.len(), rc)
-                .into_iter()
-                .zip(values.iter())
-                .map(|(r, bits)| (r, act(*bits)))
-                .collect(),
+            Ctrl::Chips { values, act, .. } => {
+                let values = values(self);
+                chip_rects(values.len(), rc)
+                    .into_iter()
+                    .zip(values.iter())
+                    .map(|(r, bits)| (r, act(*bits)))
+                    .collect()
+            }
             Ctrl::Cycle { act, .. } => vec![(cycle_rect(rc), *act)],
             Ctrl::Drop { list } => {
                 vec![(Self::button_rect(BtnKind::Wide, rc), Act::ListBtn(*list))]
@@ -6780,7 +6922,7 @@ impl Settings {
                 self.push_hit(track, *act);
             }
             Ctrl::Chips { label, values, get, act } => {
-                self.draw_chips(ctx, label, values, *get, *act, rc)
+                self.draw_chips(ctx, label, values(self), *get, *act, rc)
             }
             Ctrl::Cycle { label, get, act } => {
                 let value = get(self);
@@ -7081,6 +7223,209 @@ impl Settings {
         self.hit(ctx, r, act);
     }
 
+    /// What this compositor said it can be asked for, from the
+    /// application — `None` when there is nobody to ask.
+    ///
+    /// The report decides whether the switch is on the page at all
+    /// ([`hdr_possible`]), so learning it is a way of stranding a window
+    /// that is standing on the high range: SPACE HDR over a list holding
+    /// nothing but "auto", and no switch anywhere to turn it back. The
+    /// standing name therefore goes back through [`Settings::set_space`]
+    /// — the ONE writer, which settles the side, applies that rule and
+    /// rebuilds the offer — instead of the offer being rebuilt behind
+    /// the window's back. Told twice, or told what it already knew, it
+    /// lands on exactly the same state.
+    pub fn set_supported_spaces(&mut self, names: Option<Vec<String>>) {
+        self.color_supported = names;
+        let standing = self.color_space.clone();
+        self.set_space(&standing);
+    }
+
+    /// Whether the compositor said it can be asked for this name.
+    fn space_offered(&self, name: &str) -> bool {
+        match &self.color_supported {
+            None => true,
+            Some(list) => list.iter().any(|n| n == name),
+        }
+    }
+
+    /// The ONE writer of the chosen colour space.
+    ///
+    /// It sets the name, settles which half of the table is on offer,
+    /// re-derives the offer itself and remembers the name on its own
+    /// side of the switch. Four things that have to agree, written in
+    /// one place so they cannot come apart: a list whose members no
+    /// longer hold the standing name draws no mark at all
+    /// ([`Settings::current_row`] answers `None`, honestly), and the
+    /// user would be looking at a set with nothing standing in it.
+    fn set_space(&mut self, name: &str) {
+        self.color_space = name.to_string();
+        // "auto" stands in BOTH offers, so it says nothing about which
+        // one is showing and the switch is left exactly where it is —
+        // picking "auto" out of the high-range list must not throw the
+        // page back to the other half under the pointer. Every other
+        // name settles the question by being what it is.
+        let range = config::space_range(&self.color_space);
+        if range != config::SpaceRange::Either {
+            self.color_hdr = range == config::SpaceRange::Hdr;
+        }
+        // And never onto a side there is no way back from. A file
+        // written on other hardware can name `bt2020 pq` to a compositor
+        // that cannot be asked for it; the switch is not on the page
+        // then ([`hdr_possible`]), so a window standing on the high
+        // range would be showing SPACE HDR over a list holding nothing
+        // but "auto", with no control anywhere to turn it back. It
+        // stands on the standard range instead, and the space the file
+        // names stands in no list — which is the truth: this machine is
+        // not showing it.
+        self.color_hdr &= hdr_possible(self);
+        if self.color_hdr {
+            self.last_hdr = Some(self.color_space.clone());
+        } else {
+            self.last_sdr = Some(self.color_space.clone());
+        }
+        self.rebuild_spaces();
+    }
+
+    /// The names the SPACE list offers: the half of the table the switch
+    /// is showing, less whatever this compositor cannot be asked for.
+    ///
+    /// A space the configuration names but the machine has no answer for
+    /// is NOT smuggled back in. That is the same doctrine the theme
+    /// lists follow — a look nobody has installed is a look with no mark
+    /// on it — and the alternative would be a row that says "in force"
+    /// about a picture the screen is not showing.
+    fn rebuild_spaces(&mut self) {
+        self.color_spaces = config::color_spaces(self.color_hdr)
+            .into_iter()
+            .filter(|n| self.space_offered(n))
+            .map(String::from)
+            .collect();
+    }
+
+    /// The chosen depth, and the whole of that state: a depth the user
+    /// pressed is theirs, so it cancels the memo the HDR switch keeps of
+    /// what it raised.
+    fn set_depth(&mut self, bits: u32) {
+        self.color_depth = bits;
+        self.depth_before_hdr = None;
+    }
+
+    /// Turns the HDR switch, and answers whether the colour depth moved
+    /// with it. Everything the window knows about high range is here.
+    ///
+    /// THE SWITCH PERSISTS NOTHING OF ITS OWN. There is no `hdr` field
+    /// in the configuration and there must not be: the file would then
+    /// be able to say `hdr: true` and `space: "srgb"` in one breath, the
+    /// cascade merges the two fields independently, and nothing in
+    /// `ColorConf` could rule on the contradiction. What it writes is a
+    /// colour space — which is also the only thing `wl_color` ever reads
+    /// — and "HDR is on" is read back off that name.
+    ///
+    /// ON: the high-range space this window last stood in, or else the
+    /// first one on offer. The table's order puts `bt2020 pq` first for
+    /// a reason: ST 2084 is the display's own transfer function, HLG is
+    /// a broadcast curve carried for completeness, and scRGB linear is a
+    /// compositing space rather than something to ask a monitor for.
+    ///
+    /// OFF: the standard-range space this window last stood in, or else
+    /// "auto" — truthful for a window that has stood in none, because
+    /// the file never said otherwise.
+    ///
+    /// And the depth. Eight-bit PQ bands visibly, the page has no way to
+    /// warn (it carries no warning control at all), so the eight is
+    /// taken off the offer and the depth comes up to ten with it. What
+    /// was replaced is remembered and given back on the way out — but
+    /// only what THIS took: pressing a depth clears the memo
+    /// ([`Settings::set_depth`]), so a twelve the user chose while HDR
+    /// was on stays twelve when HDR goes off.
+    fn flip_hdr(&mut self) -> bool {
+        // The list is a list of the other half from here on, and an open
+        // one is showing rows that are about to stop existing. Fold it,
+        // and put its scroll back to the head: an offset measured
+        // against the old members means nothing against the new.
+        self.dropdown = None;
+        self.list_scroll.reset();
+
+        let want_hdr = !self.color_hdr;
+        let remembered = if want_hdr { &self.last_hdr } else { &self.last_sdr };
+        let name = remembered
+            .as_deref()
+            .filter(|n| {
+                config::space_range(n).in_offer(want_hdr) && self.space_offered(n)
+            })
+            .map(String::from)
+            .or_else(|| {
+                config::color_spaces(want_hdr)
+                    .into_iter()
+                    .find(|n| self.space_offered(n))
+                    .map(String::from)
+            })
+            // The standard-range half always holds "auto", and the
+            // switch is not on screen at all unless the high-range half
+            // holds something, so this is unreachable — and stated
+            // rather than unwrapped, because "no space at all" has a
+            // right answer and it is the one the file means.
+            .unwrap_or_else(|| config::model::ColorConf::SPACE.to_string());
+
+        self.color_hdr = want_hdr;
+        self.set_space(&name);
+
+        let floor = depth_values(self).first().copied().unwrap_or(self.color_depth);
+        if self.color_hdr {
+            if self.color_depth < floor {
+                self.depth_before_hdr = Some(self.color_depth);
+                self.color_depth = floor;
+                return true;
+            }
+        } else if let Some(bits) = self.depth_before_hdr.take() {
+            self.color_depth = bits;
+            return true;
+        }
+        false
+    }
+
+    /// Seeds the COLOR page from the configuration.
+    ///
+    /// The switch is READ OFF the space and stored nowhere. The one
+    /// thing the file cannot say is which side "auto" belongs to — it
+    /// belongs to both — so a page opened on "auto" opens on the
+    /// standard-range side, which is what the file means: nobody asked
+    /// for high range.
+    ///
+    /// A fresh reading is also a fresh memory. What the window
+    /// remembered about the other side of the switch belonged to the
+    /// visit that made it, and the depth memo belongs to the flip that
+    /// took the depth.
+    ///
+    /// A file naming a space this machine cannot show does not strand
+    /// the page on a side with no switch to leave by: [`Settings::
+    /// set_space`] holds that rule, for every writer at once.
+    fn seed_color(&mut self, prefs: config::ColorPrefs) {
+        self.color_lut = prefs.lut;
+        self.color_icc = prefs.icc;
+        self.last_sdr = None;
+        self.last_hdr = None;
+        self.depth_before_hdr = None;
+        self.color_hdr =
+            config::space_range(&prefs.space) == config::SpaceRange::Hdr;
+        self.set_space(&prefs.space);
+        // THE PAGE OPENS ON A MEMBER OF THE OFFER IT OPENS WITH. The
+        // depth and the space are two lines of a file and one statement
+        // (`ColorConf::depth`), and this is the second reader of that
+        // pair: a page seeded with a depth below the floor of the side
+        // it lands on would draw a DEPTH row with nothing marked in it
+        // and no way to mark anything — the missing number cannot be
+        // pressed, because it is not on the screen to press.
+        //
+        // No memo is left behind. `depth_before_hdr` is what the SWITCH
+        // took and owes back, and no switch was turned here; the raised
+        // depth is what the file's own pair means, so turning HDR off
+        // afterwards has nothing to give back.
+        let floor = depth_values(self).first().copied().unwrap_or(prefs.depth);
+        self.color_depth = prefs.depth.max(floor);
+    }
+
     /// The names of one list, in the order they are offered.
     fn names(&self, list: ListId) -> &[String] {
         match list {
@@ -7094,6 +7439,7 @@ impl Settings {
             ListId::RingStyles => &self.ring_style_kinds,
             ListId::ScrollModes => &self.scroll_mode_kinds,
             ListId::ScrollEdges => &self.scroll_edge_kinds,
+            ListId::Spaces => &self.color_spaces,
         }
     }
 
@@ -7110,6 +7456,12 @@ impl Settings {
             ListId::RingStyles => self.current_ring_style.as_ref(),
             ListId::ScrollModes => self.current_scroll_mode.as_ref(),
             ListId::ScrollEdges => self.current_scroll_edge.as_ref(),
+            // Always a name, never nothing: `ColorConf::space` answers
+            // "auto" for anything it cannot read, so the window has a
+            // space in hand from the moment it opens the page. Whether
+            // that name is on OFFER is a different question, and the
+            // one `current_row` goes on to ask.
+            ListId::Spaces => Some(&self.color_space),
         }
     }
 
@@ -7186,7 +7538,8 @@ impl Settings {
     fn draw_drop(&mut self, ctx: &mut Ctx, list: ListId, rc: RowCtx) {
         let act = Act::ListBtn(list);
         let r = Self::button_rect(BtnKind::Wide, rc);
-        self.button(ctx, r, list.label(), act);
+        let word = list.label(self);
+        self.button(ctx, r, word, act);
         self.caret(ctx, r, act);
     }
 
@@ -7878,7 +8231,13 @@ mod tests {
             Act::BlurOpacityTrack,
             Act::ColorDepth(8),
             Act::ColorDepth(10),
-            Act::ColorSpaceNext,
+            // The anchor of the ONE space list, a name inside it and
+            // the switch that turns it: three controls that stand on
+            // the COLOR page together and must not share a chain
+            // position.
+            Act::ListBtn(ListId::Spaces),
+            Act::Pick(ListId::Spaces, 0),
+            Act::ColorHdr,
             Act::ColorLutNext,
             Act::ColorIccNext,
             Act::BoardGo((1, 0)),
@@ -7997,16 +8356,16 @@ mod tests {
     /// the configuration changed, and this one may not.
     #[test]
     fn the_themes_editor_row_is_a_door_and_writes_no_theme() {
+        let mut s = furnished();
         assert!(ListId::Looks.carries_door(), "the THEMES list lost its door");
         for list in [ListId::Layauts, ListId::Sounds] {
             assert!(
                 !list.carries_door(),
                 "{} carries a door it has no editor for",
-                list.label()
+                list.label(&s)
             );
         }
 
-        let mut s = furnished();
         s.view = View::LookFeel;
         s.dropdown = Some(Dropdown::List(ListId::Looks));
         let before = s.current_look.clone();
@@ -8246,14 +8605,14 @@ mod tests {
         else {
             panic!("the entry lost its fixed label")
         };
+        let mut s = furnished();
         assert_ne!(
             word,
-            ListId::Sounds.label(),
+            ListId::Sounds.label(&s),
             "the entry and the list wear one word: a reader cannot tell the \
              set from the levels"
         );
 
-        let mut s = furnished();
         s.view = View::LookFeel;
         s.dropdown = Some(Dropdown::List(ListId::Sounds));
         let before = s.current_sounds.clone();
@@ -8317,6 +8676,12 @@ mod tests {
             ListId::RingStyles,
             ListId::ScrollModes,
             ListId::ScrollEdges,
+            // And SPACE, whose members are neither on disk nor built
+            // into this file: they are half of a table in `config`,
+            // filtered by what the compositor said it can show. A third
+            // kind of provenance is a third chance for the mark and the
+            // pick to disagree.
+            ListId::Spaces,
         ] {
             for i in 0..s.names(list).len() {
                 let name = s.names(list)[i].clone();
@@ -8331,12 +8696,13 @@ mod tests {
                     ListId::RingStyles => s.current_ring_style = Some(name),
                     ListId::ScrollModes => s.current_scroll_mode = Some(name),
                     ListId::ScrollEdges => s.current_scroll_edge = Some(name),
+                    ListId::Spaces => s.set_space(&name),
                 }
                 assert_eq!(
                     s.current_row(list),
                     Some(i),
                     "{}: the mark is not on the name in force",
-                    list.label()
+                    list.label(&s)
                 );
             }
             // A set whose standing member is not installed here has no
@@ -8353,12 +8719,17 @@ mod tests {
                 ListId::RingStyles => s.current_ring_style = Some("not installed".into()),
                 ListId::ScrollModes => s.current_scroll_mode = Some("not installed".into()),
                 ListId::ScrollEdges => s.current_scroll_edge = Some("not installed".into()),
+                // Straight into the field and past `set_space` on
+                // purpose: this is the state a configuration file can
+                // put the window in when the compositor cannot show
+                // what it names, and the answer must be no mark.
+                ListId::Spaces => s.color_space = "not installed".into(),
             }
             assert_eq!(
                 s.current_row(list),
                 None,
                 "{}: a name nobody has is marked as standing",
-                list.label()
+                list.label(&s)
             );
         }
 
@@ -8427,7 +8798,7 @@ mod tests {
                     landed.contains(&focus_id(act)),
                     "a control the pointer can press is not on the Tab round: \
                      {} names {} controls",
-                    list.map_or("the page at rest", |l| l.label()),
+                    list.map_or("the page at rest", |l| l.label(&s)),
                     s.hits.len()
                 );
             }
@@ -8536,15 +8907,15 @@ mod tests {
         let drawn = page_runs(&mut fonts, &mut s);
         for list in [ListId::Looks, ListId::Layauts, ListId::Sounds] {
             assert!(
-                drawn.iter().any(|t| t == list.label()),
+                drawn.iter().any(|t| t == list.label(&s)),
                 "{} does not wear its own name",
-                list.label()
+                list.label(&s)
             );
             let value = s.drop_value(list);
             assert!(
                 !drawn.iter().any(|t| t.contains(&value)),
                 "{} still wears its choice: {value}",
-                list.label()
+                list.label(&s)
             );
         }
     }
@@ -8767,7 +9138,7 @@ mod tests {
             assert!(
                 said(&value),
                 "the confirmation does not say what {} is set to",
-                list.label()
+                list.label(&s)
             );
         }
         assert!(said("FONTS"), "the confirmation does not mention the fonts");
@@ -8849,14 +9220,14 @@ mod tests {
                 assert!(
                     acts.contains(&Act::Pick(list, i)),
                     "{}: name {i} is in the list and not on the screen",
-                    list.label()
+                    list.label(&s)
                 );
             }
             assert_eq!(
                 acts.contains(&Act::ThemesEditor),
                 list.carries_door(),
                 "{}: the editor door is on the wrong list",
-                list.label()
+                list.label(&s)
             );
         }
     }
@@ -9252,6 +9623,545 @@ mod tests {
             before,
             shut.scroll.offset(),
             "a closed settings window moved on the wheel"
+        );
+    }
+
+    /// The COLOR page, opened on what a configuration that says nothing
+    /// resolves to. `color_supported` is left at None, which is the
+    /// window that has not been told — the whole table on offer, the
+    /// state every machine with a working colour manager is in.
+    fn color_open() -> Settings {
+        let mut s = furnished();
+        s.view = View::Color;
+        s.seed_color(config::ColorPrefs {
+            depth: crate::config::model::ColorConf::DEPTH,
+            space: crate::config::model::ColorConf::SPACE.to_string(),
+            lut: None,
+            icc: None,
+        });
+        s
+    }
+
+    /// A COLOR page seeded from one written space, and nothing else said.
+    fn color_on(space: &str) -> Settings {
+        let mut s = color_open();
+        s.seed_color(config::ColorPrefs {
+            depth: crate::config::model::ColorConf::DEPTH,
+            space: space.to_string(),
+            lut: None,
+            icc: None,
+        });
+        s
+    }
+
+    /// Every drop-down the COLOR page describes right now, by identity.
+    fn color_drops(s: &Settings) -> Vec<ListId> {
+        page_rows(page(View::Color), s)
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Drop { list } => Some(list),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The owner's rule, and the hard half of it: SPACE and SPACE HDR are
+    /// ONE control.
+    ///
+    /// Two rows, one shown per range, would satisfy any test that only
+    /// read the names on offer — and would be exactly the arrangement the
+    /// owner forbade, because a mistake in either condition puts both
+    /// words on the screen at once. So this reads the CONTROL and not its
+    /// contents: the page describes one drop-down either way, it is the
+    /// same `ListId`, it registers the same act at the same focus id, and
+    /// the frame draws its anchor at the same rectangle. Only the word on
+    /// it and what hangs from it move.
+    #[test]
+    fn the_hdr_switch_turns_one_list_and_never_reveals_a_second() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = color_open();
+
+        assert_eq!(
+            color_drops(&s),
+            vec![ListId::Spaces],
+            "COLOR at rest does not describe exactly one list"
+        );
+        let names_off: Vec<String> = s.names(ListId::Spaces).to_vec();
+        assert_eq!(ListId::Spaces.label(&s), "SPACE");
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let a = s.rect_of_act(Act::ListBtn(ListId::Spaces)).expect("no SPACE anchor");
+        let anchor_off = (a.x, a.y, a.w, a.h);
+
+        s.flip_hdr();
+
+        assert_eq!(
+            color_drops(&s),
+            vec![ListId::Spaces],
+            "turning HDR on revealed a SECOND list — the two words can now \
+             stand on the screen together"
+        );
+        assert_eq!(
+            ListId::Spaces.label(&s),
+            "SPACE HDR",
+            "the one list did not change its word"
+        );
+        assert_ne!(
+            s.names(ListId::Spaces).to_vec(),
+            names_off,
+            "the one list did not change its contents"
+        );
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        let a = s.rect_of_act(Act::ListBtn(ListId::Spaces)).expect("no SPACE HDR anchor");
+        assert_eq!(
+            (a.x, a.y, a.w, a.h),
+            anchor_off,
+            "the anchor moved: this is a different control wearing the word, \
+             not the same one"
+        );
+
+        // And on the screen, where the rule was actually written: exactly
+        // one of the two words, whichever side is showing.
+        for want_hdr in [true, false] {
+            if s.color_hdr != want_hdr {
+                s.flip_hdr();
+            }
+            let drawn = page_runs(&mut fonts, &mut s);
+            let said = |w: &str| drawn.iter().filter(|t| t.as_str() == w).count();
+            assert_eq!(
+                (said("SPACE"), said("SPACE HDR")),
+                if want_hdr { (0, 1) } else { (1, 0) },
+                "with HDR {}, the page wrote SPACE {} time(s) and SPACE HDR \
+                 {} time(s)",
+                if want_hdr { "on" } else { "off" },
+                said("SPACE"),
+                said("SPACE HDR")
+            );
+        }
+    }
+
+    /// The list holds one range at a time, and between the two of them it
+    /// holds the whole table.
+    ///
+    /// The second half is what keeps the split honest: a filter that
+    /// merely dropped names would pass the first assertion and quietly
+    /// lose a space. `COLOR_SPACE_TABLE` is the only statement of which
+    /// side a name is on, so the test reads the offers against the table
+    /// rather than against a list of its own.
+    #[test]
+    fn the_space_list_never_holds_both_ranges() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = color_open();
+        let mut seen: Vec<String> = Vec::new();
+        for want_hdr in [false, true] {
+            if s.color_hdr != want_hdr {
+                s.flip_hdr();
+            }
+            for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+                let offered = s.names(ListId::Spaces).iter().any(|n| n == name);
+                assert_eq!(
+                    offered,
+                    range.in_offer(want_hdr),
+                    "with HDR {}, '{name}' is {} the list",
+                    if want_hdr { "on" } else { "off" },
+                    if offered { "in" } else { "missing from" }
+                );
+            }
+            seen.extend(s.names(ListId::Spaces).iter().cloned());
+
+            // And on the screen, unfolded — the first list this page has
+            // ever carried, so that it draws and answers at all is part
+            // of the statement. Every name it holds is pressable, and no
+            // name of the other range is anywhere on the page.
+            s.dropdown = Some(Dropdown::List(ListId::Spaces));
+            // Fully unfolded: a row still in flight registers nothing,
+            // by the list object's own rule.
+            s.dropdown_since = None;
+            let mut dl = nacelle::draw::DrawList::recording();
+            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            s.draw(&mut ctx);
+            let acts: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
+            for i in 0..s.names(ListId::Spaces).len() {
+                assert!(
+                    acts.contains(&Act::Pick(ListId::Spaces, i)),
+                    "name {i} of the unfolded space list is not on the screen"
+                );
+            }
+            let drawn = text_runs(&dl);
+            for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+                if range.in_offer(want_hdr) {
+                    continue;
+                }
+                let word = name.to_uppercase();
+                assert!(
+                    !drawn.iter().any(|t| *t == word),
+                    "'{name}' is drawn with HDR {}, where it does not belong",
+                    if want_hdr { "on" } else { "off" }
+                );
+            }
+            s.dropdown = None;
+        }
+        for name in config::COLOR_SPACES {
+            assert!(
+                seen.iter().any(|n| n == name),
+                "'{name}' is in neither offer: the switch cannot reach it at all"
+            );
+        }
+    }
+
+    /// The choice never points into a list that no longer holds it.
+    ///
+    /// The state of an open list is measured against the names it was
+    /// opened over — a scroll offset, a mark, a row under the pointer —
+    /// and every one of those becomes a statement about a set that no
+    /// longer exists the moment the switch turns. So the switch folds the
+    /// list and puts its scroll back to the head, and whatever it lands
+    /// on is a member of the offer it landed in.
+    #[test]
+    fn a_flip_leaves_the_choice_standing_and_the_open_list_folded() {
+        for start in config::COLOR_SPACES {
+            let mut s = color_on(start);
+            assert!(
+                s.current_row(ListId::Spaces).is_some(),
+                "opened on '{start}' with nothing standing in the list"
+            );
+            // Two flips: over and back, which is where a memory that
+            // remembered the wrong side would show.
+            for step in 0..2 {
+                s.dropdown = Some(Dropdown::List(ListId::Spaces));
+                s.list_scroll.set_offset(120.0);
+                s.flip_hdr();
+                assert!(
+                    s.current_row(ListId::Spaces).is_some(),
+                    "'{start}', flip {step}: the standing space '{}' is not in \
+                     the list that is now on offer",
+                    s.color_space
+                );
+                assert!(
+                    s.dropdown.is_none(),
+                    "'{start}', flip {step}: the list stayed open over names \
+                     that no longer exist"
+                );
+                assert_eq!(
+                    s.list_scroll.offset(),
+                    0.0,
+                    "'{start}', flip {step}: the scroll kept an offset measured \
+                     against the other set"
+                );
+            }
+            // And back where it started, when the machine offers
+            // everything: the trip over and back is not a trip to a
+            // default.
+            assert_eq!(
+                s.color_space, start,
+                "a trip across the switch and back lost '{start}'"
+            );
+        }
+    }
+
+    /// The switch and the configuration say ONE thing, in both
+    /// directions.
+    ///
+    /// Reading: the space written in the file settles the switch, with no
+    /// second field to contradict it — that is the whole reason there is
+    /// no `hdr` in `ColorConf`. Writing: turning the switch produces a
+    /// space of the range it was turned to, so the next reading agrees
+    /// with this one.
+    #[test]
+    fn the_switch_and_the_written_space_agree_both_ways() {
+        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+            let s = color_on(name);
+            assert_eq!(
+                s.color_hdr,
+                range == config::SpaceRange::Hdr,
+                "'{name}' in the file put the switch in the wrong position"
+            );
+        }
+        // "auto" is the one name the file cannot settle — it stands in
+        // both offers — and a page opened on it opens on the standard
+        // range, because that is what a file naming no high-range space
+        // means. Asked of a window that IS showing the high range, which
+        // is the only way to ask it: a reading that merely left the
+        // switch alone would answer correctly on a window that had never
+        // been turned, and go on showing SPACE HDR over a file that says
+        // "auto" on every window that had.
+        let mut been_high = color_on("bt2020 pq");
+        assert!(been_high.color_hdr, "the fixture did not reach the high range");
+        been_high.seed_color(config::ColorPrefs {
+            depth: crate::config::model::ColorConf::DEPTH,
+            space: "auto".to_string(),
+            lut: None,
+            icc: None,
+        });
+        assert!(
+            !been_high.color_hdr,
+            "a configuration naming 'auto' left the switch where the last \
+             visit had put it"
+        );
+
+        let mut s = color_open();
+        for _ in 0..4 {
+            let was = s.color_hdr;
+            s.flip_hdr();
+            assert_ne!(was, s.color_hdr, "the switch did not turn");
+            let range = config::space_range(&s.color_space);
+            assert!(
+                range.in_offer(s.color_hdr),
+                "the switch turned {} and wrote '{}', which is not of that range",
+                if s.color_hdr { "on" } else { "off" },
+                s.color_space
+            );
+            // And the writing survives a re-reading, which is the whole
+            // of "the state lives in the space". "auto" is the exception
+            // and the reason it is an exception is stated above: it is
+            // the one name that belongs to both offers, so a file that
+            // holds it opens on the standard range whatever the window
+            // was showing when it wrote it.
+            let reread = color_on(&s.color_space).color_hdr;
+            if s.color_space == crate::config::model::ColorConf::SPACE {
+                assert!(!reread, "'auto' read back as a request for HDR");
+            } else {
+                assert_eq!(
+                    reread, s.color_hdr,
+                    "'{}' read back into the other position",
+                    s.color_space
+                );
+            }
+        }
+    }
+
+    /// HDR lifts the depth to ten bits, and gives back only what it took.
+    ///
+    /// Eight-bit PQ bands, and this page has no way to say so — no
+    /// warning control exists on it — so the eight is taken off the offer
+    /// rather than left there to be pressed. The other half is the one
+    /// that is easy to get wrong: a depth the USER pressed is theirs, and
+    /// turning HDR off must not put it back to what it was before they
+    /// touched it.
+    #[test]
+    fn hdr_lifts_the_depth_and_gives_back_only_what_it_took() {
+        let mut s = color_open();
+        s.set_depth(8);
+        assert!(depth_values(&s).contains(&8), "eight is missing from the SDR offer");
+
+        assert!(s.flip_hdr(), "the flip did not report moving the depth");
+        assert!(s.color_depth >= 10, "HDR left the depth at {}", s.color_depth);
+        assert!(
+            !depth_values(&s).contains(&8),
+            "eight bits is still on offer under HDR"
+        );
+        assert!(
+            !described_acts(&s, page(View::Color)).contains(&Act::ColorDepth(8)),
+            "the page still promises an eight-bit press under HDR"
+        );
+
+        assert!(s.flip_hdr(), "the flip back did not report moving the depth");
+        assert_eq!(s.color_depth, 8, "the depth HDR raised was not given back");
+
+        // The user's own press survives the trip. Twelve, chosen while
+        // HDR was on, is still twelve when HDR goes off.
+        s.set_depth(8);
+        s.flip_hdr();
+        s.set_depth(12);
+        assert!(!s.flip_hdr(), "turning HDR off moved a depth it had not taken");
+        assert_eq!(
+            s.color_depth, 12,
+            "turning HDR off took back a depth the user chose"
+        );
+    }
+
+    /// What the machine cannot show is not on the screen — the screen
+    /// decision's rule, applied to the switch itself.
+    ///
+    /// A compositor that can be asked for no high-range space at all is a
+    /// machine with no HDR on it, and the switch is not drawn, not
+    /// registered and not in the Tab round. `row_shown` and not
+    /// `row_when`: a grey ghost is the "just in case" the owner forbade.
+    #[test]
+    fn a_compositor_with_no_high_range_has_no_switch() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut s = color_open();
+        assert!(
+            described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
+            "the switch is missing where every space is on offer"
+        );
+
+        s.set_supported_spaces(Some(
+            config::COLOR_SPACE_TABLE
+                .iter()
+                .filter(|(_, r)| *r != config::SpaceRange::Hdr)
+                .map(|&(n, _)| n.to_string())
+                .collect(),
+        ));
+        assert!(
+            !described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
+            "the switch stands on a machine that can show no high range"
+        );
+        let mut dl = nacelle::draw::DrawList::new();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        assert!(
+            s.rect_of_act(Act::ColorHdr).is_none(),
+            "the switch is unreachable by description and pressable all the same"
+        );
+        // And the list it would have turned still offers the standard
+        // range whole.
+        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+            assert_eq!(
+                s.names(ListId::Spaces).iter().any(|n| n == name),
+                range != config::SpaceRange::Hdr,
+                "'{name}' is on the wrong side of a standard-range-only \
+                 compositor's offer"
+            );
+        }
+
+        // A configuration written on other hardware names a space this
+        // one cannot show. The page must not open on the side whose
+        // switch is not drawn: there would be no control anywhere to
+        // turn it back, and the list under SPACE HDR would hold "auto"
+        // alone.
+        s.seed_color(config::ColorPrefs {
+            depth: crate::config::model::ColorConf::DEPTH,
+            space: "bt2020 pq".to_string(),
+            lut: None,
+            icc: None,
+        });
+        assert!(
+            !s.color_hdr,
+            "a file naming a space this machine cannot show stranded the page \
+             on the high range, where no switch stands"
+        );
+        assert_eq!(ListId::Spaces.label(&s), "SPACE");
+        // The space it names stands in no list, which is the truth: this
+        // machine is not showing it.
+        assert_eq!(s.current_row(ListId::Spaces), None);
+        assert!(
+            depth_values(&s).contains(&8),
+            "the standard-range depth offer did not come back with the page"
+        );
+    }
+
+    /// The page opens on a depth it can show, whatever pair the file
+    /// holds.
+    ///
+    /// `depth` and `space` are two lines and one statement, and the
+    /// switch is READ OFF the space — so a file saying eight bits and
+    /// `bt2020 pq` opens the page on the high range with a DEPTH row
+    /// that has nothing marked in it and no way to mark anything: the
+    /// eight is not on the screen to be pressed. The rule that takes it
+    /// off the offer used to live on the switch's path alone, where a
+    /// file never goes.
+    #[test]
+    fn a_page_opened_from_the_file_stands_on_a_depth_it_offers() {
+        // Every pair the file can hold, and the two answers each of them
+        // has to satisfy: the depth is a member of the offer the page
+        // opened with, and the page promises a press for it.
+        for &(space, _) in config::COLOR_SPACE_TABLE.iter() {
+            for bits in crate::config::model::COLOR_DEPTHS {
+                let mut s = color_open();
+                s.seed_color(config::ColorPrefs {
+                    depth: bits,
+                    space: space.to_string(),
+                    lut: None,
+                    icc: None,
+                });
+                assert!(
+                    depth_values(&s).contains(&s.color_depth),
+                    "'{space}' at {bits} bits opened the page on {} bits, which \
+                     is not in the offer {:?} it opened with",
+                    s.color_depth,
+                    depth_values(&s)
+                );
+                assert!(
+                    described_acts(&s, page(View::Color))
+                        .contains(&Act::ColorDepth(s.color_depth)),
+                    "'{space}' at {bits} bits: the standing depth {} has no \
+                     press on the page",
+                    s.color_depth
+                );
+                // Raised and never lowered, and never raised where the
+                // pair was not contradictory in the first place.
+                assert!(
+                    s.color_depth >= bits,
+                    "'{space}' at {bits} bits: the page took the depth DOWN to {}",
+                    s.color_depth
+                );
+                if depth_values(&s).contains(&bits) {
+                    assert_eq!(
+                        s.color_depth, bits,
+                        "'{space}': a depth the page can show was changed anyway"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Learning what the machine offers never strands the page on the
+    /// high range.
+    ///
+    /// The report decides whether the switch is on the page at all, so
+    /// it is a writer of the same state `set_space` guards — and a
+    /// second writer that skipped the guard would produce exactly the
+    /// dead end the guard exists for: SPACE HDR over a list holding
+    /// nothing but "auto", with no switch anywhere to turn it back. Told
+    /// from the high range, which is the only position it can strand.
+    #[test]
+    fn learning_the_offer_never_leaves_the_page_on_a_side_it_cannot_leave() {
+        let mut s = color_on("bt2020 pq");
+        assert!(s.color_hdr, "the fixture did not reach the high range");
+
+        s.set_supported_spaces(Some(
+            config::COLOR_SPACE_TABLE
+                .iter()
+                .filter(|(_, r)| *r != config::SpaceRange::Hdr)
+                .map(|&(n, _)| n.to_string())
+                .collect(),
+        ));
+
+        assert!(
+            !s.color_hdr,
+            "a report with no high range in it left the page standing on the \
+             high range"
+        );
+        assert_eq!(ListId::Spaces.label(&s), "SPACE");
+        assert!(
+            !described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
+            "this test is measuring nothing: the switch is still on the page"
+        );
+        assert!(
+            depth_values(&s).contains(&s.color_depth),
+            "the page kept a depth of {} that the side it came back to does \
+             not offer",
+            s.color_depth
+        );
+        // The list under the word is the standard range whole, and the
+        // space the file named stands in none of it — which is the
+        // truth: this machine is not showing it.
+        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
+            assert_eq!(
+                s.names(ListId::Spaces).iter().any(|n| n == name),
+                range != config::SpaceRange::Hdr,
+                "'{name}' is on the wrong side of the offer"
+            );
+        }
+
+        // And the report that says nothing new says nothing at all: a
+        // window told twice is in the state it was told once.
+        let mut a = color_on("srgb");
+        let mut b = color_on("srgb");
+        let all: Vec<String> = config::COLOR_SPACES.iter().map(|n| n.to_string()).collect();
+        a.set_supported_spaces(Some(all.clone()));
+        b.set_supported_spaces(Some(all.clone()));
+        b.set_supported_spaces(Some(all));
+        assert_eq!(
+            (a.color_hdr, a.color_space.clone(), a.names(ListId::Spaces).to_vec()),
+            (b.color_hdr, b.color_space.clone(), b.names(ListId::Spaces).to_vec()),
+            "being told the same offer twice moved the page"
         );
     }
 
@@ -12902,7 +13812,9 @@ mod tests {
             | Ctrl::Slider { act, .. }
             | Ctrl::Cycle { act, .. }
             | Ctrl::Button { act, .. } => vec![*act],
-            Ctrl::Chips { values, act, .. } => values.iter().map(|v| act(*v)).collect(),
+            Ctrl::Chips { values, act, .. } => {
+                values(s).iter().map(|v| act(*v)).collect()
+            }
             // Every verb of an action bar, left to right.
             Ctrl::Bar { items } => items.iter().map(|&(_, a)| a).collect(),
             // The anchor alone: what the list holds is only on screen

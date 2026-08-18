@@ -49,6 +49,40 @@ pub struct ColorMgr {
     surface: WpColorManagementSurfaceV1,
 }
 
+/// What one space name asks the protocol for: its named primaries and a
+/// LIST of transfer functions, best first.
+///
+/// A list and not one curve, because compositors disagree about the sRGB
+/// one (KWin, for one, offers gamma 2.2 and not the piecewise sRGB), and
+/// refusing over that would grey the whole feature out on the very
+/// compositor it was built for.
+///
+/// A free function so that asking "can this be shown?"
+/// ([`ColorMgr::supports`]) and asking for it ([`ColorMgr::apply_space`])
+/// read ONE table. The settings window hides what the answer is no for,
+/// so the two must not be able to disagree: a space missing from the
+/// list would still be applicable, and one offered but unapplicable
+/// would be a control that does nothing.
+fn preset(
+    space: &str,
+) -> Option<(
+    wp_color_manager_v1::Primaries,
+    &'static [wp_color_manager_v1::TransferFunction],
+)> {
+    use wp_color_manager_v1::{Primaries, TransferFunction as Tf};
+    match space {
+        "srgb" => Some((Primaries::Srgb, &[Tf::Srgb, Tf::Gamma22, Tf::Bt1886])),
+        "display p3" => {
+            Some((Primaries::DisplayP3, &[Tf::Srgb, Tf::Gamma22, Tf::Bt1886]))
+        }
+        "adobe rgb" => Some((Primaries::AdobeRgb, &[Tf::Gamma22, Tf::Srgb])),
+        "bt2020 pq" => Some((Primaries::Bt2020, &[Tf::St2084Pq])),
+        "bt2020 hlg" => Some((Primaries::Bt2020, &[Tf::Hlg])),
+        "scrgb linear" => Some((Primaries::Srgb, &[Tf::ExtLinear])),
+        _ => None,
+    }
+}
+
 impl ColorMgr {
     /// Attaches to winit's display and surface, both as raw pointers
     /// from the window handle. None when the compositor does not speak
@@ -97,25 +131,25 @@ impl ColorMgr {
         self.apply_space(space);
     }
 
+    /// Whether this compositor can be asked for `space` at all.
+    ///
+    /// The SAME test [`ColorMgr::apply_space`] makes before it builds a
+    /// description, asked ahead of time: the settings window leaves out
+    /// what this machine cannot show rather than offering it and
+    /// printing a line into the log when it is picked. "auto" is always
+    /// answerable — it asks for nothing.
+    pub fn supports(&self, space: &str) -> bool {
+        let Some((prim, tfs)) = preset(space) else { return true };
+        tfs.iter().any(|tf| self.state.tf_named.contains(&(*tf as u32)))
+            && self
+                .state
+                .features
+                .contains(&(wp_color_manager_v1::Feature::Parametric as u32))
+            && self.state.primaries_named.contains(&(prim as u32))
+    }
+
     fn apply_space(&mut self, space: &str) {
-        use wp_color_manager_v1::{Primaries, TransferFunction as Tf};
-        // Each space names its primaries and a LIST of transfer
-        // functions, best first: compositors disagree about the sRGB
-        // curve (KWin, for one, offers gamma 2.2 and not the piecewise
-        // sRGB), and refusing over that would grey the whole feature
-        // out on the very compositor it was built for.
-        let preset: Option<(Primaries, &[Tf])> = match space {
-            "srgb" => Some((Primaries::Srgb, &[Tf::Srgb, Tf::Gamma22, Tf::Bt1886])),
-            "display p3" => {
-                Some((Primaries::DisplayP3, &[Tf::Srgb, Tf::Gamma22, Tf::Bt1886]))
-            }
-            "adobe rgb" => Some((Primaries::AdobeRgb, &[Tf::Gamma22, Tf::Srgb])),
-            "bt2020 pq" => Some((Primaries::Bt2020, &[Tf::St2084Pq])),
-            "bt2020 hlg" => Some((Primaries::Bt2020, &[Tf::Hlg])),
-            "scrgb linear" => Some((Primaries::Srgb, &[Tf::ExtLinear])),
-            _ => None,
-        };
-        let Some((prim, tfs)) = preset else {
+        let Some((prim, tfs)) = preset(space) else {
             // "auto": the compositor's preference stands.
             self.surface.unset_image_description();
             let _ = self.conn.flush();
