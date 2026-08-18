@@ -1579,6 +1579,14 @@ const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
     Row { ctrl, after: Gap::Row, enabled: always, when }
 }
 
+/// …and the same with a break under it. Both halves of a row's own
+/// description at once, for a conditional control that ends a group:
+/// the COLOR page's HDR switch closes the controls and opens the two
+/// lines that report on them.
+const fn row_shown_after(ctrl: Ctrl, when: fn(&Settings) -> bool, after: Gap) -> Row {
+    Row { ctrl, after, enabled: always, when }
+}
+
 /// The corner button a page wears, and what the body does about it.
 #[derive(Clone, Copy, PartialEq)]
 enum Chrome {
@@ -1798,7 +1806,7 @@ struct Page {
 /// The headings are `Ctrl::Section`, which takes its own gap under it
 /// (`panel.title.block_h`) — hence `Gap::None` after every one of them,
 /// exactly as the FONT page writes its two.
-static RAIL_ROWS: [Row; 9] = [
+static RAIL_ROWS: [Row; 10] = [
     row_after(Ctrl::Section { title: "APPEARANCE" }, Gap::None),
     row(Ctrl::Button {
         label: Text::Fixed("LOOK AND FEEL"),
@@ -1814,6 +1822,16 @@ static RAIL_ROWS: [Row; 9] = [
             act: Act::OpenColor,
         },
         |s| s.color_enabled,
+    ),
+    // …and WHY it is shut, on the machines where it is. R6 paints an
+    // unofferable section grey and takes it out of the focus chain, and
+    // that is right — but grey alone says "not now" and the truth is
+    // "not here, and nothing you press will change it". One short line
+    // under the inscription, and only there: a rail carrying it on every
+    // machine would be a permanent apology for a feature that works.
+    row_shown(
+        Ctrl::Note { text: Text::Fixed("NO COLOR MANAGER") },
+        |s| !s.color_enabled,
     ),
     row_after(
         Ctrl::Button {
@@ -3160,7 +3178,7 @@ static BOARDS_HINT: [Row; 1] = [row(Ctrl::Hint {
 /// separated), which is why they are one column and not three rows of a
 /// wider one. The range is last because it is a statement ABOUT the list
 /// above it, and because turning it changes both of the other two.
-static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
+static COLOR_SWAPCHAIN_ROWS: [Row; 5] = [
     row(Ctrl::Chips {
         label: "DEPTH",
         values: depth_values,
@@ -3176,11 +3194,65 @@ static COLOR_SWAPCHAIN_ROWS: [Row; 3] = [
     // `row_shown` and not `row_when`: a compositor that cannot be asked
     // for a single high-range space is a machine with no HDR on it, and
     // the screen decision forbids a grey ghost offered "just in case".
-    row_shown(
+    row_shown_after(
         Ctrl::Toggle { label: "HDR", get: |s| s.color_hdr, act: Act::ColorHdr },
         hdr_possible,
+        Gap::Section,
     ),
+    // WHAT CAME OF IT. Every control above this pair can be turned
+    // without the picture moving — a compositor may refuse a space, or
+    // never answer for one, and a surface may have no format above eight
+    // bits — and until these two lines existed the program said so on
+    // stderr and the window said nothing at all. That is the difference
+    // between a setting and a control that pretends: these rows are the
+    // page's answer, not its question.
+    row_shown(Ctrl::Note { text: Text::Of(color_space_note) }, color_was_answered),
+    row_shown(Ctrl::Note { text: Text::Of(color_depth_note) }, color_depth_fell_short),
 ];
+
+/// Whether the application has told this window anything about the last
+/// request. `Row::when` and not an empty string inside the note, because
+/// an empty note is still a row: it would reserve its height and open a
+/// hole under the switch on every page that has nothing to report.
+fn color_was_answered(s: &Settings) -> bool {
+    !s.color_status.is_empty()
+}
+
+/// What the compositor did with the space that was last asked for.
+fn color_space_note(s: &Settings) -> String {
+    format!("space: {}", s.color_status)
+}
+
+/// Whether the swapchain gave LESS than the page asked for. Zero is "not
+/// measured" — no legal depth is zero — so a window the application has
+/// not told yet says nothing rather than claiming a shortfall of eight
+/// bits it has not seen.
+///
+/// LESS AND NOT MERELY DIFFERENT, and the difference is a lie this line
+/// told until it was caught. Twelve has no swapchain format of its own
+/// and rides the sixteen-bit float one on purpose (`nacelle-renderer`,
+/// `pick_format`: `16 | 12` share a tier) — so asking for twelve and
+/// being given sixteen is the arrangement working, not failing, and a
+/// page that read "different" would tell a user picking the one depth in
+/// four that behaves this way that "the surface offers no more" than the
+/// MORE it just got. A number above the wish is never a shortfall: the
+/// wish is a floor on precision, and a floor cleared is nothing to
+/// report.
+fn color_depth_fell_short(s: &Settings) -> bool {
+    s.color_depth_now != 0 && s.color_depth_now < s.color_depth_asked
+}
+
+/// Asked against given. Only ever drawn where the swapchain came up
+/// short ([`color_depth_fell_short`]) — a line repeating the number
+/// already standing in the DEPTH chips would be noise, and a line about
+/// a swapchain that gave MORE than the wish would be a complaint about
+/// good news.
+fn color_depth_note(s: &Settings) -> String {
+    format!(
+        "depth: {} bits asked, {} in the swapchain — the surface offers no more",
+        s.color_depth_asked, s.color_depth_now
+    )
+}
 
 /// The depths the swapchain may be asked for, and the whole of that
 /// question ([`Ctrl::Chips`]).
@@ -4133,6 +4205,35 @@ pub struct Settings {
     pub color_enabled: bool,
     /// The COLOR view changed something; the application applies it.
     pub color_dirty: bool,
+    /// **What came of the last colour request**, in the compositor's own
+    /// terms, for the page to say out loud.
+    ///
+    /// Written by the application after every `apply` and read by one
+    /// note row. It exists because every failure on this page is
+    /// INVISIBLE otherwise: a space the compositor will not take, a
+    /// description it never answers for, an ICC profile quietly
+    /// outranking the list — each of them leaves the picture exactly as
+    /// it was while the list draws its mark on the new name. The
+    /// program used to say all of it on stderr, and a desktop session
+    /// has nowhere to show a stderr (the same reason ADDONS carries the
+    /// loader's complaints).
+    ///
+    /// Private, like the two numbers under it: the application writes
+    /// them through [`Settings::color_answered`],
+    /// [`Settings::color_asked`] and [`Settings::color_measured`],
+    /// because the wish and the measurement have a rule BETWEEN them
+    /// (asking unmeasures) and a field anyone may assign cannot keep it.
+    color_status: String,
+    /// The depth the swapchain was ASKED for, and the depth it GAVE.
+    ///
+    /// Two numbers because they disagree, and the disagreement is the
+    /// interesting part: a surface offering nothing above eight bits
+    /// answers eight to a page showing sixteen, and a user hunting for
+    /// the difference would find none. The first is the configuration's
+    /// (`ColorConf::depth`), the second is read off the renderer's own
+    /// swapchain format after the frame in which the rebuild happened.
+    color_depth_asked: u32,
+    color_depth_now: u32,
     /// The BLUR sliders moved; main re-reads blur_settings().
     pub blur_dirty: bool,
     color_depth: u32,
@@ -4395,6 +4496,14 @@ impl Settings {
             boards: Vec::new(),
             color_enabled: false,
             color_dirty: false,
+            // Empty and not a cheerful word: nothing has been applied
+            // yet, and the note reads that as "nothing to report".
+            color_status: String::new(),
+            // Zero is "not measured", which is exactly true until the
+            // application has told this window. Neither number is a
+            // legal depth, so neither can be mistaken for one.
+            color_depth_asked: 0,
+            color_depth_now: 0,
             blur_dirty: false,
             color_depth: 8,
             color_space: "auto".to_string(),
@@ -7482,6 +7591,44 @@ impl Settings {
         self.set_space(&standing);
     }
 
+    /// A depth has been ASKED of the swapchain, and with it the last
+    /// measurement stops being about anything.
+    ///
+    /// THE ONE WRITER OF THE WISH, and it exists for the clearing and
+    /// not for the assignment. The renderer moves its format at the
+    /// rebuild, which happens inside the next frame's `render` — so
+    /// between the request and that rebuild the window is holding a NEW
+    /// wish beside an OLD measurement, and [`color_depth_fell_short`]
+    /// reads exactly that pair. Ask for sixteen on a machine that had
+    /// been given ten and the page would say "16 asked, 10 in the
+    /// swapchain — the surface offers no more" about a swapchain that
+    /// had not been asked yet; a page that is not redrawn again would
+    /// leave the sentence standing. Zeroing the measurement says the
+    /// only true thing there is to say in that gap: not measured.
+    ///
+    /// Only when the number actually moves, because a request that
+    /// leaves the depth alone (the SPACE list, the LUT — `apply_color!`
+    /// carries all of them at once) rebuilds nothing, and blinking a
+    /// standing line off and on again would be its own small lie.
+    pub fn color_asked(&mut self, depth: u32) {
+        if self.color_depth_asked != depth {
+            self.color_depth_now = 0;
+        }
+        self.color_depth_asked = depth;
+    }
+
+    /// What the swapchain GAVE, read off the renderer after a frame has
+    /// been drawn — which is when the rebuild has happened and the
+    /// number describes the picture that was just put on the screen.
+    pub fn color_measured(&mut self, bits: u32) {
+        self.color_depth_now = bits;
+    }
+
+    /// What came of the last request, in the compositor's own terms.
+    pub fn color_answered(&mut self, status: String) {
+        self.color_status = status;
+    }
+
     /// Whether the compositor said it can be asked for this name.
     fn space_offered(&self, name: &str) -> bool {
         match &self.color_supported {
@@ -10462,6 +10609,228 @@ mod tests {
             std::env::remove_var(var);
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every line one set of rows is currently saying, in order —
+    /// `Row::when` obeyed, so a note that is not on screen is not here
+    /// either.
+    fn notes_of(s: &Settings, rows: &'static [Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| (r.when)(s))
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
+                _ => None,
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// The same for a whole page, band by band. `page_rows` walks the
+    /// description and leaves `Row::when` to its caller — the way
+    /// `row_acts` does — so the filter is here.
+    fn page_notes(s: &Settings, page: &'static Page) -> Vec<String> {
+        page_rows(page, s)
+            .filter(|r| (r.when)(s))
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
+                _ => None,
+            })
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// **The page says what came of the request, and says nothing when
+    /// there is nothing to say.**
+    ///
+    /// This is the owner's report ("changing HDR and the colour space
+    /// changes nothing") turned into a rule the window has to keep. A
+    /// space the compositor refuses, one it never answers for, an ICC
+    /// profile outranking the list — each leaves the picture exactly as
+    /// it was while the SPACE list draws its mark on the new name, and
+    /// the program used to say so on stderr alone. Whatever the
+    /// application reports has to reach the page.
+    #[test]
+    fn the_color_page_repeats_what_the_compositor_answered() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = color_open();
+        // Nothing applied yet is nothing to report — a window under
+        // test, and a session in its first frame.
+        assert!(
+            page_notes(&s, page(View::Color))
+                .iter()
+                .all(|n| !n.contains("space:")),
+            "a page nobody has told reported on a request nobody made"
+        );
+
+        s.color_answered("the compositor refused bt2020 pq: unsupported".to_string());
+        let said = page_notes(&s, page(View::Color));
+        assert!(
+            said.iter().any(|n| n.contains("the compositor refused bt2020 pq")),
+            "the compositor's refusal never reached the page — the control \
+             keeps its mark and the user is told nothing: {said:?}"
+        );
+    }
+
+    /// **Asked and given, and only where the giving came up SHORT.**
+    ///
+    /// A surface with no format above eight bits answers eight to a page
+    /// showing sixteen, and that is what the line is for. Repeating a
+    /// number the DEPTH chips already carry would be noise, and — the
+    /// trap this test exists to hold shut — calling a swapchain that
+    /// gave MORE than the wish a shortfall would be a lie.
+    ///
+    /// TWELVE IS THE LIE'S ADDRESS. It is one of the four depths the
+    /// page offers (`COLOR_DEPTHS`), it has no swapchain format of its
+    /// own, and by the renderer's own arrangement it rides the sixteen
+    /// bit float one — so on a healthy machine picking twelve makes the
+    /// two numbers differ, upward, every time. A rule written as
+    /// "different" put "the surface offers no more" under a user who had
+    /// just been given more, on the one depth in four where everything
+    /// worked.
+    #[test]
+    fn the_depth_line_stands_only_where_the_swapchain_gave_less() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = color_open();
+        let depth_lines = |s: &Settings| -> Vec<String> {
+            page_notes(s, page(View::Color))
+                .into_iter()
+                .filter(|n| n.starts_with("depth:"))
+                .collect()
+        };
+        assert!(depth_lines(&s).is_empty(), "an unmeasured window claimed a depth");
+
+        s.color_asked(16);
+        s.color_measured(16);
+        assert!(
+            depth_lines(&s).is_empty(),
+            "the page repeated a number the DEPTH chips already carry"
+        );
+
+        // Twelve asked, sixteen given: the renderer working as built.
+        s.color_asked(12);
+        s.color_measured(16);
+        let said = depth_lines(&s);
+        assert!(
+            said.is_empty(),
+            "the page told a user who asked for 12 and was given 16 that the \
+             surface offers no more than 16 — a shortfall reported over a \
+             swapchain that overshot the wish: {said:?}"
+        );
+
+        s.color_asked(16);
+        s.color_measured(8);
+        let said = depth_lines(&s);
+        assert_eq!(said.len(), 1, "expected one line about the depth: {said:?}");
+        assert!(
+            said[0].contains("16") && said[0].contains('8'),
+            "the line has to carry BOTH numbers — the wish alone is what the \
+             page was already saying wrongly: {}",
+            said[0]
+        );
+    }
+
+    /// **Asking again unmeasures — the page cannot report on a
+    /// swapchain that has not been asked yet.**
+    ///
+    /// The renderer's format moves at the REBUILD, and the rebuild is
+    /// inside the next frame's `render`. Between the request and that
+    /// frame the window holds a new wish beside the previous
+    /// measurement, and that pair is exactly what the depth line reads:
+    /// ask for sixteen on a machine that had been given ten and the page
+    /// would say "16 asked, 10 in the swapchain — the surface offers no
+    /// more" about a swapchain nobody had asked. One frame if the page
+    /// is redrawn, and until something redraws it if not.
+    ///
+    /// And only when the number MOVES: `apply_color!` carries the space,
+    /// the LUT and the depth together, so a user turning the SPACE list
+    /// re-asks for a depth that never changed, rebuilds nothing, and
+    /// must not blink a standing line off and on again.
+    #[test]
+    fn a_fresh_request_puts_out_the_depth_line_until_it_is_measured_again() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = color_open();
+        let depth_lines = |s: &Settings| -> Vec<String> {
+            page_notes(s, page(View::Color))
+                .into_iter()
+                .filter(|n| n.starts_with("depth:"))
+                .collect()
+        };
+
+        // A machine sitting at eight, asked for eight and given eight:
+        // agreement, and nothing to report.
+        s.color_asked(8);
+        s.color_measured(8);
+        assert!(depth_lines(&s).is_empty(), "agreement was reported as a shortfall");
+
+        // The user picks sixteen. The rebuild is armed and has not run;
+        // the only measurement in the window is the EIGHT of the format
+        // on its way out. Read as a pair it says "16 asked, 8 in the
+        // swapchain — the surface offers no more", which is a verdict on
+        // a surface nobody has asked, and may be flatly wrong about a
+        // machine that does offer sixteen.
+        s.color_asked(16);
+        let said = depth_lines(&s);
+        assert!(
+            said.is_empty(),
+            "the page passed sentence on a swapchain that has not been \
+             asked yet, using the depth of the format being replaced: {said:?}"
+        );
+
+        // The frame draws, the rebuild happens, and the surface did have
+        // sixteen after all — so the sentence above would have been a
+        // lie, not merely an early truth.
+        s.color_measured(16);
+        assert!(
+            depth_lines(&s).is_empty(),
+            "sixteen asked and sixteen given is nothing to say"
+        );
+
+        // And a real shortfall still speaks.
+        s.color_asked(12);
+        s.color_measured(8);
+        assert_eq!(depth_lines(&s).len(), 1, "a real shortfall went unsaid");
+
+        // A request that leaves the depth where it was — the SPACE list,
+        // the LUT; `apply_color!` carries all of them in one call —
+        // rebuilds nothing, so it must not disturb a standing
+        // measurement.
+        s.color_asked(12);
+        assert_eq!(
+            depth_lines(&s).len(),
+            1,
+            "re-asking for the depth already standing blinked the line out"
+        );
+    }
+
+    /// **A section painted shut says why.**
+    ///
+    /// R6 greys a section the machine cannot offer and takes it out of
+    /// the focus chain, and that stands. But grey alone reads as "not
+    /// now", and the truth is "not here, and nothing you press will
+    /// change it" — a compositor that does not speak the Color
+    /// Management protocol is not a state the user can leave. The line
+    /// is there on exactly those machines and on no other: a rail
+    /// carrying it where the feature works would be a permanent apology.
+    #[test]
+    fn the_shut_color_section_says_why_it_is_shut() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = furnished();
+        assert!(s.color_enabled, "the furnished window has a colour manager");
+        assert!(
+            notes_of(&s, &RAIL_ROWS).is_empty(),
+            "the rail apologised on a machine where COLOR SPACE works"
+        );
+
+        s.color_enabled = false;
+        let said = notes_of(&s, &RAIL_ROWS);
+        assert!(
+            said.iter().any(|n| n.contains("NO COLOR MANAGER")),
+            "COLOR SPACE is painted shut and the rail gives no reason: {said:?}"
+        );
+        assert!(
+            !rail_acts(&s).contains(&Act::OpenColor),
+            "this test is measuring nothing: the section is still a target"
+        );
     }
 
     /// A window with enough in it to draw every page: three names in
@@ -14169,7 +14538,18 @@ mod tests {
     #[test]
     fn the_navigation_fits_the_window_it_stands_in() {
         let _g = crate::widgets::theme_test_lock();
-        let s = furnished();
+        // BOTH MACHINES, and the second is the taller one. `furnished()`
+        // has a colour manager, and a rail measured only there never
+        // carries the NO COLOR MANAGER note at all — while the machine
+        // that DOES carry it keeps the greyed COLOR SPACE entry too (R6
+        // paints an unofferable section shut, it does not remove it), so
+        // the shut rail is strictly the longer of the two. Measuring the
+        // short one and calling the property proved is how a fail-closed
+        // test comes to guard everything except the case that grew.
+        let open = furnished();
+        let mut shut = furnished();
+        shut.color_enabled = false;
+        assert!(open.color_enabled && !shut.color_enabled, "two rails, not one");
         let mut fonts = nacelle::font::FontSystem::new();
         let mut dl = nacelle::draw::DrawList::new();
         let mut measured = 0;
@@ -14183,27 +14563,39 @@ mod tests {
                 let nav = Panes::of(view, m, content);
                 // Folded, the entries are in the flow and the scroll
                 // answers for them — that is the other test's ground.
-                // The ROWS box and not the bed: the bed grew to the whole
-                // column on 2026-08-18, and a rail that fits its PAINT
-                // but not the room inside the paint is still a rail with
-                // sections nobody can reach.
+                // `.rows` since the columns fix: a Column is a bed AND the
+                // box its rows stand in, and what a rail WANTS is measured
+                // against the latter.
                 let Some(rail) = nav.rail.map(|c| c.rows) else { continue };
-                measured += 1;
-                let want = s.rows_h(&RAIL_ROWS, m, rail);
+                // The point of the second state, stated so it cannot
+                // quietly stop being true: a machine with no colour
+                // manager keeps the greyed entry AND gains the note, so
+                // its rail is the longer one. If the two ever measure
+                // the same, this loop is running twice over one rail.
                 assert!(
-                    want <= rail.h + 0.01,
-                    "at {h}px the rail wants {want} px and has {} px",
-                    rail.h
+                    shut.rows_h(&RAIL_ROWS, m, rail) > open.rows_h(&RAIL_ROWS, m, rail),
+                    "at {h}px the shut rail is no taller than the open one — \
+                     the case this test was widened for is not being measured"
                 );
-                if let (Some(box_), Some(rows)) =
-                    (nav.sub.map(|c| c.rows), subrail_rows(view))
-                {
-                    let want = s.rows_h(rows, m, box_);
+                for (which, s) in [("with a colour manager", &open), ("without one", &shut)] {
+                    measured += 1;
+                    let want = s.rows_h(&RAIL_ROWS, m, rail);
                     assert!(
-                        want <= box_.h + 0.01,
-                        "at {h}px the section's column wants {want} px and has {} px",
-                        box_.h
+                        want <= rail.h + 0.01,
+                        "at {h}px, {which}, the rail wants {want} px and has {} px",
+                        rail.h
                     );
+                    if let (Some(box_), Some(rows)) =
+                        (nav.sub.map(|c| c.rows), subrail_rows(view))
+                    {
+                        let want = s.rows_h(rows, m, box_);
+                        assert!(
+                            want <= box_.h + 0.01,
+                            "at {h}px, {which}, the section's column wants {want} px \
+                             and has {} px",
+                            box_.h
+                        );
+                    }
                 }
             }
         }

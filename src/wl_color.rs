@@ -4,8 +4,13 @@
 //!
 //! Exists only in a native Wayland session — the protocol IS the
 //! session's compositor speaking. Under gamescope or X11 there is
-//! nobody to talk to, the module never starts, and the COLOR settings
-//! are shown greyed out and ignored.
+//! nobody to talk to, the module never starts, and the COLOR section is
+//! painted shut with the reason written under it.
+//!
+//! What is NOT this module's, and used to be shut in here with it: the
+//! swapchain bit depth and the grading LUT. Those are the renderer's,
+//! nobody is asked about them, and they go on working in a session with
+//! no colour manager at all (`main.rs`, `apply_color!`).
 //!
 //! The connection here is a second one to the SAME display winit
 //! holds: libwayland is built for that (one socket, many queues), and
@@ -122,13 +127,30 @@ impl ColorMgr {
     /// Applies the preferences: an ICC profile when one is chosen (the
     /// more specific wish wins), a named colour space otherwise, and
     /// the compositor's own default for "auto".
-    pub fn apply(&mut self, space: &str, icc: Option<&std::path::Path>) {
+    ///
+    /// Answers with the ONE LINE the settings window shows under the
+    /// controls that asked. Every outcome below used to be a line on
+    /// stderr and nothing else — and a desktop session has nowhere to
+    /// show a stderr, which is the same reason the ADDONS page carries
+    /// the loader's complaints. A space the compositor would not take
+    /// left the picture exactly as it was, under a list that had just
+    /// moved its mark: a control pretending to have worked.
+    pub fn apply(&mut self, space: &str, icc: Option<&std::path::Path>) -> String {
         if let Some(path) = icc {
             if self.apply_icc(path) {
-                return;
+                // Said out loud, because this is the one case where a
+                // control the user just turned is deliberately ignored:
+                // the SPACE list is live, its mark moved, and the
+                // picture is answering to a file instead.
+                return format!(
+                    "the ICC profile {} is in force — it overrides {space}",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                );
             }
         }
-        self.apply_space(space);
+        self.apply_space(space)
     }
 
     /// Whether this compositor can be asked for `space` at all.
@@ -148,12 +170,12 @@ impl ColorMgr {
             && self.state.primaries_named.contains(&(prim as u32))
     }
 
-    fn apply_space(&mut self, space: &str) {
+    fn apply_space(&mut self, space: &str) -> String {
         let Some((prim, tfs)) = preset(space) else {
             // "auto": the compositor's preference stands.
             self.surface.unset_image_description();
             let _ = self.conn.flush();
-            return;
+            return "the compositor's own choice".to_string();
         };
         let tf = tfs
             .iter()
@@ -169,7 +191,7 @@ impl ColorMgr {
             eprintln!(
                 "nacelle-desktop: the compositor does not offer '{space}' — leaving its default"
             );
-            return;
+            return format!("this compositor does not offer {space}");
         };
         let qh = self.queue.handle();
         let creator: WpImageDescriptionCreatorParamsV1 =
@@ -177,7 +199,23 @@ impl ColorMgr {
         creator.set_primaries_named(prim);
         creator.set_tf_named(tf);
         let desc = creator.create(&qh, ());
-        self.finish(desc, space);
+        if self.finish(desc, space) {
+            format!("{space} is in force")
+        } else {
+            match self.state.desc_done {
+                Some(false) => format!(
+                    "the compositor refused {space}: {}",
+                    self.state.desc_error.as_deref().unwrap_or("no reason given")
+                ),
+                // Neither ready nor failed inside the roundtrips: the
+                // description was built and never answered for. Named
+                // as its own outcome and not folded into "refused",
+                // because the two ask for different things — a refusal
+                // is the compositor's answer, silence is a question
+                // about this program.
+                _ => format!("no answer from the compositor about {space}"),
+            }
+        }
     }
 
     fn apply_icc(&mut self, path: &std::path::Path) -> bool {
@@ -295,6 +333,30 @@ impl Dispatch<WpColorManagerV1, ()> for State {
     }
 }
 
+/// The fate of an image description, written into the state the
+/// roundtrips in [`ColorMgr::apply_space`] are waiting on.
+///
+/// **BOTH ready events, and this is the whole bug.** The protocol has
+/// two: `ready` carries a 32-bit identity and `ready2` a 64-bit one, and
+/// the XML says of the first — "Starting from interface version 2, the
+/// 'ready2' event is sent instead of this event." The version an object
+/// speaks is inherited from the one that made it, all the way down from
+/// the bind, so on a compositor announcing version 2 or 3 (this build
+/// asks for up to 3) EVERY image description answers with `ready2` and
+/// with nothing else. A reader that knew only `ready` therefore heard
+/// silence, gave up after its roundtrips, and returned without ever
+/// sending `set_image_description` — leaving the surface exactly as it
+/// was. That is the "changing HDR and the colour space does nothing"
+/// the owner reported: not a wrong picture, no picture at all.
+///
+/// The match sits HERE, in the handler itself, and not in a pure helper
+/// beside it. A helper would be the easier thing to test and would test
+/// the wrong thing: the bug was never in a table of events, it was in
+/// this handler being deaf, and a test that reads a helper would pass
+/// with the handler put back the way it was. The three arguments this
+/// body ignores are the reason it looked untestable — a proxy, a
+/// connection and a queue handle — and none of them needs a compositor:
+/// a socket pair and a null object id make all three (see the tests).
 impl Dispatch<WpImageDescriptionV1, ()> for State {
     fn event(
         state: &mut Self,
@@ -304,11 +366,10 @@ impl Dispatch<WpImageDescriptionV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        use wp_image_description_v1::Event;
         match event {
-            wp_image_description_v1::Event::Ready { .. } => {
-                state.desc_done = Some(true);
-            }
-            wp_image_description_v1::Event::Failed { msg, .. } => {
+            Event::Ready { .. } | Event::Ready2 { .. } => state.desc_done = Some(true),
+            Event::Failed { msg, .. } => {
                 state.desc_done = Some(false);
                 state.desc_error = Some(msg);
             }
@@ -350,5 +411,173 @@ impl Dispatch<WpImageDescriptionCreatorIccV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use wayland_protocols::wp::color_management::v1::client::wp_image_description_v1 as desc;
+
+    /// Everything the description handler is handed and does not look
+    /// at: a proxy, a connection and a queue handle. None of it needs a
+    /// compositor.
+    ///
+    /// A SOCKET PAIR AND A NULL ID, and both halves are deliberate.
+    /// `Connection::from_socket` performs no handshake — the display
+    /// object is made on this side — so the far end of the pair is never
+    /// written to and never read; it is held open only so the near end
+    /// is not a hung-up socket. And `Proxy::from_id` accepts the null id
+    /// by design (`!same_interface(..) && !id.is_null()`), which is what
+    /// makes a proxy without a server possible at all.
+    ///
+    /// This is the difference between testing the fix and testing a
+    /// paraphrase of it: the assertions below run THE HANDLER, so the
+    /// handler going deaf again is a failure and not a silent
+    /// regression.
+    struct Wire {
+        conn: Connection,
+        _queue: EventQueue<State>,
+        qh: QueueHandle<State>,
+        desc: WpImageDescriptionV1,
+        _far_end: UnixStream,
+    }
+
+    impl Wire {
+        fn new() -> Wire {
+            let (near, far) = UnixStream::pair().expect("a socket pair");
+            let conn = Connection::from_socket(near).expect("a connection to nobody");
+            let queue: EventQueue<State> = conn.new_event_queue();
+            let qh = queue.handle();
+            let desc = WpImageDescriptionV1::from_id(&conn, ObjectId::null())
+                .expect("a null proxy");
+            Wire { conn, _queue: queue, qh, desc, _far_end: far }
+        }
+
+        /// One event through `Dispatch::event`, exactly as the queue
+        /// would deliver it.
+        fn deliver(&self, state: &mut State, event: desc::Event) {
+            <State as Dispatch<WpImageDescriptionV1, ()>>::event(
+                state,
+                &self.desc,
+                event,
+                &(),
+                &self.conn,
+                &self.qh,
+            );
+        }
+    }
+
+    /// **Every space the window offers can be turned into a request.**
+    ///
+    /// The two tables are written in two files — the names and their
+    /// ranges in `config::model`, the primaries and transfer functions
+    /// here — and only this test holds them together. A name that fell
+    /// out of step would not fail to compile and would not log anything:
+    /// [`preset`] answers None for a name it does not know, `apply_space`
+    /// reads None as "auto", and the surface would go back to the
+    /// compositor's own choice. The user would see a list where every
+    /// entry does the same nothing.
+    ///
+    /// "auto" is the one name that means no request, and it is checked
+    /// for exactly that.
+    #[test]
+    fn every_space_the_window_offers_reaches_the_protocol() {
+        for &(name, _) in crate::config::model::COLOR_SPACE_TABLE.iter() {
+            if name == crate::config::model::ColorConf::SPACE {
+                assert!(
+                    preset(name).is_none(),
+                    "'{name}' names no space and must ask for nothing"
+                );
+                continue;
+            }
+            let (_, tfs) = preset(name).unwrap_or_else(|| {
+                panic!(
+                    "the COLOR page offers '{name}' and the protocol layer \
+                     has no primaries or transfer function for it — picking \
+                     it would silently hand the surface back to the compositor"
+                )
+            });
+            assert!(
+                !tfs.is_empty(),
+                "'{name}' has no transfer function to try at all"
+            );
+        }
+    }
+
+    /// **A compositor speaking version 2 or later says `ready2`, and the
+    /// handler has to hear it.**
+    ///
+    /// This is the regression the owner reported, and it is measured
+    /// where it lived: the event goes through `Dispatch::event` and the
+    /// assertion is on `State`, the same field `apply_space` reads after
+    /// its roundtrips. Nothing about the bug is visible from the outside
+    /// — the description IS built, the compositor DOES answer, and the
+    /// answer is dropped on the floor — so the picture stays as it was
+    /// while every control on the page keeps its new mark.
+    ///
+    /// Both ready events, because a version-1 compositor still says the
+    /// old one and the fix must not trade one deafness for another.
+    #[test]
+    fn the_handler_hears_both_ready_events() {
+        let wire = Wire::new();
+
+        let mut old = State::default();
+        wire.deliver(&mut old, desc::Event::Ready { identity: 7 });
+        assert_eq!(
+            old.desc_done,
+            Some(true),
+            "a version-1 compositor's answer stopped counting"
+        );
+
+        let mut new = State::default();
+        wire.deliver(
+            &mut new,
+            desc::Event::Ready2 { identity_hi: 0, identity_lo: 7 },
+        );
+        assert_eq!(
+            new.desc_done,
+            Some(true),
+            "a version-2 compositor's answer was not heard — the colour \
+             space is built, accepted, and never set on the surface, which \
+             is exactly what the owner saw"
+        );
+    }
+
+    /// **A refusal carries the compositor's own words, and silence is a
+    /// third thing.**
+    ///
+    /// Three outcomes and not two: ready, refused, and never answered
+    /// for. `apply_space` tells them apart to write three different
+    /// lines under the SPACE list — "in force", "the compositor refused
+    /// X: <its words>", "no answer about X" — so a state nobody has told
+    /// must stay `None`, and a refusal must arrive with its message
+    /// intact. Dropping the message would leave the page saying "refused
+    /// … no reason given" over a compositor that gave one.
+    #[test]
+    fn a_refusal_reaches_the_state_with_its_reason() {
+        let wire = Wire::new();
+
+        let untold = State::default();
+        assert_eq!(
+            untold.desc_done, None,
+            "silence has to be its own answer, not a refusal"
+        );
+
+        let mut refused = State::default();
+        wire.deliver(
+            &mut refused,
+            desc::Event::Failed {
+                cause: wayland_client::WEnum::Value(desc::Cause::Unsupported),
+                msg: "no such transfer function".to_string(),
+            },
+        );
+        assert_eq!(refused.desc_done, Some(false), "a refusal read as a success");
+        assert_eq!(
+            refused.desc_error.as_deref(),
+            Some("no such transfer function"),
+            "a refusal must carry the compositor's own words to the window"
+        );
     }
 }

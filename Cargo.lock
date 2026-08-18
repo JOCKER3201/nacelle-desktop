@@ -743,6 +743,7 @@ dependencies = [
 [[package]]
 name = "libnacelle"
 version = "0.1.0"
+source = "git+https://github.com/JOCKER3201/libnacelle#ad3fe94d43a1f1bf5dbe32d2a6525acf2544a149"
 dependencies = [
  "chrono",
  "fontdue",
@@ -864,7 +865,7 @@ dependencies = [
 [[package]]
 name = "nacelle-renderer"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/nacelle-renderer#d8358a2d18ddf3769943d3e4f410beb8f9c7a4e5"
+source = "git+https://github.com/JOCKER3201/nacelle-renderer#170498034ef51c2fea18dd4c1372d0392cadf6a5"
 dependencies = [
  "ash",
  "ash-window",
@@ -2100,7 +2101,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

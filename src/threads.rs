@@ -85,12 +85,16 @@ pub const PTY: &str = "nacelle-pty";
 /// welcome is exactly the kind of thing a profile has to be able to name.
 pub const PLATE: &str = "nacelle-plate";
 
+/// The configuration writer: it takes the fsync off the event loop, so
+/// it outlives the call that started it and an audit will meet it.
+pub const CONF: &str = "nacelle-conf";
+
 /// The roll call: every name above, gathered so the tests can check them
 /// all at once. It carries no run-time duty — a thread is started by
 /// naming its own constant — so it is built only for the test binary,
 /// and a test below makes sure it never falls behind the table.
 #[cfg(test)]
-pub const ALL: [&str; 4] = [AUDIO, TELEMETRY, PTY, PLATE];
+pub const ALL: [&str; 5] = [AUDIO, TELEMETRY, PTY, PLATE, CONF];
 
 /// Starts a named thread. The only way this program makes one.
 ///
@@ -205,6 +209,12 @@ mod tests {
                 // Doc prose about threading is not a thread; only the
                 // two constructors that actually make one count.
                 let code = line.split("//").next().unwrap_or("");
+                // A test fixture that MUST make a raw thread says so on the
+                // line. Explicit, because a scan cannot see `#[cfg(test)]`
+                // and a silent exemption would hide a real escape.
+                if line.contains("thread-guard: fixture") {
+                    continue;
+                }
                 if code.contains("thread::spawn(") || code.contains("thread::Builder") {
                     stray.push(format!("{}:{}", path.display(), n + 1));
                 }

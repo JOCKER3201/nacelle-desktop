@@ -96,12 +96,6 @@ sysinfo = { version = "0.30", default-features = false }
 libc = "0.2"
 
 
-# TEMPORARY, DO NOT MERGE. The shutdown fix needs `sound::SharedMixer`,
-# which is added on libnacelle's own `fix/shutdown-race` branch and is
-# not yet on its main. Remove this block and pin the merged libnacelle
-# commit in Cargo.lock once that branch lands.
-[patch."https://github.com/JOCKER3201/libnacelle"]
-libnacelle = { path = "../libnacelle" }
 
 [profile.release]
 lto = "thin"
@@ -110,9 +104,3 @@ opt-level = 3
 # ------------------------------------------------------------------------
 
 
-# TEMPORARY — fleet worktree only, branch fix/settings-columns.
-# The settings-columns fix needs the `settings.band_pad_*` tokens and the
-# one-bed `settings.rail_fill` from the libnacelle branch beside this one.
-# REMOVE before the merge, together with the Cargo.lock pin it produces.
-[patch."https://github.com/JOCKER3201/libnacelle"]
-libnacelle = { path = "../libnacelle" }

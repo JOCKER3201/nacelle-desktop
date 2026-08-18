@@ -2627,9 +2627,7 @@ fn write_conf_soon(path: &Path, text: String, carry: bool, serial: u64) {
         d.running = true;
         // Named, because a thread with no name is what the same audit
         // could not identify twice over.
-        let spawned = std::thread::Builder::new()
-            .name("nacelle-conf-write".into())
-            .spawn(write_desk_loop);
+        let spawned = crate::threads::spawn(crate::threads::CONF, write_desk_loop);
         if spawned.is_err() {
             // No thread to be had: the saves still have to happen, and
             // a blocked interface is better than a lost setting.
@@ -4539,7 +4537,7 @@ mod tests {
 
         // Exactly what a panic inside `flush_writes`'s own sentence
         // did. The panic message this prints belongs to the fixture.
-        let _ = std::thread::spawn(|| {
+        let _ = std::thread::spawn(|| { // thread-guard: fixture
             let _held = lock_desk();
             panic!("a fixture panicking with the desk held");
         })

@@ -489,7 +489,7 @@ mod tests {
         rate: u32,
     ) -> std::thread::JoinHandle<u64> {
         let period = Duration::from_nanos(PERIOD_FRAMES * 1_000_000_000 / rate as u64);
-        std::thread::spawn(move || {
+        std::thread::spawn(move || { // thread-guard: fixture
             let ch = CHANNELS as usize;
             let mut buf = vec![0.0f32; PERIOD_FRAMES as usize * ch];
             let start = Instant::now();

@@ -331,6 +331,7 @@ pub fn start() -> Arc<Mutex<Snapshot>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     /// How many threads this process is running at this instant.
     ///
     /// `/proc/self/task` has one entry per live thread, which is the
