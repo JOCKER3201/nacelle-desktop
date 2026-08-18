@@ -10210,8 +10210,29 @@ mod tests {
     /// shape of the guard: the provider is a function of the window's
     /// own state and of nothing else, and what fills that state is the
     /// door onto the page.
+    ///
+    /// The second half opens the page, and opening it is the ONE place
+    /// allowed to ask the disk — so the disk it asks has to belong to
+    /// this test. The lock is the crate's, not this module's: XDG
+    /// variables are process-wide, `cargo test` runs on many threads,
+    /// and a second lock beside the one in `config` would guard
+    /// nothing.
     #[test]
     fn the_sound_pages_closing_line_is_not_a_question_for_the_disk() {
+        let _env = config::env_lock();
+        let root = std::env::temp_dir()
+            .join(format!("nacelle-sound-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the scratch tree must be writable");
+        for (var, at) in [
+            ("XDG_CONFIG_HOME", root.clone()),
+            ("XDG_CONFIG_DIRS", root.join("etc")),
+            ("XDG_DATA_HOME", root.clone()),
+            ("XDG_DATA_DIRS", root.join("share")),
+        ] {
+            std::env::set_var(var, at);
+        }
+
         let mut s = furnished();
         s.sound_set = "SET: SOMETHING NOBODY HAS INSTALLED".to_string();
         assert_eq!(
@@ -10230,6 +10251,11 @@ mod tests {
             !s.sound_set.is_empty(),
             "the page opened with nothing to say about its own sound set"
         );
+
+        for var in ["XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS"] {
+            std::env::remove_var(var);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A window with enough in it to draw every page: three names in

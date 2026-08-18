@@ -1152,16 +1152,23 @@ impl Stamp {
 /// every rung even where only one can win, because which one wins is
 /// itself a thing that changes when a file appears.
 ///
-/// WHAT THIS COSTS, measured on the owner's layout (six directories,
-/// so thirteen names): 136 asks of the cascade went from 816 opens of
-/// the document, 1088 absent paths knocked on and 272 parses of RON,
-/// down to six opens, eight absent paths and two parses — and up from
-/// 681 stats to 1774. Thirteen stats an ask is the price of not
-/// reading, and it is worth paying because a stat neither allocates nor
-/// parses; the syscall count of the whole exchange fell by a third.
-/// Stamping the DIRECTORIES instead would take it to seven and would
-/// stop noticing a directory that came into existence mid-session,
-/// which is what installing a package looks like.
+/// WHAT THIS COSTS, under `strace` on the owner's layout (six
+/// directories, so thirteen names): 136 asks of the cascade went from
+/// 816 opens of the document, 1088 absent paths knocked on and 272
+/// parses of RON, down to six opens, eight absent paths and two parses
+/// — and up from 681 stats to 1774. Thirteen stats an ask is the price
+/// of not reading, and it is worth paying because a stat neither
+/// allocates nor parses; the syscall count of the whole exchange fell
+/// by a third. Stamping the DIRECTORIES instead would take it to seven
+/// and would stop noticing a directory that came into existence
+/// mid-session, which is what installing a package looks like.
+///
+/// Those are MEASURED numbers and they have to be repeatable to be
+/// worth quoting: `the_cascade_asked_a_hundred_and_thirty_six_times`
+/// is the probe they were taken from, with the commands in its own
+/// comment. The 1088 is the audit's figure for the cascade's ENOENT
+/// arrived at independently (8 × 136), which is the check on the probe
+/// standing for the real program.
 fn conf_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(1 + dirs.len() * 2);
     out.push(config_dir().join(CONF_RON_CARRIED));
@@ -1311,16 +1318,28 @@ fn conf_memo_forget(serial: u64) {
 /// the program started — one per file that was found and turned into
 /// text, which is what `strace` counts as an `openat` of it.
 ///
-/// Public because it is the instrument this whole memo was built to
-/// move: a claim that the cascade is no longer walked per frame is a
-/// number or it is nothing. Nothing in the program's behaviour depends
-/// on it.
+/// The instrument this whole memo was built to move: a claim that the
+/// cascade is no longer walked per frame is a number or it is nothing.
+/// A TEST BUILD ONLY, because nothing the shipped program does reads it
+/// — an `allow(dead_code)` saying so on a `pub fn` was the same fact
+/// admitted without acting on it. [`note_conf_file_read`] is what feeds
+/// it, and in a shipped build that is an empty function.
+#[cfg(test)]
 static CONF_FILE_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Read by the test that counts frames, and by nothing the program
-/// does — an instrument, kept beside the thing it measures.
-#[allow(dead_code)]
-pub fn conf_file_reads() -> u64 {
+/// One configuration file turned into text.
+#[cfg(test)]
+fn note_conf_file_read() {
+    CONF_FILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn note_conf_file_read() {}
+
+/// Read by the tests that count reads, and by nothing the program does
+/// — an instrument, kept beside the thing it measures.
+#[cfg(test)]
+fn conf_file_reads() -> u64 {
     CONF_FILE_READS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -2143,6 +2162,25 @@ fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
         return;
     }
     f(&mut doc);
+    // THE BYTES BEFORE THE MEMO, and the order is the whole safety of
+    // what follows. Filing the memo commits this program to answering
+    // from it until a write settles or drops it; a save that dies
+    // between those two acts leaves a document no disk has ever held
+    // being handed to every reader for the rest of the session, with
+    // the file itself no longer consulted — so the user's own editing
+    // of it stops existing as well. Making the text HERE is what leaves
+    // no order in which that can happen: the one failure that belongs
+    // to the caller's thread is taken before there is anything to
+    // strand, and past this line every path through [`write_conf_soon`]
+    // ends at [`do_write_job`], which either settles the memo or drops
+    // it.
+    let text = match conf_text(&doc) {
+        Ok(t) => t,
+        // A document that will not serialise is a bug in this program
+        // rather than a slow disk, and the sentence belongs to the
+        // press that provoked it.
+        Err(e) => return report_write(&path, Err(e)),
+    };
     // The setting is IN FORCE from here, and the disk catches up behind
     // it. What the memo is given is not the document about to be
     // written — that one is the user's own rung alone — but that rung
@@ -2157,7 +2195,7 @@ fn update_conf(f: impl FnOnce(&mut DesktopConf)) {
     let effective = cascade_conf_over(&live, Some((dir.as_path(), &doc)));
     let seed = ConfSeed { mine: doc.clone(), carried };
     let serial = conf_memo_pending(&dirs, &effective, seed);
-    write_conf_soon(&path, &doc, carried, serial);
+    write_conf_soon(&path, text, carried, serial);
 }
 
 /// The last write failure said out loud, so a slider held down is one
@@ -2435,18 +2473,22 @@ fn write_conf(path: &Path, text: &str) -> std::io::Result<()> {
         return Err(e);
     }
     let _ = f.sync_all();
+    // The instrument, and only in a test build — see [`WriteStep`].
+    #[cfg(test)]
     note_write_step(WriteStep::SyncFile);
     drop(f);
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    #[cfg(test)]
     note_write_step(WriteStep::Rename);
     // The directory entry, not the file: what is being made durable
     // here is the rename.
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
+    #[cfg(test)]
     note_write_step(WriteStep::SyncDir);
     remember_written(path, text);
     Ok(())
@@ -2500,6 +2542,35 @@ struct WriteDesk {
 static WRITE_DESK: std::sync::Mutex<Option<WriteDesk>> = std::sync::Mutex::new(None);
 static WRITE_BELL: std::sync::Condvar = std::sync::Condvar::new();
 
+/// The desk, whether or not somebody panicked while holding it.
+///
+/// Poisoning is PERMANENT and process-wide: one panic under this lock
+/// and every `lock()` for the rest of the session answers `Err`. Taking
+/// that answer at face value cost the user everything they changed
+/// afterwards — the save was declined without a word, and the memo
+/// already filed for it went on handing that document to every reader
+/// while the file itself was never consulted again. Settings stopped
+/// being saved and hand-edits stopped being read, and nothing on screen
+/// said why.
+///
+/// Refusing is only right where a panic can leave a half-made thing
+/// behind, and nothing here can be half made: the only work done under
+/// this lock is a push, a pop, a drain and two flags, with nothing that
+/// unwinds standing between any of them. So the contents are as good
+/// after somebody else's panic as before it, and this takes them.
+fn lock_desk() -> std::sync::MutexGuard<'static, Option<WriteDesk>> {
+    WRITE_DESK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Sleeps at the desk until somebody rings, for the same reason
+/// [`lock_desk`] takes a poisoned lock: a wait that gave up on a panic
+/// elsewhere would strand the queue it was waiting on.
+fn wait_at_desk(
+    desk: std::sync::MutexGuard<'static, Option<WriteDesk>>,
+) -> std::sync::MutexGuard<'static, Option<WriteDesk>> {
+    WRITE_BELL.wait(desk).unwrap_or_else(|e| e.into_inner())
+}
+
 /// Hands a save to the durable writer and returns at once.
 ///
 /// THE ORDER ON DISK IS UNCHANGED — exclusive temporary, write, flush
@@ -2517,24 +2588,41 @@ static WRITE_BELL: std::sync::Condvar = std::sync::Condvar::new();
 ///
 /// **A program that stops before its writes do.** The event loop calls
 /// [`flush_writes`] on the way out, so an ordinary exit finishes every
-/// save that was asked for. A process that is KILLED loses whatever is
-/// still queued — the setting is simply not on the disk, which is the
-/// same thing that happens to a setting changed a millisecond before
-/// the power goes. What cannot happen either way is half of one: the
-/// bytes reach a temporary of this write's own and the rename is
-/// atomic, so the file at the user's path is one whole document or the
-/// other, never a mixture, and a temporary that was never renamed is
-/// litter rather than a configuration.
-fn write_conf_soon(path: &Path, doc: &DesktopConf, carry: bool, serial: u64) {
-    let text = match conf_text(doc) {
-        Ok(t) => t,
-        // A document that will not serialise never reaches a thread:
-        // this is a bug in this program and the sentence belongs to the
-        // press that provoked it.
-        Err(e) => return report_write(path, Err(e)),
-    };
+/// save that was asked for. A process that is KILLED — `SIGTERM` from a
+/// session manager at logout is the ordinary way — loses whatever is
+/// still queued.
+///
+/// The WINDOW in which that can happen is the same window as before
+/// this thread existed, and it is worth being exact about why: a save
+/// is lost to a kill from the moment it is asked for until its rename
+/// lands, and the rename waits on the same `fsync` either way. What
+/// used to fill that window was a frozen interface; what fills it now
+/// is an interface that has already shown the new value. So the change
+/// is not a longer exposure but a briefly OPTIMISTIC one — the user is
+/// told at 0 ms what used to be true at 350 ms — and a second save
+/// arriving inside it queues behind the first rather than replacing it,
+/// so a burst of distinct settings is exposed for as long as the burst
+/// takes to drain. (Measured 2026-08-18: no control feeds the queue
+/// faster than that; a dragged slider saves on release and not per
+/// frame.) A handler that flushed on `SIGTERM` would close it, and
+/// winit delivers no such event — the honest place for that is the
+/// signal work, not here.
+///
+/// What cannot happen either way is half of one: the bytes reach a
+/// temporary of this write's own and the rename is atomic, so the file
+/// at the user's path is one whole document or the other, never a
+/// mixture, and a temporary that was never renamed is litter rather
+/// than a configuration.
+///
+/// TEXT and not a document, because the one failure a save can have on
+/// the caller's own thread — a document that will not serialise — is
+/// taken by [`update_conf`] BEFORE it files the memo. Past this point
+/// every path ends at [`do_write_job`], which is what resolves the memo
+/// either way; a `return` from here that skipped it would pin the memo
+/// on a write that never happened.
+fn write_conf_soon(path: &Path, text: String, carry: bool, serial: u64) {
     let job = WriteJob { path: path.to_path_buf(), text, carry, serial };
-    let Ok(mut desk) = WRITE_DESK.lock() else { return };
+    let mut desk = lock_desk();
     let d = desk.get_or_insert_with(WriteDesk::default);
     d.queue.push_back(job);
     if !d.running {
@@ -2572,7 +2660,8 @@ struct WriterGone;
 
 impl Drop for WriterGone {
     fn drop(&mut self) {
-        if let Ok(mut desk) = WRITE_DESK.lock() {
+        {
+            let mut desk = lock_desk();
             if let Some(d) = desk.as_mut() {
                 d.busy = false;
                 d.running = false;
@@ -2587,7 +2676,7 @@ fn write_desk_loop() {
     let _gone = WriterGone;
     loop {
         let job = {
-            let Ok(mut desk) = WRITE_DESK.lock() else { return };
+            let mut desk = lock_desk();
             loop {
                 let Some(d) = desk.as_mut() else { return };
                 if let Some(job) = d.queue.pop_front() {
@@ -2598,16 +2687,16 @@ fn write_desk_loop() {
                 // on exactly this — and sleep until somebody rings.
                 d.busy = false;
                 WRITE_BELL.notify_all();
-                let Ok(next) = WRITE_BELL.wait(desk) else { return };
-                desk = next;
+                desk = wait_at_desk(desk);
             }
         };
         do_write_job(job);
-        let Ok(mut desk) = WRITE_DESK.lock() else { return };
-        if let Some(d) = desk.as_mut() {
-            d.busy = false;
+        {
+            let mut desk = lock_desk();
+            if let Some(d) = desk.as_mut() {
+                d.busy = false;
+            }
         }
-        drop(desk);
         WRITE_BELL.notify_all();
     }
 }
@@ -2638,7 +2727,7 @@ fn do_write_job(job: WriteJob) {
 /// calls it for the same reason: an assertion about a file is an
 /// assertion about a write that has finished.
 pub fn flush_writes() {
-    let Ok(mut desk) = WRITE_DESK.lock() else { return };
+    let mut desk = lock_desk();
     loop {
         let Some(d) = desk.as_ref() else { return };
         if d.queue.is_empty() && !d.busy {
@@ -2650,19 +2739,41 @@ pub fn flush_writes() {
         // down. Only reachable through [`WriterGone`], which is to say
         // through a panic in the writer.
         if !d.running {
+            // The lock goes back BEFORE the sentence, and that is not
+            // tidiness. `eprintln!` panics when the write fails, and a
+            // closed stderr is the ordinary state of a desktop session;
+            // a panic here with the desk held used to poison it, after
+            // which every save for the rest of the session was declined
+            // in silence. The sentence is worth saying. It is not worth
+            // the lock.
+            let left = d.queue.len();
+            drop(desk);
             eprintln!(
-                "nacelle-desktop: {} settings writes could not be finished \u{2014} \
-                 the writer is gone",
-                d.queue.len()
+                "nacelle-desktop: {left} settings writes could not be finished \u{2014} \
+                 the writer is gone"
             );
             return;
         }
-        let Ok(next) = WRITE_BELL.wait(desk) else { return };
-        desk = next;
+        desk = wait_at_desk(desk);
     }
 }
 
-/// One durable step of a save, in the order [`write_conf`] takes them.
+/// THE INSTRUMENT ON A SAVE — a test build and no other.
+///
+/// What this module changed on 2026-08-18 is not visible in any value
+/// the program computes: the order of the three durable steps and the
+/// thread they ran on ARE the fix, and a test that could only read the
+/// finished file would pass just as well on the arrangement that held
+/// the interface for a third of a second. So the steps are written
+/// down as they happen.
+///
+/// Behind `cfg(test)` rather than behind an `allow(dead_code)`, which
+/// is the same statement made honestly: nothing the shipped program
+/// does reads any of this, and a mutex, a thread id and a `Vec` push
+/// three times per save are not a cost a user should carry for a test.
+/// The three lines in [`write_conf`] that feed it carry the same
+/// attribute; they compile to nothing at all.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WriteStep {
     SyncFile,
@@ -2670,17 +2781,13 @@ enum WriteStep {
     SyncDir,
 }
 
-/// What the last save did and where.
-///
-/// Kept because the thing this change is about is not visible in any
-/// value the program computes: the order of the three steps and the
-/// thread they ran on ARE the fix, and a test that could only read the
-/// file would pass just as well on the arrangement that blocked the
-/// interface for a third of a second. Three enum values and a thread
+/// What the last save did and where. Three enum values and a thread
 /// id, rewritten seven times in a session.
+#[cfg(test)]
 static LAST_WRITE: std::sync::Mutex<Vec<(WriteStep, std::thread::ThreadId)>> =
     std::sync::Mutex::new(Vec::new());
 
+#[cfg(test)]
 fn note_write_step(step: WriteStep) {
     let Ok(mut log) = LAST_WRITE.lock() else { return };
     if step == WriteStep::SyncFile {
@@ -2690,7 +2797,7 @@ fn note_write_step(step: WriteStep) {
 }
 
 /// The steps the last save took, with the thread that took them.
-#[allow(dead_code)]
+#[cfg(test)]
 fn last_write_steps() -> Vec<(WriteStep, std::thread::ThreadId)> {
     LAST_WRITE.lock().map(|l| l.clone()).unwrap_or_default()
 }
@@ -3179,7 +3286,7 @@ fn read_conf_dir(dir: &Path) -> Result<Option<DesktopConf>, String> {
     let ron = dir.join(CONF_RON);
     match std::fs::read_to_string(&ron) {
         Ok(text) => {
-            CONF_FILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            note_conf_file_read();
             return match ron_options().from_str::<DesktopConf>(&text) {
                 Ok(doc) => {
                     warn_once_about_dead_conf(dir);
@@ -3215,7 +3322,7 @@ fn read_conf_dir(dir: &Path) -> Result<Option<DesktopConf>, String> {
     }
     let legacy = dir.join(CONF_FILE);
     let Ok(text) = std::fs::read_to_string(&legacy) else { return Ok(None) };
-    CONF_FILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    note_conf_file_read();
     warn_once_about_conf_format(&legacy);
     Ok(Some(DesktopConf::from_legacy(&parse_kv(&text))))
 }
@@ -3397,6 +3504,33 @@ fn find_file(dir: &Path, ext: &str) -> Option<PathBuf> {
 
 
 
+/// Serialises every test that writes an XDG variable — IN THIS CRATE,
+/// not in this module.
+///
+/// `std::env::set_var` is PROCESS-wide while `cargo test` runs its
+/// tests on many threads: one test pointing XDG_CONFIG_HOME at its own
+/// directory silently redirected another test's `resolve()` half way
+/// through, and the theme-switch test read somebody else's
+/// configuration and saw the wrong accent. Nothing about that was
+/// visible in the failure — the colour was simply not the one the theme
+/// names. Per-PID directories are not enough; the variable itself is
+/// the shared thing.
+///
+/// It lives out here rather than inside `mod tests` because the
+/// variable it guards is not this module's either. A settings-window
+/// test that opens a page reaches [`active_sounds_dir`] and so reads
+/// the same environment, and a second lock would guard nothing: one
+/// process, one variable, one lock.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // A poisoned lock only means some other test panicked while holding
+    // it; the variable it set is being overwritten anyway.
+    L.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     // A widget KIND: only the tests still name one directly — the
@@ -3427,7 +3561,12 @@ mod tests {
     // behaviour, with the one thing a test cannot see — "the bytes have
     // landed" — made visible. A test that wants the OTHER half, that the
     // running program answers before the disk does, calls `super::` by
-    // name and says so ([`a_setting_is_in_force_before_its_bytes_are`]).
+    // name and says so: `a_save_is_made_durable_off_the_thread_that_-
+    // asked_for_it`, `a_second_save_is_built_on_the_first_and_not_on_-
+    // the_disk` and `a_panic_at_the_desk_does_not_cost_the_next_save`.
+    // Named in prose rather than in a doc link because this is a `//`
+    // block on an item that has none, and a link nothing resolves is a
+    // promise of a test that need not exist.
     //
     // Shadowing works because a glob import loses to an item declared in
     // the module, which is what makes this one block instead of an edit
@@ -4272,6 +4411,113 @@ mod tests {
         assert!(text.contains("42"), "the second save is in the file too: {text}");
 
         conf_root_done(&dir);
+    }
+
+    /// A panic ANYWHERE near the desk used to cost the user every
+    /// setting they changed after it.
+    ///
+    /// Poisoning is permanent and process-wide, and the two places that
+    /// reached for the desk read `Err` as "nothing to do here": the job
+    /// was dropped without a word, and the memo already filed for it
+    /// went on handing that document to every reader while the file
+    /// itself was never opened again. Settings stopped being saved and
+    /// hand-edits stopped being read, from that moment until the
+    /// desktop was restarted, with nothing on screen to connect it to.
+    ///
+    /// The panic is not hypothetical: `flush_writes` says its one
+    /// sentence with `eprintln!`, which panics when stderr will not
+    /// take it, and it used to say it holding the desk.
+    ///
+    /// Two assertions, because the loss had two halves — the file that
+    /// was not written, and the reader that was answered anyway.
+    #[test]
+    fn a_panic_at_the_desk_does_not_cost_the_next_save() {
+        let _env = env_lock();
+        let dir = conf_root("conf-desk-poison", "(theme: Named(\"crimson\"))\n");
+        // Nothing of anybody else's still in the air: the fixture below
+        // strands whatever is queued at the moment it fires, and that
+        // is meant to be this test's business alone.
+        flush_writes();
+
+        // Exactly what a panic inside `flush_writes`'s own sentence
+        // did. The panic message this prints belongs to the fixture.
+        let _ = std::thread::spawn(|| {
+            let _held = lock_desk();
+            panic!("a fixture panicking with the desk held");
+        })
+        .join();
+        assert!(WRITE_DESK.is_poisoned(), "the fixture poisoned nothing, so this proves nothing");
+
+        super::set_engine_theme("azure");
+        flush_writes();
+        assert!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap().contains("azure"),
+            "the save was dropped on the floor because somebody else had panicked"
+        );
+
+        // And the memo is not left standing for a write that never
+        // happened: the disk is still in charge of the answer.
+        std::fs::write(dir.join(CONF_RON), "(theme: Named(\"ochre\"))\n").unwrap();
+        assert_eq!(
+            conf().theme.name(),
+            Some("ochre"),
+            "the memo went on answering for a document the disk had never carried"
+        );
+
+        // Put the flag down again so the rest of the suite runs against
+        // the ordinary state rather than the cured one.
+        WRITE_DESK.clear_poison();
+        conf_root_done(&dir);
+    }
+
+    /// THE OTHER HALF OF THE MEASUREMENT — an instrument, not an
+    /// assertion about a value.
+    ///
+    /// The figures quoted in [`conf_files`] have two provenances, and
+    /// only one of them was ever in this repository. The counter half
+    /// (`the_settings_file_is_read_once_and_not_once_a_frame`) is here
+    /// and repeatable. The `strace` half — 816 opens of the document
+    /// and 1088 absent paths knocked on before, six and eight after,
+    /// over 136 asks — came from a probe that was never committed, so
+    /// a reader had to take it on trust. This is that probe.
+    ///
+    /// Ignored by default because it measures rather than asserts, and
+    /// because it reads the ambient XDG layout on purpose: the numbers
+    /// are of a MACHINE, and the owner's has six configuration
+    /// directories and therefore thirteen names to stamp. To repeat it:
+    ///
+    /// ```text
+    /// cargo test --offline --no-run
+    /// strace -f -e trace=openat,statx -o /tmp/cfg.log \
+    ///     target/debug/deps/nacelle_desktop-<hash> \
+    ///     --ignored --test-threads=1 --exact \
+    ///     config::tests::the_cascade_asked_a_hundred_and_thirty_six_times
+    /// grep -c '"[^"]*nacelle-desktop.ron", O_RDONLY' /tmp/cfg.log   # opens
+    /// grep -c 'ENOENT' /tmp/cfg.log                                 # absent
+    /// ```
+    ///
+    /// The BEFORE column is the same run with the memo taken out of
+    /// [`conf`] — the one line `if let Some(doc) = conf_memo_hit(...)`
+    /// — which is the change being measured and nothing else.
+    ///
+    /// It does assert one thing, and it is the property the numbers are
+    /// about rather than any particular number: asking a second time
+    /// costs nothing, so the count does not grow with the asking.
+    #[test]
+    #[ignore = "an instrument: run it alone, under a syscall tracer"]
+    fn the_cascade_asked_a_hundred_and_thirty_six_times() {
+        let _env = env_lock();
+        let base = conf_file_reads();
+        for _ in 0..136 {
+            let _ = conf();
+        }
+        let first = conf_file_reads() - base;
+        for _ in 0..136 {
+            let _ = conf();
+        }
+        let second = conf_file_reads() - base - first;
+        println!("136 asks: {first} reads off the disk; 136 more: {second}");
+        assert_eq!(second, 0, "the cascade is still being read once per ask");
     }
 
     /// A directory of this test's own, emptied first.
@@ -5648,25 +5894,6 @@ mod tests {
     /// process-wide registry is fixed by the first call *or the first
     /// read*, so one test resolving a layout before the staging would
     /// freeze it empty for all the others.
-    /// Serialises every test that writes an XDG variable.
-    ///
-    /// `std::env::set_var` is PROCESS-wide while `cargo test` runs its
-    /// tests on many threads: one test pointing XDG_CONFIG_HOME at its
-    /// own directory silently redirected another test's `resolve()`
-    /// half way through, and the theme-switch test read somebody else's
-    /// configuration and saw the wrong accent. Nothing about that was
-    /// visible in the failure — the colour was simply not the one the
-    /// theme names. Per-PID directories are not enough; the variable
-    /// itself is the shared thing.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        // A poisoned lock only means some other test panicked while
-        // holding it; the variable it set is being overwritten anyway.
-        L.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     fn fixture_registry() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
