@@ -141,6 +141,15 @@
 //! answers to costs that screen nothing but a line in the log — it
 //! takes the default.
 //!
+//! A file that has NEVER named a monitor is converted once, at the first
+//! start that can see which monitor is on which socket, and the log says
+//! so. After that the two vocabularies stand side by side and nothing
+//! rewrites either of them: a socket line typed into a file that names a
+//! monitor anywhere is a rule about that socket and stays one. Two
+//! monitors that give the same name — some models print one serial for
+//! every unit — are left keyed by their sockets, which is the only
+//! vocabulary that can still tell them apart.
+//!
 //! A number in the order the screens came up would be no name at all:
 //! which monitor is switched on first is not a property of anything.
 //!
@@ -834,8 +843,9 @@ pub fn main_screen_key() -> Option<String> {
 /// Gives the role to one screen. `None` writes [`Choice::Off`] rather
 /// than dropping the field — a user who has said "let the display
 /// server decide" has to outrank a system file naming a screen that is
-/// not on this desk. Taking the setting back altogether is
-/// [`clear_screen_layauts`]'s job.
+/// not on this desk. Taking the setting back altogether — leaving the
+/// question to the rest of the cascade, which is a third answer and not
+/// the same as either — is [`clear_main_screen`].
 ///
 /// Read here and written elsewhere: the settings window's SCREENS page
 /// calls this once it exists, and until then the user writes the field
@@ -875,8 +885,18 @@ pub fn set_main_screen(key: Option<&str>) {
 pub fn migrate_screen_identities(live: &[crate::screens::ScreenId]) -> bool {
     // Asked of the CASCADE first, and only as a question: is there a
     // socket-keyed entry anywhere that one of today's monitors would
-    // claim? A machine that has never been configured answers no, and
-    // its home directory is not touched.
+    // claim? Most machines answer no, and on those the door below is
+    // never opened at all.
+    //
+    // WHICH IS NOT ONLY A SAVING OF SYSCALLS. Opening that door READS
+    // the user's own file, and a file that cannot be read is copied
+    // aside and reported to them in the words "the setting you just
+    // changed has REPLACED it" — see [`rescue_unreadable`], which is
+    // written for the one moment that sentence is true. Nothing here
+    // changes a setting. So a start with nothing to migrate must not
+    // reach that door, or every start on a machine with one broken
+    // bracket in its file would leave a rescue copy and a notice about
+    // a setting nobody touched.
     let seen = conf();
     let worth_it = live.iter().any(|id| {
         let (Some(_), Some(c)) = (&id.edid, &id.connector) else { return false };
@@ -3227,10 +3247,26 @@ pub fn clear_look_and_feel() {
 }
 
 /// Takes back every per-screen assignment, leaving the default
-/// arrangement alone.
+/// arrangement alone — and leaving the MAIN SCREEN role alone with it,
+/// the role being a different setting about the same screens and not a
+/// layaut. [`clear_main_screen`] is that one.
 #[allow(dead_code)]
 pub fn clear_screen_layauts() {
     update_conf(|c| c.screens.clear());
+}
+
+/// Takes the MAIN SCREEN setting out of the file altogether, which is
+/// the ONE answer [`set_main_screen`] cannot write.
+///
+/// Three states, three ways in: a name and an explicit "the display
+/// server's, whatever it is" are both [`set_main_screen`]'s, and this
+/// is the third — the question handed back to the rest of the cascade,
+/// so that a system file naming a screen is heard again. Removing the
+/// field is what says that, because an empty value would be the `Off`
+/// above and would go on outranking it.
+#[allow(dead_code)]
+pub fn clear_main_screen() {
+    update_conf(|c| c.main_screen = Choice::Inherit);
 }
 
 /// One level of a search path: `<base>/nacelle` and, directly behind
@@ -7465,12 +7501,154 @@ mod tests {
         assert_eq!(choose_layaut(&moved, &doc.screens(), "console", &installed).name, "cockpit");
     }
 
+    /// TWO OF THE SAME MONITOR, which is the case that costs somebody a
+    /// desktop if the migration is not asked whether a name names one
+    /// screen or two.
+    ///
+    /// The AORUS FO32U2P prints 0x01010101 in the serial field of every
+    /// unit sold, so a pair of them is one identity — and the identity
+    /// is looked up before the socket. Migrating the first one's socket
+    /// entry to that shared name would hand its layaut to BOTH screens,
+    /// and the second one's entry would still be in the file, still
+    /// correct, and never read again.
+    #[test]
+    fn two_of_the_same_monitor_keep_the_desktops_their_sockets_name() {
+        fixture_registry();
+        let mut doc = DesktopConf {
+            screens: [
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+                ("DP-2".to_string(), Choice::Named("hangar".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        };
+        let twin = |socket: &str| ScreenId {
+            edid: Some("GBT-3215-01010101".into()),
+            connector: Some(socket.to_string()),
+        };
+        let live = [twin("DP-1"), twin("DP-2")];
+
+        assert!(
+            !doc.migrate_screens(&live),
+            "a name both screens answer to is a name neither of them may be written under"
+        );
+        assert_eq!(doc.screens.get("DP-1"), Some(&Choice::Named("cockpit".into())));
+        assert_eq!(doc.screens.get("DP-2"), Some(&Choice::Named("hangar".into())));
+        assert!(
+            !doc.screens.keys().any(|k| k.starts_with(crate::screens::EDID_PREFIX)),
+            "and no shared name was written: {:?}",
+            doc.screens
+        );
+
+        // Which is the whole point: both keep the desktop they had.
+        let installed = ["default".into(), "console".into(), "cockpit".into(), "hangar".to_string()];
+        let assigned = doc.screens();
+        assert_eq!(choose_layaut(&live[0], &assigned, "console", &installed).name, "cockpit");
+        assert_eq!(choose_layaut(&live[1], &assigned, "console", &installed).name, "hangar");
+
+        // The role is the same question asked once: "the main screen"
+        // cannot be a name two screens answer to either.
+        let mut role = DesktopConf {
+            main_screen: Choice::Named("DP-2".into()),
+            ..DesktopConf::default()
+        };
+        assert!(!role.migrate_screens(&live));
+        assert_eq!(
+            role.main_screen,
+            Choice::Named("DP-2".into()),
+            "the socket is the only vocabulary that still tells the two apart"
+        );
+
+        // One of them alone is a perfectly ordinary monitor, and this
+        // is what says the refusal above is about the AMBIGUITY and not
+        // about the model.
+        let mut alone = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(alone.migrate_screens(&[twin("DP-1")]));
+        assert_eq!(
+            alone.screens.get("edid:GBT-3215-01010101"),
+            Some(&Choice::Named("cockpit".into()))
+        );
+    }
+
+    /// A RULE ABOUT A SOCKET, written on purpose, into a file that has
+    /// already been migrated. The program must not argue with it.
+    ///
+    /// The socket vocabulary is documented as being good for "whatever
+    /// is plugged in here", and a promise that only holds until the
+    /// next start is not one. So the migration is bounded by the one
+    /// thing that says WHEN a document was written: a document naming a
+    /// monitor anywhere is a document written since monitors could be
+    /// named, and its socket keys are somebody's decision rather than
+    /// the old vocabulary.
+    #[test]
+    fn a_socket_rule_in_a_file_that_names_a_monitor_is_left_alone() {
+        fixture_registry();
+        // Last month's migration gave the LG its own name. Today the
+        // user writes a rule about the socket the Dell hangs off.
+        let mut doc = DesktopConf {
+            screens: [
+                ("edid:GSM-5B0F".to_string(), Choice::Named("hangar".into())),
+                ("DP-1".to_string(), Choice::Named("cockpit".into())),
+            ]
+            .into_iter()
+            .collect(),
+            ..DesktopConf::default()
+        };
+        let live = [
+            ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) },
+            ScreenId { edid: Some("GSM-5B0F".into()), connector: Some("HDMI-A-1".into()) },
+        ];
+
+        assert!(!doc.migrate_screens(&live), "this file has nothing left to migrate");
+        assert_eq!(
+            doc.screens.get("DP-1"),
+            Some(&Choice::Named("cockpit".into())),
+            "the rule about the socket stands: rewriting it would be an argument, not a migration"
+        );
+        assert!(
+            !doc.screens.contains_key("edid:DEL-41B2-0123ABCD"),
+            "and no rule about the Dell was invented from it"
+        );
+
+        // The same bound reached through the ROLE: naming the main
+        // screen by its monitor is naming a monitor.
+        let mut role = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            main_screen: Choice::Named("edid:GSM-5B0F".into()),
+            ..DesktopConf::default()
+        };
+        assert!(!role.migrate_screens(&live));
+        assert_eq!(role.screens.get("DP-1"), Some(&Choice::Named("cockpit".into())));
+
+        // And a document that has never named one is still converted,
+        // which is what the bound is a bound ON.
+        let mut old = DesktopConf {
+            screens: [("DP-1".to_string(), Choice::Named("cockpit".into()))].into_iter().collect(),
+            ..DesktopConf::default()
+        };
+        assert!(old.migrate_screens(&live));
+        assert_eq!(
+            old.screens.get("edid:DEL-41B2-0123ABCD"),
+            Some(&Choice::Named("cockpit".into()))
+        );
+        assert!(
+            !old.migrate_screens(&live),
+            "and having named one, it is never converted again"
+        );
+    }
+
     /// What the migration refuses to do. Each of these is a way of
     /// losing a setting, and none of them is worth the tidiness.
     #[test]
     fn the_migration_never_overwrites_and_never_drops() {
         // An entry already naming the monitor is the answer, and the
-        // socket entry beside it may be a rule about the socket.
+        // socket entry beside it stays where it is — a file that names
+        // a monitor is past migrating, whichever of the two lines the
+        // reader's eye falls on first.
         let mut doc = DesktopConf {
             screens: [
                 ("DP-1".to_string(), Choice::Named("hangar".into())),
@@ -7561,6 +7739,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// THE DOOR ITSELF: a change that turns out not to be one leaves no
+    /// trace at all.
+    ///
+    /// `update_conf_when` is on the way out of every write this program
+    /// makes — `update_conf` is one line of it — so what it does when
+    /// the change answers "nothing happened" is worth pinning on its
+    /// own rather than through whichever caller happens to ask today.
+    /// No file, no directory, and no memo either: filing the memo would
+    /// hand every later reader a document no disk has ever held.
+    #[test]
+    fn a_change_that_turns_out_not_to_be_one_leaves_no_trace() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("update-when");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        let path = dir.join(CONF_RON);
+
+        update_conf_when(|c| {
+            c.theme = Choice::Named("crimson".into());
+            false
+        });
+        flush_writes();
+        assert!(!path.exists(), "no file: {}", path.display());
+        assert!(!dir.exists(), "and not even the directory: {}", dir.display());
+        assert_eq!(
+            conf().theme.name(),
+            None,
+            "and nothing was remembered either, or the next reader would be \
+             answered from a document that was never written"
+        );
+
+        // The same door with something to write goes all the way to the
+        // disk, which is what says the check above is about the answer
+        // and not about the door being shut.
+        update_conf_when(|c| {
+            c.theme = Choice::Named("crimson".into());
+            true
+        });
+        flush_writes();
+        assert_eq!(conf().theme.name(), Some("crimson"));
+        let text = std::fs::read_to_string(&path).expect("the file the change wrote");
+        assert!(text.contains("crimson"), "{text}");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// THE PRECHECK, and why it is not merely a saving of syscalls.
+    ///
+    /// Opening the write door READS the user's file, and a file that
+    /// cannot be read is copied aside and reported to them in the words
+    /// "the setting you just changed has REPLACED it". A start is not a
+    /// setting. So a machine with one bracket missing from its
+    /// configuration must be able to start every day without collecting
+    /// a rescue copy per start and a notice about a change nobody made.
+    #[test]
+    fn a_start_with_nothing_to_migrate_does_not_rescue_a_broken_file() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("migrate-broken");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", root.join("etc"));
+        let dir = root.join(FAMILY_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = take_conf_rescued();
+
+        // Somebody's whole configuration, one bracket short — and not a
+        // word in it about any screen.
+        let mine = "(\n    theme: Named(\"crimson\",\n    layaut: Named(\"console\"),\n)\n";
+        std::fs::write(dir.join(CONF_RON), mine).unwrap();
+
+        let live =
+            [ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-1".into()) }];
+        assert!(!migrate_screen_identities(&live), "there is nothing to migrate");
+        flush_writes();
+
+        assert_eq!(
+            rescue_copies(&dir),
+            Vec::<String>::new(),
+            "a start makes no rescue copy: nothing was being replaced"
+        );
+        assert_eq!(
+            take_conf_rescued(),
+            None,
+            "and the user is told nothing, there being nothing to tell them"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONF_RON)).unwrap(),
+            mine,
+            "their own text is exactly where they left it"
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The MAIN SCREEN role written down and taken back. What it means
     /// is `screens::MainScreenDuty`'s business; this is about the
     /// setting carrying it.
@@ -7600,6 +7878,71 @@ mod tests {
             set_main_screen(Some(bad));
             assert_eq!(conf().main_screen, Choice::Off, "'{bad}' must not become the main screen");
         }
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_DIRS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// THE THIRD ANSWER, which is the one a setter offering a name and
+    /// an off cannot write: the question handed back to the cascade.
+    ///
+    /// An explicit "whatever the display server says" and "nothing was
+    /// said here" look the same on this machine and are opposite
+    /// answers on a machine whose administrator named a screen — the
+    /// first outranks that file, the second lets it through. So taking
+    /// the setting back has to REMOVE the field, and there has to be
+    /// something that does.
+    #[test]
+    fn the_main_screen_setting_can_be_taken_out_of_the_file_altogether() {
+        fixture_registry();
+        let _env = env_lock();
+        let root = scratch("main-screen-clear");
+        let etc = root.join("etc");
+        std::fs::create_dir_all(etc.join(FAMILY_DIR)).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::set_var("XDG_CONFIG_DIRS", &etc);
+        // The machine's own file names a screen this desk may not have.
+        std::fs::write(
+            etc.join(FAMILY_DIR).join(CONF_RON),
+            "(main_screen: Named(\"edid:GSM-5B0F\"))\n",
+        )
+        .unwrap();
+
+        assert_eq!(main_screen_key().as_deref(), Some("edid:GSM-5B0F"), "the system file answers");
+
+        set_main_screen(Some("edid:DEL-41B2-0123ABCD"));
+        assert_eq!(main_screen_key().as_deref(), Some("edid:DEL-41B2-0123ABCD"));
+
+        set_main_screen(None);
+        assert_eq!(conf().main_screen, Choice::Off);
+        assert_eq!(main_screen_key(), None, "an off silences the system file too");
+
+        clear_main_screen();
+        flush_writes();
+        assert_eq!(
+            main_screen_key().as_deref(),
+            Some("edid:GSM-5B0F"),
+            "the rest of the cascade is heard again, which an off could not have allowed"
+        );
+        let text = std::fs::read_to_string(root.join(FAMILY_DIR).join(CONF_RON)).unwrap();
+        assert!(
+            !text.contains("main_screen"),
+            "and the field is GONE from the user's file rather than emptied: {text}"
+        );
+
+        // The role is its own setting: clearing the assignments leaves
+        // it alone, and clearing it leaves them alone.
+        set_layaut_for_screen("edid:DEL-41B2-0123ABCD", "cockpit");
+        set_main_screen(Some("edid:DEL-41B2-0123ABCD"));
+        clear_screen_layauts();
+        flush_writes();
+        assert!(conf().screens().is_empty(), "the assignments are gone");
+        assert_eq!(
+            main_screen_key().as_deref(),
+            Some("edid:DEL-41B2-0123ABCD"),
+            "and the role is not an assignment"
+        );
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_CONFIG_DIRS");

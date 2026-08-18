@@ -99,10 +99,20 @@ pub struct Edid {
 /// checksum answers "did the firmware's author add up correctly", and
 /// monitors that get it wrong are common enough that refusing them
 /// would cost their owners the identity this whole module exists to
-/// give. What IS checked is the one field a key is built from: a
-/// manufacturer whose letters are not letters yields no identity
-/// ([`Edid::identity`]), so corruption cannot quietly produce a key
-/// that points at the wrong screen — it produces no key.
+/// give.
+///
+/// WHAT THAT COSTS, plainly, because the next reader will weigh the
+/// same trade: of the three fields a key is built from, only the
+/// maker's is checked at all — its letters are five-bit numbers with a
+/// range, so nonsense there yields no identity ([`Edid::identity`]).
+/// The product code and the serial number are sixteen and thirty-two
+/// bits of anything, and a flipped bit in either produces a
+/// well-shaped key that simply matches nothing in the file: that
+/// screen quietly takes the default settings until the byte reads
+/// right again. What it CANNOT do is point at another screen — a wrong
+/// key is a key nothing answers to, not one somebody else answers to —
+/// and a checksum would turn the same flipped bit into no key at all,
+/// which costs that screen exactly as much.
 pub fn parse(bytes: &[u8]) -> Option<Edid> {
     if bytes.len() < BLOCK || bytes[..HEADER.len()] != HEADER {
         return None;
@@ -129,12 +139,50 @@ pub fn parse(bytes: &[u8]) -> Option<Edid> {
 /// and which card a monitor hangs off is not knowledge this program
 /// has, so the connector is matched as a SUFFIX. The leading dash is
 /// what keeps `DP-1` off `eDP-1`'s file.
+///
+/// WHICH IS AMBIGUOUS ON A MACHINE WITH TWO GRAPHICS CARDS: `card0-DP-1`
+/// and `card1-DP-1` are two sockets with one name, and the display
+/// server named only one of them. Taking whichever the directory listing
+/// happened to hand over first would be a coin toss for the name every
+/// setting of that screen is written under, so all of them are read and
+/// they have to AGREE ([`agreed`]). When they do not, this screen has no
+/// identity worth the risk and takes the socket's name instead — the
+/// answer it had before monitors were read at all.
 pub fn read(connector: &str) -> Option<Edid> {
     let suffix = format!("-{connector}");
-    let dir = std::fs::read_dir("/sys/class/drm").ok()?.flatten().map(|e| e.path()).find(|p| {
-        p.file_name().map(|n| n.to_string_lossy().ends_with(&suffix)).unwrap_or(false)
-    })?;
-    parse(&std::fs::read(dir.join("edid")).ok()?)
+    let blocks: Vec<Edid> = std::fs::read_dir("/sys/class/drm")
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().map(|n| n.to_string_lossy().ends_with(&suffix)).unwrap_or(false)
+        })
+        .filter_map(|p| std::fs::read(p.join("edid")).ok().as_deref().and_then(parse))
+        .collect();
+    let found = agreed(&blocks).cloned();
+    if found.is_none() && !blocks.is_empty() {
+        eprintln!(
+            "nacelle-desktop: more than one card publishes a monitor for '{connector}' and \
+             they are different monitors \u{2014} that screen is named by its socket"
+        );
+    }
+    found
+}
+
+/// The one monitor a set of candidate blocks agrees on: the first of
+/// them when they all name the same screen, and nothing when they do
+/// not.
+///
+/// Identity and not the whole block, because that is the thing being
+/// decided — two readings of one monitor may differ in a descriptor
+/// this program does not use, and neither of those readings is the
+/// wrong screen.
+fn agreed(blocks: &[Edid]) -> Option<&Edid> {
+    let first = blocks.first()?;
+    blocks
+        .iter()
+        .all(|b| b.identity() == first.identity())
+        .then_some(first)
 }
 
 impl Edid {
@@ -382,6 +430,28 @@ pub(crate) mod tests {
         assert!(e.diagonal_in().is_none());
         let e = parse(&block("ACR", 1, 1, (60, 0), None, None)).unwrap();
         assert!(e.diagonal_in().is_none());
+    }
+
+    /// Two cards, one connector name. The kernel's directory listing
+    /// decides nothing here: either the readings name one screen or
+    /// this program does not know which screen it is looking at.
+    #[test]
+    fn a_connector_two_cards_answer_for_is_named_only_when_they_agree() {
+        let dell = parse(&block("DEL", 0x41B2, 0x0123ABCD, (60, 34), None, None)).unwrap();
+        let lg = parse(&block("GSM", 0x5B0F, 0x00000007, (60, 34), None, None)).unwrap();
+
+        assert!(agreed(&[]).is_none(), "no card answered at all");
+        assert_eq!(agreed(std::slice::from_ref(&dell)), Some(&dell), "one answer is the answer");
+        assert_eq!(
+            agreed(&[dell.clone(), dell.clone()]),
+            Some(&dell),
+            "the same monitor read twice is still that monitor"
+        );
+        assert!(
+            agreed(&[dell.clone(), lg.clone()]).is_none(),
+            "two different monitors on one connector name: no identity is worth the guess"
+        );
+        assert!(agreed(&[lg, dell]).is_none(), "and the listing's order decides nothing");
     }
 
     /// With no name descriptor the label falls back to what the block

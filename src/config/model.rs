@@ -275,30 +275,57 @@ impl DesktopConf {
     /// as the key a screen is looked up by. It moves rather than
     /// copies, so the same file migrated twice is the same file.
     ///
-    /// Three things it will not do, each for a reason:
+    /// IT RUNS ON A DOCUMENT THAT HAS NEVER NAMED A MONITOR, AND ON NO
+    /// OTHER — and that is what makes it an act rather than a policy.
+    /// A document naming a monitor anywhere, in the screen map or in
+    /// the role, was written after monitors could be named: its socket
+    /// keys are somebody's rule about a SOCKET — "whatever hangs off
+    /// DP-1" — and rewriting those would be an opinion about a decision
+    /// that has already been made. Migrating makes the document name a
+    /// monitor, so it happens once per file, announces itself in the
+    /// log, and a rule written afterwards stands for good. Without that
+    /// bound the user could rewrite the rule and the program would
+    /// rewrite it back at every start, which is not a migration but an
+    /// argument.
+    ///
+    /// Three more things it will not do, each for a reason:
     ///
     /// It never touches a key whose screen it cannot see. A monitor
     /// that is off today is not a monitor whose settings are stale, and
     /// a socket nothing is plugged into is a socket somebody may plug
     /// something into tomorrow.
     ///
-    /// It never overwrites an entry that already names the monitor. An
-    /// identity key present in the file was written deliberately and is
-    /// the answer; the socket entry beside it is left exactly where it
-    /// is, because it may be a rule about the SOCKET — "whatever hangs
-    /// off DP-1" — and this is a migration, not an opinion about that.
+    /// IT NEVER WRITES A NAME THAT TWO OF TODAY'S SCREENS ANSWER TO.
+    /// Two units of one model can be one identity — the AORUS FO32U2P
+    /// prints the same serial in every unit — and the identity is
+    /// looked up before the socket, so a single such line would answer
+    /// for BOTH screens and the second one would silently take the
+    /// first one's desktop. `screens::shared_identities` is the
+    /// question; the answer is to leave both socket entries exactly
+    /// where they are, which is the one vocabulary that still tells
+    /// those two apart.
     ///
     /// It never removes anything whose value it has not carried
     /// somewhere else. Every path here either moves an entry whole or
     /// leaves it alone.
     pub fn migrate_screens(&mut self, live: &[crate::screens::ScreenId]) -> bool {
+        if self.names_a_monitor() {
+            return false;
+        }
+        // A name two screens answer to is a name neither of them can be
+        // given a setting under.
+        let shared = crate::screens::shared_identities(live);
+        let ambiguous = |edid: &str| shared.iter().any(|s| s.eq_ignore_ascii_case(edid));
         let mut moved = false;
         for id in live {
             let (Some(edid), Some(connector)) = (&id.edid, &id.connector) else { continue };
-            let new_key = format!("{}{edid}", crate::screens::EDID_PREFIX);
-            if self.screens.keys().any(|k| k.eq_ignore_ascii_case(&new_key)) {
+            if ambiguous(edid) {
                 continue;
             }
+            // Nothing here can overwrite: the document named no monitor
+            // when this began, and no two screens of this survey are
+            // being written under one name.
+            let new_key = format!("{}{edid}", crate::screens::EDID_PREFIX);
             let Some(old_key) = self
                 .screens
                 .keys()
@@ -313,19 +340,42 @@ impl DesktopConf {
         }
         // The role travels the same road, and for the same reason: a
         // main screen named by its socket stops being that screen the
-        // moment somebody moves a cable.
+        // moment somebody moves a cable. It stays on the socket when
+        // the monitor there shares its name with another, because "the
+        // main screen" cannot be two screens.
         if let Choice::Named(key) = &self.main_screen {
-            if let Some(id) = live.iter().find(|id| {
-                id.connector.as_deref().map(|c| c.eq_ignore_ascii_case(key.trim())).unwrap_or(false)
-                    && id.edid.is_some()
-            }) {
-                let edid = id.edid.as_deref().unwrap_or_default();
+            if let Some(edid) = live
+                .iter()
+                .find(|id| {
+                    id.connector
+                        .as_deref()
+                        .map(|c| c.eq_ignore_ascii_case(key.trim()))
+                        .unwrap_or(false)
+                })
+                .and_then(|id| id.edid.as_deref())
+                .filter(|edid| !ambiguous(edid))
+            {
                 self.main_screen =
                     Choice::Named(format!("{}{edid}", crate::screens::EDID_PREFIX));
                 moved = true;
             }
         }
         moved
+    }
+
+    /// Whether anything in this document names a MONITOR — a key in the
+    /// screen map, or the screen carrying the role.
+    ///
+    /// Which is the same question as WHEN this document was written:
+    /// the vocabulary did not exist before 2026-08-18, so a document
+    /// using it is one this program has already migrated or one
+    /// somebody wrote knowing both halves of the format.
+    fn names_a_monitor(&self) -> bool {
+        self.screens
+            .keys()
+            .map(String::as_str)
+            .chain(self.main_screen.name())
+            .any(crate::screens::names_a_monitor)
     }
 
     /// The same document as the old `Key=Value` file said it.

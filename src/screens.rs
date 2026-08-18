@@ -160,6 +160,55 @@ pub fn screen_key(text: &str) -> Option<String> {
     connector_of(text).filter(|c| c == text)
 }
 
+/// Whether a piece of text is a MONITOR's name rather than a socket's.
+///
+/// Derived from [`screen_key`], so it cannot drift from it: a text that
+/// names no screen at all names no monitor either, and a connector is
+/// a socket however monitor-ish it looks.
+///
+/// Asked by anything that has to know which GENERATION a document was
+/// written in — a file that names a monitor anywhere was written after
+/// monitors could be named, and its socket keys are therefore somebody's
+/// deliberate rule about a socket rather than the old vocabulary
+/// (`DesktopConf::migrate_screens`).
+pub fn names_a_monitor(text: &str) -> bool {
+    screen_key(text).map(|k| k.starts_with(EDID_PREFIX)).unwrap_or(false)
+}
+
+/// The identities MORE THAN ONE of these screens answers to — and which
+/// therefore identify none of them.
+///
+/// Two units of one model are two screens with one name whenever their
+/// firmware gives no serial number, and a firmware that gives the SAME
+/// serial in every unit is that case with more digits: the AORUS FO32U2P
+/// puts 0x01010101 in the field on every unit sold.
+/// [`edid::Edid::identity`] says what that costs and offers the socket as
+/// the way out — which only works for as long as nothing writes the
+/// shared name into the file, because the shared name is looked up first
+/// and answers for both screens at once.
+///
+/// So ANYTHING ABOUT TO WRITE A SCREEN'S NAME DOWN ASKS HERE FIRST. A
+/// name two of today's screens answer to is one setting for both of
+/// them, and writing it costs the second screen whatever it had.
+///
+/// The bodies, without [`EDID_PREFIX`] — the form [`ScreenId`] carries.
+pub fn shared_identities(ids: &[ScreenId]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let Some(mine) = &id.edid else { continue };
+        let twinned = ids[..i]
+            .iter()
+            .chain(&ids[i + 1..])
+            .any(|other| {
+                other.edid.as_deref().map(|e| e.eq_ignore_ascii_case(mine)).unwrap_or(false)
+            });
+        if twinned && !out.iter().any(|k| k.eq_ignore_ascii_case(mine)) {
+            out.push(mine.clone());
+        }
+    }
+    out
+}
+
 /// The shape of a monitor key's body: a maker's three letters, a model,
 /// and at most one serial, dash-separated.
 ///
@@ -619,6 +668,59 @@ mod tests {
         ] {
             assert!(screen_key(bad).is_none(), "'{bad}' must not become a key");
         }
+    }
+
+    /// Which vocabulary a key is written in, which is a different
+    /// question from whether it names a screen at all.
+    #[test]
+    fn a_key_says_which_vocabulary_it_is_written_in() {
+        assert!(names_a_monitor("edid:DEL-41B2-0123ABCD"));
+        assert!(names_a_monitor(" edid:sam-000f "), "case and spaces are not a vocabulary");
+        assert!(!names_a_monitor("DP-1"), "a socket is a socket");
+        assert!(!names_a_monitor("eDP-1"), "however monitor-ish it looks");
+        // Text that names no screen names no monitor either: the two
+        // questions are one, which is why this is derived from
+        // `screen_key` rather than testing for a prefix of its own.
+        for bad in ["", "edid:", "edid:DELL-41B2", "Dell Inc. U2720Q"] {
+            assert!(!names_a_monitor(bad), "'{bad}' names no screen, so no monitor");
+        }
+    }
+
+    /// TWO OF THE SAME MONITOR ARE ONE NAME. The desk this program is
+    /// written on has the case: the AORUS FO32U2P prints the same serial
+    /// in every unit, so a second one is not a second name.
+    #[test]
+    fn a_name_two_screens_answer_to_names_neither_of_them() {
+        let aorus = |socket: &str| ScreenId {
+            edid: Some("GBT-3215-01010101".into()),
+            connector: Some(socket.to_string()),
+        };
+        let dell =
+            ScreenId { edid: Some("DEL-41B2-0123ABCD".into()), connector: Some("DP-3".into()) };
+
+        assert_eq!(
+            shared_identities(&[aorus("DP-1"), aorus("DP-2"), dell.clone()]),
+            vec!["GBT-3215-01010101".to_string()],
+            "the twins share a name and the Dell does not"
+        );
+        assert_eq!(
+            shared_identities(&[aorus("DP-1"), aorus("DP-2"), aorus("DP-4")]),
+            vec!["GBT-3215-01010101".to_string()],
+            "a name shared by three is still one name"
+        );
+        // One of them, alone, is a perfectly good identity: the
+        // ambiguity is a fact about the desk and not about the monitor.
+        assert!(shared_identities(&[aorus("DP-1"), dell.clone()]).is_empty());
+        assert!(shared_identities(&[]).is_empty());
+        // A screen that gives no name at all is not sharing one.
+        assert!(
+            shared_identities(&[
+                ScreenId::of_connector("DP-1"),
+                ScreenId::of_connector("HDMI-A-1")
+            ])
+            .is_empty(),
+            "two screens with no identity have nothing in common to lose"
+        );
     }
 
     /// What a person reads. The model is what they recognise and the
