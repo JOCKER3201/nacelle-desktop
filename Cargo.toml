@@ -78,8 +78,17 @@ x11-clipboard = "0.9"
 # The VT parser the terminal emulation is driven by
 vte = "0.13"
 
-# System information collectors (CPU, RAM, processes, network)
-sysinfo = "0.30"
+# System information collectors (CPU, RAM, processes, network).
+# default-features = false drops "multithread", sysinfo's only default
+# feature, and with it rayon. That pool was sixteen threads on the
+# machine of the 2026-08-18 strace audit — one per logical CPU, started
+# by the telemetry sweep and kept for the life of the process — and it
+# spent an idle desktop's 88 seconds issuing 109 053 sched_yield calls
+# looking for work to steal. It parallelises the process table, which
+# this program reads itself (system.rs, read_procs); everything sysinfo
+# IS asked for here — CPU, memory, networks, components — is serial
+# either way. src/system.rs has the test that keeps the pool away.
+sysinfo = { version = "0.30", default-features = false }
 
 # PTY / fork / exec (Linux)
 # Raw system calls: the PTY (openpty/fork/execvp) and dlopen for the

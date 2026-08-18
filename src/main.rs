@@ -11,6 +11,7 @@ mod pty;
 mod screen;
 mod screens;
 mod system;
+mod threads;
 mod fullscreen;
 mod hashframe;
 mod vector;

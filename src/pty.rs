@@ -156,7 +156,7 @@ impl Pty {
 
         let (tx, rx): (Sender<PtyEvent>, Receiver<PtyEvent>) = channel();
         let fd = master;
-        std::thread::spawn(move || {
+        let reader = crate::threads::spawn(crate::threads::PTY, move || {
             let mut buf = [0u8; 8192];
             loop {
                 let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -169,6 +169,29 @@ impl Pty {
                 }
             }
         });
+
+        // The shell is already forked by the time the reader is asked for,
+        // so a failure here would leave it talking into a master nobody
+        // drains — an orphan that fills the PTY buffer and then blocks
+        // forever. Take it down with the session rather than leak it.
+        //
+        // The reap matters as much as the kill, and it is the reason this
+        // is not three lines: no `Pty` is built on this path, so `Drop`
+        // — the only other place this process ever calls `waitpid` — will
+        // never run for this child. Kill without reap trades a running
+        // orphan for a zombie one, which is the same leak wearing a
+        // quieter name. The sequence is `Drop`'s, for the same reason it
+        // works there: closing the master gives the shell EOF and SIGHUP
+        // ends it, so the wait returns at once.
+        if let Err(e) = reader {
+            unsafe {
+                libc::kill(pid, libc::SIGHUP);
+                libc::close(master);
+                let mut status = 0;
+                libc::waitpid(pid, &mut status, 0);
+            }
+            return Err(e);
+        }
 
         Ok((Pty { master, child: pid }, rx))
     }

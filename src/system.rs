@@ -106,7 +106,10 @@ pub fn start() -> Arc<Mutex<Snapshot>> {
     let shared = snap.clone();
     let offline_mode = std::env::var("NACELLE_OFFLINE").is_ok();
 
-    std::thread::spawn(move || {
+    // The sweep runs on a thread of its own for the life of the process;
+    // it is the second-busiest thread in the program, so it is named
+    // rather than left to inherit the process name in every profile.
+    let started = crate::threads::spawn(crate::threads::TELEMETRY, move || {
         use sysinfo::System;
         let mut sys = System::new_all();
         let mut networks = sysinfo::Networks::new_with_refreshed_list();
@@ -287,5 +290,91 @@ pub fn start() -> Arc<Mutex<Snapshot>> {
         }
     });
 
+    // A machine that cannot start one more thread still has a desktop:
+    // the snapshot simply stays at its defaults and the panels read
+    // zero. Saying so once is better than taking the program down.
+    if let Err(e) = started {
+        eprintln!("nacelle-desktop: no telemetry thread ({e}) — the readouts stay blank");
+    }
+
     snap
+}
+
+#[cfg(test)]
+mod tests {
+    /// How many threads this process is running at this instant.
+    ///
+    /// `/proc/self/task` has one entry per live thread, which is the
+    /// same place `top` and a strace log get their thread list from —
+    /// so a count taken here is in the same units as the audit's.
+    fn live_threads() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .expect("a Linux process can list its own threads")
+            .count()
+    }
+
+    /// The sampler starts no threads of its own.
+    ///
+    /// `sysinfo`'s default feature set is `multithread`, which refreshes
+    /// the process table through rayon: a global pool of one thread per
+    /// logical CPU, started on first use and kept for the life of the
+    /// process. The strace audit of 2026-08-18 counted them — sixteen
+    /// `CLONE_THREAD` out of this very sweep thread — and measured what
+    /// they then did with an idle desktop: 109 053 `sched_yield` calls
+    /// in 88 seconds, work-stealing with nothing to steal, more than any
+    /// other single cost the audit found in code we own.
+    ///
+    /// The pool bought nothing. `read_procs` above reads the process
+    /// table itself, and sysinfo is asked only for CPU, memory, networks
+    /// and components, none of which is parallelised. So the feature is
+    /// off in Cargo.toml, and this test is what notices if a version bump
+    /// or a stray `default-features` ever brings it back.
+    ///
+    /// The count is taken in a CHILD — this same test binary, running
+    /// this one test and nothing else — because a live thread count
+    /// means nothing in a binary that is running the rest of the suite
+    /// on threads of its own at the same time.
+    #[test]
+    fn the_sampler_brings_no_thread_pool() {
+        const MARK: &str = "NACELLE_THREAD_COUNT_CHILD";
+        const NAME: &str = "system::tests::the_sampler_brings_no_thread_pool";
+
+        if std::env::var_os(MARK).is_some() {
+            let before = live_threads();
+            let t0 = std::time::Instant::now();
+            let sys = sysinfo::System::new_all();
+            let cost = t0.elapsed();
+            let after = live_threads();
+            // Keep the sample alive across the second count: a system
+            // dropped early could take its pool with it and hide it.
+            println!(
+                "sampled {} processes in {:?}; threads {before} -> {after}",
+                sys.processes().len(),
+                cost
+            );
+            assert_eq!(
+                before, after,
+                "the sampler started {} thread(s) of its own",
+                after.saturating_sub(before)
+            );
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("a test binary knows its own path");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "--nocapture", "--test-threads=1", NAME])
+            .env(MARK, "1")
+            .output()
+            .expect("the test binary can run itself");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // A filter that matches nothing leaves libtest exiting zero, so
+        // the pass has to be read rather than inferred from the status:
+        // this gate fails closed on a renamed test as well as a broken
+        // one.
+        assert!(
+            stdout.contains("1 passed"),
+            "child run did not report a pass\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
