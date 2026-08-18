@@ -25,7 +25,7 @@ pub use nacelle::{draw, flex, font, term, theme};
 
 use crate::screen::{draw_panel, Cube, Screen};
 use nacelle::layout::{BoardId, InstanceId};
-use nacelle::theme::{ThemeColor, TokenId};
+use nacelle::theme::TokenId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::OnceLock;
@@ -46,11 +46,6 @@ use crate::pty::PtyEvent;
 // never through a value that used to be the design.
 fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
-}
-
-/// The engine's colour, as the draw list's `Color`.
-fn tcol(c: ThemeColor) -> theme::Color {
-    theme::Color { r: c.r, g: c.g, b: c.b, a: c.a }
 }
 
 /// How far the hand may travel before a press stops being a click.
@@ -3490,28 +3485,20 @@ fn draw_screen(
                             ctx.panel_scale = 1.0;
                         }
                     }
-                    static GLASS_TINT: OnceLock<TokenId> = OnceLock::new();
-                    static GLASS_WASH: OnceLock<TokenId> = OnceLock::new();
-                    let thm = nacelle::theme::resolved();
-                    ctx.dl.blur(
-                        0.0,
-                        0.0,
-                        w,
-                        h,
-                        tcol(thm.color(tok(&GLASS_TINT, "elev.fixture.glass.tint"))),
-                    );
-                    // The theme's own wash; the user's BlurOpacity
-                    // scales its alpha.
-                    let wash = thm.color(tok(&GLASS_WASH, "elev.fixture.glass.wash"));
-                    if wash.a * prefs.frost_wash > 0.0 {
-                        ctx.dl.rect(
-                            0.0,
-                            0.0,
-                            w,
-                            h,
-                            tcol(wash).alpha(wash.a * prefs.frost_wash),
-                        );
-                    }
+                    // The fixture's face, from the toolkit — the SAME
+                    // call the ride above makes. What stood here was a
+                    // hand copy of `deco::fixture_glass`'s body, key for
+                    // key and quad for quad, and it was one surface drawn
+                    // by two pieces of code: a board STANDING and the
+                    // same board RIDING. That held only while the two
+                    // agreed by accident. `[elev.fixture]`'s `glass.rank`
+                    // and `fill` gained a reader inside the toolkit on
+                    // 2026-08-17 — a theme can now ask for a plain sheet
+                    // instead of frost — and a copy out here would have
+                    // gone on frosting through the request, so the fixture
+                    // would have looked one way at rest and another in
+                    // motion. One reader, one picture.
+                    nacelle::deco::fixture_glass(ctx.dl, w, h, prefs.frost_wash);
                 }
                 for panel in widgets::Panel::all() {
                     for pl in layout.instances_of(panel) {
@@ -4285,5 +4272,44 @@ mod tests {
                 "a panel of no width against a reference of no width is 0/0"
             );
         }
+    }
+
+    /// ONE READER FOR THE FIXTURE'S FACE.
+    ///
+    /// The sheet a fixture board's panels sit on is emitted from two
+    /// places in this file — once while a board RIDES and once while it
+    /// STANDS — and until 2026-08-17 the standing half restated
+    /// `deco::fixture_glass`'s body by hand, key for key and quad for
+    /// quad. Nothing showed while the two agreed by accident. Then
+    /// `[elev.fixture]`'s `glass.rank` gained a reader inside the toolkit
+    /// — a theme may now ask for a plain sheet instead of frost — and the
+    /// copy out here became a second opinion about whether that request
+    /// counts, one that would have frosted a standing board and left a
+    /// riding one plain.
+    ///
+    /// Stated against the SOURCE, which is unusual here and deliberate:
+    /// the emitter lives inside the frame loop, which needs a window, a
+    /// GPU and a live session, and none of those belong in a unit test.
+    /// What can be settled without them is that no `[elev.fixture]` key is
+    /// read in this file at all — every one of them is the toolkit's.
+    #[test]
+    fn the_desktop_reads_no_fixture_key_of_its_own() {
+        let src = include_str!("main.rs");
+        // Both needles are joined from pieces at run time. Written whole
+        // they would appear in this test's own text, and a guard that
+        // finds itself answers about nothing. A token READ is a quoted
+        // name, which is what the first needle carries its quote for —
+        // the prose above may say the section's name freely.
+        let read_here = format!("{}{}{}", '"', "elev.", "fixture");
+        assert!(
+            !src.contains(&read_here),
+            "an [elev.fixture] token is read in the desktop again: the fixture's \
+             face has two readers, and a theme's `glass.rank` reaches one of them"
+        );
+        let through_the_toolkit = format!("{}{}", "deco::", "fixture_glass(");
+        assert!(
+            src.contains(&through_the_toolkit),
+            "the fixture's face stopped going through the toolkit"
+        );
     }
 }
