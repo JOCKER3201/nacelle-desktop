@@ -99,9 +99,10 @@ pub const ALL: [&str; 4] = [AUDIO, TELEMETRY, PTY, PLATE];
 /// ruins aggregation across a session, which is the thing a profile is
 /// for. If a caller ever genuinely needs to tell two instances apart, the
 /// answer is a second constant, not a format string.
-pub fn spawn<F>(name: &'static str, body: F) -> io::Result<JoinHandle<()>>
+pub fn spawn<F, T>(name: &'static str, body: F) -> io::Result<JoinHandle<T>>
 where
-    F: FnOnce() + Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
 {
     debug_assert!(
         name.len() <= COMM_MAX,
