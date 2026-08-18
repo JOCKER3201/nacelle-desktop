@@ -93,3 +93,11 @@ opt-level = 3
 
 # ------------------------------------------------------------------------
 
+
+# ------------------------------------------------------------------------
+# TEMPORARY, for the `feat/type-case` fleet only. The toolkit side of this
+# batch (`ui::Case`, `type.ellipsis` readers, `HostApi::theme_text`) lives
+# in the worktree beside this one until it is merged and the lock
+# re-pinned. REMOVE THIS BLOCK BEFORE MERGING.
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }
