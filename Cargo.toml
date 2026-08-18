@@ -104,3 +104,15 @@ opt-level = 3
 # ------------------------------------------------------------------------
 
 
+
+# ------------------------------------------------------------------------
+# TEMPORARY, and it leaves this file before the branch is merged.
+#
+# `feat/color-picker` needs `nacelle::object::color_picker`, which is new
+# in libnacelle on the branch of the same name and therefore behind no
+# published commit yet. The order of merging is the project's standing
+# one: libnacelle first, then the pin in this repository's Cargo.lock is
+# bumped, and this block goes.
+# ------------------------------------------------------------------------
+[patch."https://github.com/JOCKER3201/libnacelle"]
+libnacelle = { path = "../libnacelle" }
