@@ -734,7 +734,21 @@ fn main() {
     for sc in screens.iter_mut() {
         sc.set_blur_radius(blur_radius);
     }
-    // The theme's lens: glyph-coverage exponent and the blur pyramid's clear.
+    // The theme's lens: the glyph-coverage exponent, and nothing else.
+    //
+    // It used to promise "and the blur pyramid's clear" as well, and there
+    // was never a second statement below to keep it: `render.blur_clear`
+    // has no reader anywhere in the workspace (grep, 2026-08-18), and it
+    // cannot honestly get one where it is aimed. The pyramid's downsample
+    // passes clear to transparent black and then draw a quad that covers
+    // the whole target with a CLAMP_TO_EDGE sampler, so nothing in this
+    // renderer ever samples past an edge and the clear is overdrawn to
+    // the last pixel; the pyramid's BASE level clears to the swapchain's
+    // own colour, which is `surface.void` through `deco::clear_color` and
+    // is the screen's background rather than the blur's. The token
+    // describes a mechanism that is not here. It is removed from the
+    // master on libnacelle's branch of the same name as this one, which
+    // costs no pixel by construction: a key nothing reads draws nothing.
     //
     // This is the ONE token value the picture does not re-read while it
     // draws: it is pushed into the renderer, which then keeps it. Everything
@@ -3110,15 +3124,40 @@ fn draw_screen(
     // for the rest of the session.
     let mut dl = sc.frame.begin();
     let white = theme::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    // The backdrop plate is the first thing in the list — z 0, under
-    // every panel, inside the glass snapshot. White tint is the
-    // multiplicative identity: the plate's pixels ARE the theme's baked
-    // colours. Mid-resize it stretches for the frame or two until the
+    // THE GROUND IS THE FIRST THING IN THE LIST — z 0, under every panel
+    // and inside the glass snapshot — and it comes from the toolkit's one
+    // reader, `deco::board_ground`: `backdrop.solid`, then the board's own
+    // field `elev.board.fill`, then the baked plate over both.
+    //
+    // What stood here was the PLATE ALONE, on the claim (deco.rs's own
+    // header said it too) that "the clear and the plate already fill the
+    // screen behind it". They do not, and the gap is a whole rung of the
+    // ladder: the frame clears to `surface.void` (`deco::clear_color`)
+    // while the ground a board stands on is `backdrop.solid`, which the
+    // master derives from `@surface.base`. Measured on the master
+    // 2026-08-18: void sRGB(0.0096, 0.0240, 0.0171) against backdrop
+    // sRGB(0.0418, 0.0758, 0.0613) — four times the light. So the same
+    // board showed one ground standing and another the moment it turned
+    // sideways, where `board_ground` was already being called per face.
+    //
+    // AND IT IS WHAT THE FROST SAMPLES. The master enables no decoration,
+    // so `bake_backdrop` answers None and the plate line emitted nothing
+    // at all; the list then OPENED with the first frosted panel, the
+    // renderer's base scene (everything before the first glass run) was
+    // empty, and every glass quad on the screen sampled a pyramid holding
+    // nothing but the clear. Raise `elev.panel.glass.rank` — which is
+    // what SETTINGS -> THEMES EDITOR -> BACKGROUND -> BLUR does — and
+    // every window, panel, menu and tooltip came up as `surface.void`
+    // times the tint. That is the black background the owner reported.
+    //
+    // One reader, one picture — the same move `fixture_glass` made on
+    // 2026-08-17, for the same reason, further down this file. The
+    // plate's own note survives the move: white tint is the
+    // multiplicative identity, so its pixels ARE the theme's baked
+    // colours, and mid-resize it stretches for a frame or two until the
     // fresh bake lands.
     let backdrop = sc.backdrop_id();
-    if let Some(id) = backdrop {
-        dl.image(0.0, 0.0, w, h, id, white);
-    }
+    nacelle::deco::board_ground(&mut dl, w, h, backdrop);
     // Rings are withheld while board rects are mid-flight (the cube
     // ride) — set before any registration is answered this frame.
     focus_ctl.set_ring_suppressed(sc.cube.is_some());
@@ -3401,6 +3440,17 @@ fn draw_screen(
                 // the whole turn. It is emitted BEFORE the first face
                 // and therefore before any face's `start`, so no yaw
                 // ever touches it: the walls move, the void does not.
+                //
+                // It covers the ground the frame laid a few hundred
+                // lines above, which is why the master derives
+                // `motion.board_ride.void` from `@backdrop.solid` and
+                // not from the swapchain clear it used to name: the two
+                // were the same colour only while a standing frame
+                // painted nothing, and once the frame laid its ground a
+                // ride that opened on the clear dimmed the whole screen
+                // fourfold for its 300 ms. Held down by
+                // `the_cube_turns_in_the_ground_a_standing_board_lays`
+                // in the toolkit, beside the reader.
                 if horizontal {
                     let void = nacelle::deco::ride_void();
                     ctx.dl.rect(0.0, 0.0, w, h, void);
@@ -3417,9 +3467,13 @@ fn draw_screen(
                     // panels so the yaw and the perspective divide
                     // below take ground and panels together.
                     // Standing still, and riding up or down, a board
-                    // paints no ground at all: the frame's own clear
-                    // and plate are already there and must stay visible
-                    // under the fixture that rides in over them.
+                    // paints no ground of its own: the FRAME has
+                    // already laid one — `board_ground` at the head of
+                    // this function, the same two levels and the same
+                    // plate — and it must stay visible under the
+                    // fixture that rides in over it. Only the sideways
+                    // turn needs a second copy, because that one has to
+                    // be inside the face's own yaw.
                     // Fixtures carry a face material on top — frosted
                     // glass: whatever is beneath shows through it
                     // blurred. The glass is sampled by screen position,
@@ -4337,6 +4391,69 @@ mod tests {
         assert!(
             src.contains(&through_the_toolkit),
             "the fixture's face stopped going through the toolkit"
+        );
+    }
+
+    /// THE FRAME STANDS ON THE GROUND THE THEME NAMES, AND LAYS IT ITSELF.
+    ///
+    /// WHAT WENT WRONG. This file laid the backdrop PLATE at z 0 and
+    /// nothing else, on the claim — `deco.rs`'s header carried it too —
+    /// that "the clear and the plate already fill the screen behind it".
+    /// The clear is `surface.void`; the ground a board stands on is
+    /// `backdrop.solid`, which the master derives from `@surface.base`.
+    /// Two tokens, a rung apart: measured on the master 2026-08-18,
+    /// sRGB(0.0096, 0.0240, 0.0171) against sRGB(0.0418, 0.0758,
+    /// 0.0613). So `backdrop.solid` and `elev.board.fill` had no reader
+    /// on the path almost every frame takes, and the same board changed
+    /// ground colour the instant it turned sideways — where
+    /// `board_ground` was already being called, once per face.
+    ///
+    /// AND IT IS WHAT A FROSTED SURFACE SAMPLES. The renderer's base
+    /// scene is everything before the first glass run. The master
+    /// enables no decoration, so `bake_backdrop` answers None and the
+    /// plate line emitted nothing; the list then OPENED with the first
+    /// frosted panel and every glass quad read a pyramid holding only
+    /// the clear. That is the black background BACKGROUND -> BLUR
+    /// produced.
+    ///
+    /// Stated against the SOURCE for the reason its neighbour above
+    /// gives: the emitter lives inside the frame loop, which needs a
+    /// window, a GPU and a live session. What can be settled without
+    /// them is that the ground goes through the toolkit's one reader and
+    /// that this file no longer lays half of it by hand.
+    ///
+    /// WHAT A SOURCE GUARD CANNOT SETTLE, said plainly rather than left
+    /// to be discovered: it answers about the TEXT of one call, so it
+    /// catches the old code coming back and it catches the call being
+    /// dropped, and it cannot catch a call that is still there and no
+    /// longer draws anything. Verification found exactly that hole — the
+    /// extent zeroed, `board_ground(&mut dl, 0.0, 0.0, backdrop)`, put
+    /// the fault back whole and left this test green — so the screen's
+    /// own two numbers are part of what is asserted now. That is the end
+    /// of what text can do; the pixels are the owner's to see.
+    #[test]
+    fn the_frame_lays_its_ground_through_the_toolkit() {
+        let src = include_str!("main.rs");
+        // Joined at run time, like its neighbour's: written whole they
+        // would appear in this test's own text and the guard would be
+        // answering about itself.
+        let by_hand = format!("{}{}", "if let Some(id) = ", "backdrop {");
+        assert!(
+            !src.contains(&by_hand),
+            "the frame decides what to do with the backdrop plate by hand again, \
+             so the two levels under it — backdrop.solid and elev.board.fill — are \
+             unread and the blur pyramid has nothing to blur"
+        );
+        // The FRAME's own call, told from the per-face one by the list it
+        // is handed: the frame owns its draw list, a riding face draws
+        // through the widget context. WITH THE SCREEN'S OWN EXTENT: a
+        // ground drawn at no size is no ground, and the pyramid is back
+        // to holding the clear alone.
+        let frames_ground = format!("{}{}", "deco::", "board_ground(&mut dl, w, h, backdrop)");
+        assert!(
+            src.contains(&frames_ground),
+            "the frame stopped laying its ground across the whole screen through \
+             the toolkit"
         );
     }
 }
