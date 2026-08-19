@@ -3759,10 +3759,10 @@ fn draw_screen(
 
 /// Saves the layout edited in the grid editor and applies it live.
 /// `select` = also make it the selected layout (SAVE AS); a plain SAVE
-/// keeps the current selection. Only the CHANGED panels are written,
-/// into the section of THIS screen (resolution + diagonal) — a second
-/// monitor arranges itself against its own pixels, and says so in its
-/// own section.
+/// keeps the current selection. Either way the WHOLE arrangement is
+/// written as the one layout every screen shares — a second monitor
+/// reads the same placements against its own pixels, so it can no longer
+/// diverge into a half-and-half of its own.
 fn editor_save(
     sc: &mut Screen,
     name: &str,
@@ -3774,21 +3774,9 @@ fn editor_save(
     }
     let key = sc.key;
     // The layaut with the edited board folded back in — placements
-    // added, moved and dropped — which is what both save paths write.
+    // added, moved and dropped — written in full as the shared base.
     let mut def = sc.edited_spec();
-    // SAVE AS writes ALL placements as the base of the (new) file; SAVE
-    // rewrites the base on its own screen or stores only the changes in
-    // the section of the current screen.
-    let result = if select {
-        config::save_layaut_full(name, &mut def, key)
-    } else {
-        config::save_layaut_overrides(
-            name,
-            key,
-            &sc.editor.changes_since_start(),
-            &mut def,
-        )
-    };
+    let result = config::save_layaut_full(name, &mut def, key);
     if let Err(e) = result {
         nacelle::sound::emit(nacelle::sound::Event::Error);
         popup.show(format!("Cannot save layout '{name}': {e}"));

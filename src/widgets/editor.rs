@@ -361,7 +361,10 @@ fn pct(r: Rect, w: f32, h: f32) -> PanelSpec {
 }
 
 /// Whether two rectangles are the same one, to the precision a layaut
-/// file writes.
+/// file writes. Only the tests weigh placements against each other now —
+/// a SAVE writes them all, so nothing in the editor asks "did this one
+/// move".
+#[cfg(test)]
 fn same_spec(a: &PanelSpec, b: &PanelSpec) -> bool {
     (a.x - b.x).abs() < 0.05
         && (a.y - b.y).abs() < 0.05
@@ -589,27 +592,6 @@ impl Editor {
             l.place(i.id, i.widget, Self::px_of(i, w, h));
         }
         l
-    }
-
-    /// Instances whose rectangle differs from the given reference (with
-    /// a small tolerance) — the "only the changes" save payload. A
-    /// widget dragged out since the reference was taken has no
-    /// rectangle there at all, so it counts as changed.
-    pub fn changes_vs(&self, reference: &[Instance]) -> Vec<(InstanceId, PanelSpec)> {
-        let mut out = Vec::new();
-        for i in self.list.all() {
-            let now = i.rect.unwrap_or(OFF_SPEC);
-            let was = reference.iter().find(|r| r.id == i.id).and_then(|r| r.rect);
-            if !was.map(|b| same_spec(&now, &b)).unwrap_or(false) {
-                out.push((i.id, now));
-            }
-        }
-        out
-    }
-
-    /// Instances changed since the editor was opened.
-    pub fn changes_since_start(&self) -> Vec<(InstanceId, PanelSpec)> {
-        self.changes_vs(&self.initial)
     }
 
     /// Instances the user took off the board since the editor opened.

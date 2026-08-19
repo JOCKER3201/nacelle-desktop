@@ -2092,25 +2092,6 @@ pub fn save_layaut_full(
     store().save_full(name, def, key)
 }
 
-
-
-
-
-/// SAVE. `changes` names the INSTANCES the editor moved — the second
-/// terminal the user dragged on his 4K screen is that instance, not
-/// "the terminal" — and `def` is the caller's own model, written back
-/// materialized (see [`save_layaut_full`]).
-pub fn save_layaut_overrides(
-    name: &str,
-    key: (u32, u32, u32),
-    changes: &[(InstanceId, PanelSpec)],
-    def: &mut LayoutDef,
-) -> std::io::Result<()> {
-    store().save_overrides(name, key, changes, def)
-}
-
-
-
 pub fn stale_screen_section(
     def: &LayoutDef,
     key: (u32, u32, u32),
@@ -6644,7 +6625,9 @@ mod tests {
         // The instances went with their boards through normalisation.
         assert!(rect_on((0, 1), wp("memory")).is_some(), "memory rode down with its board");
 
-        // A full-base rewrite (SAVE on the base's screen) keeps them.
+        // A full-base rewrite keeps the boards but DROPS the per-screen
+        // sections: SAVE writes one arrangement every screen shares, so a
+        // second monitor can no longer diverge into a section of its own.
         let dir = std::env::temp_dir().join("nacelle-desktop-boards-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("layauts")).unwrap();
@@ -6658,7 +6641,10 @@ mod tests {
         let after = std::fs::read_to_string(dir.join("layauts/t.layaut")).unwrap();
         let def2 = nacelle::layout::layaut::parse(&after, "t");
         assert_eq!(def2.boards.len(), 3, "boards must survive a base rewrite");
-        assert!(after.contains("[1280x720@7]"), "overrides must survive too");
+        assert!(
+            !after.contains("[1280x720@7]"),
+            "a full save drops per-screen sections: one arrangement for all screens"
+        );
 
         // And an overrides rewrite keeps them just the same.
         test_store(&dir).save_overrides("t", (2560, 1440, 32), &[], &mut full).unwrap();
