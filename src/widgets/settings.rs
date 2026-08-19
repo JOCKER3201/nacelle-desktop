@@ -5175,6 +5175,16 @@ impl Settings {
                 100,
             ),
         ];
+        // THE BORDER RIDES THE SAME PICKER AS THE REST. BASIC has one
+        // colour and the ring is it: sync the border-colour field to the
+        // accent this move lands on, so `editor_edits` writes the ring in
+        // the picked colour and `fold_tone_into_advanced` carries it into
+        // ADVANCED with no second control on the page. The move is measured
+        // to whole notches above, so the ring is read from the SAME notched
+        // tone (`tone_of`) the surfaces and text are — not from `want`,
+        // which would put the ring a fraction of a notch off every bed.
+        let moved = seeds.shifted(self.tone_of());
+        self.edge = hsv_track_of(nacelle::theme::Color::from_oklch(moved.accent).to_srgb());
     }
 
     /// BASIC's move, folded into the ADVANCED page's own controls.
@@ -13500,6 +13510,44 @@ mod tests {
             "half the chroma asked for a multiplier of {}",
             s.tone[1]
         );
+        nacelle::theme::clear_preview();
+    }
+
+    /// THE BORDER RIDES THE THEME COLOUR PICKER. BASIC has one colour and
+    /// the ring is it: moving the one picker moves the border too, with no
+    /// second control on the page.
+    #[test]
+    fn the_border_follows_the_theme_colour_picker_in_basic() {
+        use nacelle::object::color_picker::{parse, Format};
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.perform(Act::EditorMode, 0.0, 0.0);
+        let seed = s.tone_seeds.expect("BASIC opened without seeds").accent;
+        let before = s.edge;
+
+        // A quarter turn at half the chroma — a colour the sRGB picker can
+        // actually show, as the arithmetic test beside this one takes it.
+        let half = nacelle::theme::color::Oklch { c: seed.c * 0.5, ..seed };
+        s.pickers[PickerId::Tone.idx()]
+            .set_oklch(nacelle::theme::color::Oklch { h: half.h + 90.0, ..half });
+        s.set_tone_from_picker();
+
+        assert_ne!(s.edge, before, "the border did not follow the theme colour picker");
+        // The ring's colour reaches the file on the moved accent's hue, not
+        // the seed's — read back with the toolkit's own parser.
+        let edits = s.editor_edits();
+        let ring = edits
+            .iter()
+            .find(|e| e.token == "border.default")
+            .map(|e| e.value.clone())
+            .expect("BASIC dropped the ring's colour");
+        let got = parse(&ring, Format::Oklch)
+            .expect("the ring is written in the notation the picker reads")
+            .to_linear()
+            .to_oklch();
+        let off = (got.h - seed.h).rem_euclid(360.0);
+        let off = off.min(360.0 - off);
+        assert!(off > 30.0, "the ring stayed near the seed hue {} (got {})", seed.h, got.h);
         nacelle::theme::clear_preview();
     }
 
