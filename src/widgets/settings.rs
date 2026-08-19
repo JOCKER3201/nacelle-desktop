@@ -13211,7 +13211,10 @@ mod tests {
         assert_eq!(names.len(), n, "the edit set carries a token twice");
         // The rest of the theme is still underneath: BASIC lands ON the
         // editor's set, it does not replace it.
-        for token in ["elev.panel.edge.color", "corner.mode", "scrollbar.mode"] {
+        // The border colour is now the shared root `border.default`, not
+        // the `elev.panel` leaf, so one edit moves every frame alike
+        // (`edit::border_colour_edit`).
+        for token in ["border.default", "corner.mode", "scrollbar.mode"] {
             assert!(
                 value(&turned, token).is_some(),
                 "BASIC dropped `{token}` out of the edit"
