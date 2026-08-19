@@ -757,6 +757,23 @@ impl Screen {
     pub fn resized(&mut self) {
         self.gfx.resize();
         self.key = screen_key(&self.window);
+        // Temporary diagnosis of the "layout breaks when the window moves to
+        // the other monitor and does not recover" report: dumps the numbers
+        // the layout is actually solved from at each resize/scale event.
+        // Gated on an env var so it costs nothing unless asked. Remove once
+        // the move-handling bug is found.
+        if std::env::var_os("NACELLE_LOG_RESIZE").is_some() {
+            let s = self.window.inner_size();
+            let sf = self.window.scale_factor();
+            let mon = self
+                .window
+                .current_monitor()
+                .map(|m| (m.size().width, m.size().height, m.scale_factor()));
+            eprintln!(
+                "[resize] inner_size={}x{} scale_factor={} current_monitor(size,scale)={:?} screen_key={:?}",
+                s.width, s.height, sf, mon, self.key
+            );
+        }
     }
 
     /// Notes glyph rows another screen's frame drained, so this one can
