@@ -459,21 +459,31 @@ impl Editor {
         self.grow = None;
         self.list = InstanceList::new();
         self.list.reserve_up_to(next_id);
+        // A panel parked OUTSIDE the window (OFF_SPEC, x >= w) used to be
+        // SKIPPED here — which hid it from the editor while `edited_spec`
+        // (screen.rs) kept re-writing it off-screen on every SAVE. The panel
+        // was then lost for good: invisible, unreachable, re-parked forever
+        // (audyt layoutu 2026-08-19, klasa ① — network/sysinfo na x=200%).
+        // Bring each orphan back ONTO the screen in a small cascade instead,
+        // so it is seen and can be placed, and SAVE writes it a real
+        // rectangle. No panel leaves the editor at OFF_SPEC.
+        let mut recovered = 0.0f32;
         for p in layout.iter() {
-            // A rectangle parked outside the window was how the format
-            // used to say "removed". The editor removes for real now,
-            // so it does not take those in — and never writes one back.
-            if p.rect.x >= w {
-                continue;
-            }
+            let spec = if p.rect.x >= w {
+                let s = PanelSpec {
+                    x: 2.0 + recovered * 1.5,
+                    y: (2.0 + recovered * 5.0).min(74.0),
+                    w: 18.0,
+                    h: 24.0,
+                };
+                recovered += 1.0;
+                s
+            } else {
+                pct(p.rect, w, h)
+            };
             seed(
                 &mut self.list,
-                Instance {
-                    id: p.id,
-                    widget: p.widget,
-                    board,
-                    rect: Some(pct(p.rect, w, h)),
-                },
+                Instance { id: p.id, widget: p.widget, board, rect: Some(spec) },
             );
         }
         if self.snap {
