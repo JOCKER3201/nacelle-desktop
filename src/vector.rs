@@ -313,11 +313,12 @@ mod tests {
 
         // And back, because a switch that only latches one way is not a
         // switch. Dropping the fixture above already restored the master
-        // — whose `render.vector` is false — so this is the master's own
-        // answer arriving at a list that had been told otherwise.
+        // — whose `render.vector` is true as of K3d (2026-08-23) — so
+        // this is the master's own answer arriving at a list that had
+        // been told otherwise.
         let mut dl = frame.begin();
         panel(&mut dl);
-        assert_eq!(drew_shapes(&dl), 0, "the master ships the tessellated lane");
+        assert_eq!(drew_shapes(&dl), 1, "the master ships the vector lane");
         frame.end(dl);
     }
 
@@ -375,16 +376,18 @@ mod tests {
     }
 
     /// The shipping answer, stated as a test rather than as a promise:
-    /// the master keeps the switch DOWN until K3d, which is a decision
+    /// the master raises the switch as of K3d (2026-08-23), a decision
     /// taken on the measurement in `.gap-program/pomiar-wektor-k3c.md`
-    /// and not by whoever wires the reader.
+    /// and `.gap-program/pomiar-wektor-k3d.md`, and not by whoever wires
+    /// the reader.
     #[test]
-    fn the_master_ships_the_switch_down() {
+    fn the_master_ships_the_switch_up() {
         let _lock = theme_test_lock();
         let _theme = Themed::new("plain", "");
         assert!(
-            !wanted(),
-            "render.vector went up without K3d; see .gap-program/pomiar-wektor-k3c.md"
+            wanted(),
+            "render.vector went back down without a K3d reversal; \
+             see .gap-program/pomiar-wektor-k3d.md"
         );
     }
 
