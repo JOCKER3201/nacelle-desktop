@@ -2381,7 +2381,7 @@ fn editor_advanced(s: &Settings) -> bool {
 ///   REACHES, which is ZGŁOSZENIE 7 and is answered in
 ///   [`Settings::editor_edits`], not here.
 /// * CORNER SIZE — with a cut that has a size ([`corner_sized`]).
-static EDITOR_BASIC_ROWS: [Row; 13] = [
+static EDITOR_BASIC_ROWS: [Row; 12] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
@@ -2421,19 +2421,13 @@ static EDITOR_BASIC_ROWS: [Row; 13] = [
     ),
     row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Backgrounds }),
-    row_shown(
-        Ctrl::Slider {
-            label: "OPACITY",
-            act: Act::EditorTrack(Knob::BgOpacity),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bg_opacity,
-            set: |s, v| s.bg_opacity = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bg_chosen,
-    ),
+    // OPACITY's slider is GONE from this page (2026-08-19, the owner's
+    // own words: "suwaka opacity ma niebyć"). The Tone picker at the head
+    // of this page IS the background now, and its alpha channel is the
+    // transparency knob — the last bytes of its RGBA hex, not a second
+    // control saying the same thing a different way (`editor_edits`,
+    // `theme::edit::panel_fill_edit`). `s.bg_opacity` and `Knob::BgOpacity`
+    // stay ADVANCED's own; nothing on this page reads them any more.
     row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Corners }),
     row_shown(
@@ -4189,6 +4183,20 @@ pub struct Settings {
     /// until it has been — an unseeded BASIC writes nothing, the same
     /// neutrality `current_border`'s `None` earned.
     tone_seeds: Option<nacelle::theme::edit::ToneSeeds>,
+    /// The MAIN BACKGROUND's own seed — `component.panel.fill`, read live
+    /// alongside `tone_seeds` and shown in the SAME picker. BASIC's one
+    /// question is "what colour is the desktop", answered by pointing at
+    /// its background: the picker opens on THIS, not on the accent, and
+    /// `Settings::set_tone_from_picker` measures the move against it, so
+    /// dragging the field a little moves the accent a little too — the
+    /// same delta, from a bed that starts near the wall rather than an
+    /// accent that starts near the ceiling. Kept apart from `tone_seeds`
+    /// (a libnacelle type `tone_edits` never reads this field of) rather
+    /// than folded in, because nothing downstream of THAT struct needs it:
+    /// the background is written literally now (`editor_edits`,
+    /// `theme::edit::panel_fill_edit`), never through the ten-author
+    /// cascade the rest of BASIC's move rides.
+    tone_bed: nacelle::theme::color::Oklch,
     /// WHAT THE THEME ITSELF DRESSES, read ONCE off the file's own state
     /// and never off the screen: the two `halo_dressed` answers
     /// `theme::edit` asks its caller for (the panel edge's glow, and the
@@ -4624,6 +4632,9 @@ impl Settings {
             editor_basic: true,
             tone: TONE_REST,
             tone_seeds: None,
+            // Overwritten by `seed_tone_from_theme` before anything reads
+            // it; the literal here is never shown.
+            tone_bed: nacelle::theme::color::Oklch { l: 0.232, c: 0.02, h: 0.0, alpha: 1.0 },
             // The picker opens on nothing in particular and is seeded off
             // the theme with everything else the moment the editor is
             // entered ([`Settings::seed_tone_from_theme`]). "Nothing in
@@ -5150,7 +5161,11 @@ impl Settings {
         // The seed's own chroma, which is what a rotation and a scaling
         // move along: a grey theme gets coarse notches, and that is
         // right — turning a grey moves nothing however far it goes.
-        let seed_chroma = self.tone_seeds.map_or(0.0, |s| s.accent.c);
+        // The BED's chroma now (2026-08-19), not the accent's: `sat` and
+        // `hue_deg` are measured against the bed (`set_tone_from_picker`),
+        // so a notch fine enough to matter has to be fine relative to
+        // WHAT IS BEING DIVIDED BY, and that is the bed's own C.
+        let seed_chroma = self.tone_seeds.map_or(0.0, |_| self.tone_bed.c);
         let st = nacelle::theme::edit::tone_step(self.color_depth, seed_chroma);
         let unit = |x: f32, per_unit: f32| {
             let n = (x / per_unit).round();
@@ -5216,8 +5231,22 @@ impl Settings {
         // Pure, and no fourth piece of state: the origin is a function
         // of the seed and of the control's own arithmetic, so it cannot
         // fall out of step with either.
+        //
+        // MEASURED AGAINST THE BED, NOT THE ACCENT (2026-08-19). The
+        // picker opened on `self.tone_bed` (`Settings::seed_tone_from_theme`)
+        // and that is what "no move" has to mean here too, or a picker
+        // sitting still would still write a distance — the accent's own,
+        // which is nowhere near what the field is showing. The SAME
+        // `tone` this produces still shifts `seeds.accent` by
+        // `tone_edits` below, unchanged: measuring from a bed near the
+        // dark wall instead of an accent near the light one is what
+        // keeps the accent "jaśniejszy odcień" of whatever the bed
+        // becomes — a small requested move stays small on a bed that
+        // starts close to it, where it would have dragged the accent
+        // most of the way down to match a dark pick, wiping out the very
+        // gap that reads as "lighter."
         let seed = nacelle::object::color_picker::Picker::of(
-            nacelle::theme::Color::from_oklch(seeds.accent).to_srgb(),
+            nacelle::theme::Color::from_oklch(self.tone_bed).to_srgb(),
         )
         .oklch();
         let want = self.pickers[PickerId::Tone.idx()].oklch();
@@ -5395,13 +5424,32 @@ impl Settings {
             surface_lift: px("surface.lift"),
             text_lift: px("text.lift"),
         });
-        // AND THE CONTROL OPENS ON THE THEME, like every other one on
-        // this page. The move is measured FROM the accent, so the accent
-        // is where the picker's handles stand at rest: a picker showing
-        // anything else would say the theme is a colour it is not, and
-        // the first drag would then write that lie's distance into the
-        // file.
-        self.pickers[PickerId::Tone.idx()].set_oklch(accent);
+        // THE BACKGROUND'S OWN SEED (2026-08-19). BASIC's one question is
+        // "what colour is the desktop", and the desktop's answer is its
+        // panels' bed — `component.panel.fill` — not the accent, which is
+        // a POP colour standing far up the ladder from it. A token this
+        // build cannot read falls back to the accent too, the same
+        // neutrality `ground` keeps for the palette's poles.
+        self.tone_bed = col_of("component.panel.fill").map_or(accent, |c| c.to_oklch());
+        // AND THE CONTROL OPENS ON THE BACKGROUND, like every other one on
+        // this page opens on the theme. The move is measured FROM the
+        // bed now (`Settings::set_tone_from_picker`), so the picker's
+        // handles stand there at rest: a picker showing anything else
+        // would say the desktop is a colour it is not, and the first drag
+        // would then write that lie's distance into the file — the accent
+        // included, since the accent still shifts by the SAME delta this
+        // origin measures (`Settings::tone_of`, `theme::edit::tone_edits`
+        // unchanged: only what the move is measured against moved).
+        //
+        // RGBA, not the picker's default ARGB: the owner's own words for
+        // this page, "ostatnie 2 cyfry koloru mają oznaczać
+        // przeźroczystość" — the alpha stands at the tail of the hex a
+        // person reads here, because this picker's alpha IS the
+        // background's opacity now (`editor_edits`, `panel_fill_edit`),
+        // and OPACITY's slider is gone from this page for exactly that
+        // reason (ZGŁOSZENIE, 2026-08-19).
+        self.pickers[PickerId::Tone.idx()].set_oklch(self.tone_bed);
+        self.pickers[PickerId::Tone.idx()].format = nacelle::object::color_picker::Format::Rgba;
     }
 
     /// The whole of what the editor is set to, as the token edits both the
@@ -5418,10 +5466,10 @@ impl Settings {
     fn editor_edits(&self) -> Vec<nacelle::theme::edit::Edit> {
         use nacelle::theme::edit::{
             accent_edit, border_colour_edit, border_edits, border_width_edit,
-            focus_ring_edits, glass_edits, glow_reach_edit, menu_edits, scrollbar_edits,
-            severity_role_edit, shape_edits, surface_edits, text_edits, tooltip_edits,
-            unfocused_dim_edit, Border, CornerCut, FocusRing, Glass, GlassReach,
-            RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
+            focus_ring_edits, glass_edits, glow_reach_edit, menu_edits, panel_fill_edit,
+            scrollbar_edits, severity_role_edit, shape_edits, surface_edits, text_edits,
+            tooltip_edits, unfocused_dim_edit, Border, CornerCut, FocusRing, Glass,
+            GlassReach, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
         /// ONE ASSIGNMENT PER TOKEN. A list carrying a token twice would
         /// save a file with the key written twice in one section, and the
@@ -5550,6 +5598,38 @@ impl Settings {
                 self.bg_coverage as f32 / 100.0,
                 reach,
             ));
+            // BASIC'S PROMISE, TAKEN LITERALLY (2026-08-19). The Tone
+            // picker no longer just MOVES the background through the
+            // wash-and-opacity pair above — on SOLID it IS the
+            // background: `component.panel.fill` becomes the bed
+            // (`self.tone_bed`) shifted by the SAME notched `tone` every
+            // other author on this page moves by, outranking the
+            // wash-derived seed `glass_edits` just wrote (`set_edit`, the
+            // same rule ZGŁOSZENIE 6's width and reach already stand on).
+            //
+            // THE COLOUR RIDES `carry` (BASIC's notched move), NOT THE
+            // PICKER WIDGET'S OWN LIVE STATE. A control that moved `self.
+            // tone` without also dragging the field's handle — a test
+            // poking the array directly, or any future control this page
+            // grows — must still turn the body, exactly as it already
+            // turns the accent and the rail; reading the widget's raw
+            // `.oklch()` here answered only the LAST drag and stood still
+            // for everything else, which is the bug this shape fixes.
+            //
+            // THE ALPHA DOES NOT RIDE IT. `Tone` has no fourth number —
+            // hue, saturation and lightness are the whole of what a
+            // notched move carries — so transparency is read live off the
+            // picker instead, the one channel this page has always kept
+            // outside the tone triple (the old OPACITY slider was the
+            // same kind of read, direct off its own field, never folded
+            // into the three). This is what makes the picker's alpha the
+            // transparency knob for real: type a softer tail on the hex
+            // and the body answers before any hue or lightness has moved.
+            if self.editor_basic && matches!(kind, Glass::Solid) {
+                let mut picked = carry.shift(self.tone_bed);
+                picked.alpha = self.pickers[PickerId::Tone.idx()].oklch().alpha;
+                set_edit(&mut edits, panel_fill_edit(Scope::Theme, picked));
+            }
         }
         // ---- the whole-theme sets (2026-08-16), in the model's order.
         // Everything below is SEEDED off the live bake on the way into the
@@ -12842,7 +12922,8 @@ mod tests {
         nacelle::theme::clear_preview();
         let mut s = editor_open();
 
-        /// Every token whose value the transparency knob MOVED.
+        /// Every token whose value the transparency knob MOVED — ADVANCED's
+        /// own, the OPACITY slider (`bg_opacity`), unchanged.
         fn reach_of(s: &mut Settings) -> Vec<&'static str> {
             s.bg_opacity = 40;
             let low = s.editor_edits();
@@ -12855,6 +12936,33 @@ mod tests {
                 }
             }
             // And a token that vanished entirely counts as moved too.
+            for e in &low {
+                if wrote(&high, e.token).is_none() {
+                    out.push(e.token);
+                }
+            }
+            out.sort_unstable();
+            out
+        }
+
+        /// The same measurement, over BASIC's OWN transparency knob
+        /// (2026-08-19): the Tone picker's alpha channel, not `bg_opacity`
+        /// — the OPACITY slider is gone from this page, and this is what
+        /// answers for it now. H, L and C are held fixed so only the
+        /// alpha moves between the two reads.
+        fn reach_of_basic(s: &mut Settings) -> Vec<&'static str> {
+            let base = s.pickers[PickerId::Tone.idx()].oklch();
+            let with_alpha = |a: f32| nacelle::theme::color::Oklch { alpha: a, ..base };
+            s.pickers[PickerId::Tone.idx()].set_oklch(with_alpha(0.4));
+            let low = s.editor_edits();
+            s.pickers[PickerId::Tone.idx()].set_oklch(with_alpha(0.9));
+            let high = s.editor_edits();
+            let mut out: Vec<&'static str> = Vec::new();
+            for e in &high {
+                if wrote(&low, e.token).as_deref() != Some(e.value.as_str()) {
+                    out.push(e.token);
+                }
+            }
             for e in &low {
                 if wrote(&high, e.token).is_none() {
                     out.push(e.token);
@@ -12877,10 +12985,14 @@ mod tests {
                 wide.contains(&body),
                 "{kind}: ADVANCED's transparency does not reach the body at all ({wide:?})"
             );
-            // BASIC: the body, and nothing else in the world.
+            // BASIC: the body, and nothing else in the world. On SOLID the
+            // knob is the Tone picker's own alpha now (2026-08-19); on the
+            // glassy kinds it is still `bg_opacity`, unchanged — the
+            // literal write only ever replaces `component.panel.fill`,
+            // never the glass pair.
             s.editor_basic = true;
             s.seed_tone_from_theme();
-            let narrow = reach_of(&mut s);
+            let narrow = if kind == "SOLID" { reach_of_basic(&mut s) } else { reach_of(&mut s) };
             assert_eq!(
                 narrow,
                 vec![body],
@@ -13348,8 +13460,11 @@ mod tests {
     fn the_picker_opens_on_the_theme_and_asks_for_no_move() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        let seed = s.tone_seeds.expect("the editor opened without seeds").accent;
-        // What the control SHOWS is the theme's own accent.
+        s.tone_seeds.expect("the editor opened without seeds");
+        // What the control SHOWS is the theme's own background bed
+        // (2026-08-19 — was the accent; BASIC's one picker answers "what
+        // colour is the desktop" by pointing at it now).
+        let seed = s.tone_bed;
         let shown = s.pickers[PickerId::Tone.idx()].oklch();
         assert!(
             (shown.l - seed.l).abs() < 2e-3 && (shown.c - seed.c).abs() < 5e-3,
@@ -13514,15 +13629,19 @@ mod tests {
         use nacelle::object::color_picker::{parse, Format};
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        let seed = s.tone_seeds.expect("BASIC opened without seeds").accent;
+        s.tone_seeds.expect("BASIC opened without seeds");
+        // The move is measured against the BACKGROUND now (2026-08-19),
+        // not the accent — see `Settings::set_tone_from_picker`.
+        let seed = s.tone_bed;
 
         // A QUARTER TURN. Taken at HALF THE CHROMA on purpose: the
-        // picker is an sRGB control and the master's mint at full chroma
-        // has no sRGB colour ninety degrees round — `Color::from_oklch`
-        // bisects the chroma down until there is one, and the honest
-        // report of that is a move the theme's author did not ask for.
-        // What is measured here is the arithmetic, so the colour is one
-        // the control can actually show.
+        // picker is an sRGB control and a colour ninety degrees round
+        // from the seed may have no sRGB match at the seed's own chroma
+        // — `Color::from_oklch` bisects the chroma down until there is
+        // one, and the honest report of that is a move the theme's
+        // author did not ask for. What is measured here is the
+        // arithmetic, so the colour is one the control can actually
+        // show.
         let step = s.tone_step();
         let half = nacelle::theme::color::Oklch { c: seed.c * 0.5, ..seed };
         s.pickers[PickerId::Tone.idx()].set_oklch(nacelle::theme::color::Oklch { h: half.h + 90.0, ..half });
@@ -13560,11 +13679,24 @@ mod tests {
         let off = (got.h - shown.h).rem_euclid(360.0);
         let off = off.min(360.0 - off);
         assert!(off <= step[0] as f32 + 1.0, "the file receives hue {}, shown {}", got.h, shown.h);
+        // THE FILE'S CHROMA IS THE ACCENT'S OWN, SCALED — not the picker's
+        // raw number. `shown.c` sits on the BACKGROUND's scale (2026-08-19:
+        // the seed is the bed, ~an eighth of the accent's own chroma), so
+        // comparing the two directly compares two different rulers. What
+        // has to hold is the ARITHMETIC `tone_shift` actually runs: the
+        // accent's seed chroma times the SAME sat ratio `tone[1]` names —
+        // gamut mapping may clamp it down from there, never up, so the
+        // check is a ceiling, not an equality.
+        let accent_seed_c = s.tone_seeds.expect("BASIC opened without seeds").accent.c;
+        let expect_c = accent_seed_c * (s.tone[1] as f32 / 100.0);
         assert!(
-            (got.c - shown.c).abs() < 0.02,
-            "the file receives chroma {}, shown {}",
+            got.c <= expect_c + 0.01 && got.c > 0.0,
+            "the file receives chroma {}, the arithmetic asks for at most {} \
+             ({}% of the accent's own {})",
             got.c,
-            shown.c
+            expect_c,
+            s.tone[1],
+            accent_seed_c
         );
 
         // A CHROMA MOVE ALONE DOES NOT TURN THE THEME.
@@ -13627,9 +13759,13 @@ mod tests {
     /// The grids: a press picks, and the bank keeps one cell per colour.
     ///
     /// THE FIRST CELL IS THE ACCENT (the master points `picker.base.1` at
-    /// it), so pressing it is pressing what the theme already says — and
-    /// the move that comes out of it must be NO move. That is the same
-    /// sentence the seeding test makes, arriving from the other side.
+    /// it) — a POP colour, standing far up the ladder from the BACKGROUND
+    /// BASIC's picker now seeds against (2026-08-19), so pressing it is a
+    /// real move and not the no-op it was while the seed was the accent
+    /// itself. The seeding test's "no move" sentence now belongs to the
+    /// BED (`the_picker_opens_on_the_theme_and_asks_for_no_move`); this
+    /// one keeps the OTHER half — a press this control's own grid offers
+    /// takes hold and reads back exactly.
     #[test]
     fn the_pickers_grids_choose_a_colour_and_bank_it_once() {
         let _g = crate::widgets::theme_test_lock();
@@ -13639,7 +13775,10 @@ mod tests {
         assert!(base.len() > 2, "the master ships a grid to press");
 
         s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0, 0.0);
-        assert_eq!(s.tone, TONE_REST, "pressing the theme's own accent asked for a move");
+        assert_ne!(
+            s.tone, TONE_REST,
+            "pressing the accent, now far from the background, asked for no move"
+        );
 
         // A cell that is NOT the accent moves the theme, and the picker
         // shows exactly what was pressed.
@@ -14521,6 +14660,12 @@ mod tests {
 
         let master_hue = lch(live("component.panel.fill")).h;
         let mut s = editor_open();
+        // ADVANCED: WASH is its own control, not BASIC's. The editor now
+        // opens on BASIC by default (2026-08-19), whose Tone picker would
+        // otherwise answer for `component.panel.fill` itself and leave
+        // this drag looking like it did nothing — this test is about the
+        // OTHER page's slider, so it says so.
+        s.editor_basic = false;
         // SOLID, with the background's own colour dragged a long way off
         // the master's mint: the HSV track is brightness, saturation, hue,
         // and 20 deg of HSV is nowhere near where this theme stands.
@@ -14879,18 +15024,24 @@ mod tests {
     /// The BASIC sliders notch by what the PIPELINE can show, and the
     /// depth that says so comes off SETTINGS -> COLOR.
     ///
-    /// AND PAST TEN BITS THE TRACK IS THE LIMIT, WHICH IS NOT A DEFECT.
-    /// On the master's seed (chroma 0.1531) the pipeline's own notch is
+    /// AND PAST TWELVE BITS THE TRACK IS THE LIMIT, WHICH IS NOT A DEFECT.
+    /// On the master's seed the notches divide by the BACKGROUND's chroma
+    /// now (2026-08-19 — `component.panel.fill`, 0.01853, not the accent's
+    /// 0.1531: `Settings::set_tone_from_picker` measures against the bed,
+    /// so the grid that avoids re-baking indistinguishable tones has to be
+    /// fine relative to what is being divided by), which is roughly an
+    /// eighth the accent's own — so the SAME bit depth buys a coarser grid
+    /// than it used to; the pipeline's own notch is
     ///
     /// ```text
-    ///    8 bits   1.467 deg   0.02561   0.003922   ->  1, 3, 2 units
-    ///   10 bits   0.366 deg   0.00638   0.000978   ->  1, 1, 1
-    ///   12 bits   0.091 deg   0.00159   0.000244   ->  1, 1, 1
-    ///   16 bits   0.006 deg   0.00010   0.000015   ->  1, 1, 1
+    ///    8 bits   12.12 deg   0.2116   0.003922   ->  12, 21, 2 units
+    ///   10 bits    3.02 deg   0.0527   0.000978   ->   3,  5, 1
+    ///   12 bits    0.75 deg   0.0132   0.000244   ->   1,  1, 1
+    ///   16 bits    0.05 deg   0.0008   0.000015   ->   1,  1, 1
     /// ```
     ///
     /// — a degree of hue, a percent of saturation and a fiftieth of the
-    /// lightness span are what these tracks HAVE, so from ten bits up
+    /// lightness span are what these tracks HAVE, so from twelve bits up
     /// the answer is the track's own resolution and the floor is what
     /// keeps a press from moving nothing at all. The alternative to a
     /// coarse notch here is not a finer one, it is a finer TRACK — a
@@ -14905,16 +15056,17 @@ mod tests {
         let seeds = s.tone_seeds.expect("no seeds");
         assert!(seeds.accent.c > 0.0, "the master's accent is grey — the test is blind");
         // The seed's chroma is what the two derived notches divide by, so
-        // it is named here: the master's mint, read in linear light.
+        // it is named here — the BACKGROUND's, not the accent's, since
+        // 2026-08-19: `component.panel.fill`, read in linear light.
         assert!(
-            (seeds.accent.c - 0.1531).abs() < 0.001,
-            "the seed's chroma moved to {} and the notches below with it",
-            seeds.accent.c
+            (s.tone_bed.c - 0.01853).abs() < 0.001,
+            "the bed's chroma moved to {} and the notches below with it",
+            s.tone_bed.c
         );
 
         let mut last = [0u32; 3];
         for (i, (bits, want)) in
-            [(8u32, [1u32, 3, 2]), (10, [1, 1, 1]), (12, [1, 1, 1]), (16, [1, 1, 1])]
+            [(8u32, [12u32, 21, 2]), (10, [3, 5, 1]), (12, [1, 1, 1]), (16, [1, 1, 1])]
                 .iter()
                 .enumerate()
         {
