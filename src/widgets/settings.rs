@@ -417,6 +417,15 @@ enum Act {
     EditorSaveAs,
     /// Drop the preview and reseed the controls from the theme.
     EditorCancel,
+    /// Opens the wallpaper path prompt ([`NamingFor::WallpaperPath`]),
+    /// pre-filled with `Settings::backdrop_image` when one is already
+    /// chosen — the BACKDROP's own door, matching SAVE AS's for the
+    /// theme's name.
+    EditorWallpaperEdit,
+    /// Drops the chosen wallpaper and marks the backdrop touched, so
+    /// SAVE writes `backdrop.source = solid` rather than leaving the
+    /// theme's own word standing unexamined.
+    EditorWallpaperClear,
     /// The colour picker's parts, one act each
     /// ([`nacelle::object::color_picker::Part`]).
     ///
@@ -530,6 +539,8 @@ fn focus_id(act: Act) -> FocusId {
         EditorSave => FocusId::of("settings.editor.save"),
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
+        EditorWallpaperEdit => FocusId::of("settings.editor.backdrop.edit"),
+        EditorWallpaperClear => FocusId::of("settings.editor.backdrop.clear"),
         EditorMode => FocusId::of("settings.editor.mode"),
         EditorCornerStep => FocusId::of("settings.editor.corner.step"),
         EditorTrack(k) => FocusId::of(match k {
@@ -1731,6 +1742,31 @@ fn bg_chosen(s: &Settings) -> bool {
     s.current_background.is_some()
 }
 
+/// Whether a wallpaper is chosen this session. The condition on BASIC's
+/// CLEAR WALLPAPER row — a button that undoes a choice has nothing to do
+/// while there is no choice standing (`Row::when`, the same absent-not-
+/// greyed rule [`corner_sized`]'s own header cites).
+fn wallpaper_chosen(s: &Settings) -> bool {
+    s.backdrop_image.is_some()
+}
+
+/// The word BASIC's WALLPAPER row shows on its button: the chosen file's
+/// own name where one is picked (the path in full would run the row off
+/// the window's edge on anything but the widest screens), or the plain
+/// invitation where none is.
+fn wallpaper_label(s: &Settings) -> String {
+    match s.backdrop_image.as_deref() {
+        Some(path) => {
+            let file = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string());
+            format!("WALLPAPER: {file}")
+        }
+        None => "CHOOSE WALLPAPER\u{2026}".to_string(),
+    }
+}
+
 /// Whether the corner cut standing is one that has a SIZE. The condition
 /// on BASIC's CORNER SIZE row.
 ///
@@ -2379,7 +2415,7 @@ fn editor_advanced(s: &Settings) -> bool {
 /// rather than above every kind-specific row, `Knob::EdgeWidth` reusing
 /// the `edge_width`/`edge_width_touched` fields and the `border_width_
 /// edit` answer in [`Settings::editor_edits`] that never left with it.
-static EDITOR_BASIC_ROWS: [Row; 10] = [
+static EDITOR_BASIC_ROWS: [Row; 13] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
@@ -2435,6 +2471,39 @@ static EDITOR_BASIC_ROWS: [Row; 10] = [
             act: Act::EditorCornerStep,
         },
         corner_sized,
+    ),
+    // WALLPAPER (2026-08-23): `[backdrop]`, the plate BEHIND the board —
+    // an axis of its own and not a fourth BACKGROUND kind, per the
+    // section's own header above: `backdrop.source` names where the
+    // pixels behind EVERYTHING come from, and SOLID (the theme's own
+    // `backdrop.solid`) is the only alternative this row offers to IMAGE.
+    // `fit`, `treat.*` and the `plate`/`passthrough` sources are theme-
+    // file business, same as every token this window does not carry a
+    // control for (`theme/edit.rs`'s own rule, "only what the renderer
+    // actually draws" — narrower still here: only what a FILE PICKER can
+    // hand a person).
+    //
+    // ONE BUTTON OPENS THE PATH PROMPT, the same `NamingFor::WallpaperPath`
+    // shape SAVE AS already wears for a theme's name — there is no file-
+    // browse dialog anywhere in this program to reuse (checked: the
+    // layout and theme SAVE AS prompts are both a typed name, never a
+    // native picker), so a typed/pasted path is the established pattern
+    // and not a bespoke one. CLEAR is a second row and not a second
+    // press of the first, so a chosen path stays readable while a hand
+    // decides whether to keep it.
+    row_after(Ctrl::Section { title: "WALLPAPER" }, Gap::None),
+    row(Ctrl::Button {
+        label: Text::Of(wallpaper_label),
+        kind: BtnKind::Wide,
+        act: Act::EditorWallpaperEdit,
+    }),
+    row_shown(
+        Ctrl::Button {
+            label: Text::Fixed("CLEAR WALLPAPER"),
+            kind: BtnKind::Wide,
+            act: Act::EditorWallpaperClear,
+        },
+        wallpaper_chosen,
     ),
     // The door to per-element colour used to stand here as its own row
     // (`Ctrl::Button { label: "ADVANCED COLOUR", ... }`, `Act::EditorMode`
@@ -3646,6 +3715,24 @@ enum Carrier {
     Rail,
 }
 
+/// Which question the SAVE-AS-shaped text prompt ([`Settings::naming`])
+/// is asking. Both are "type a string, Enter commits it, Esc throws it
+/// away" over the SAME `InputModel`, and this is the one fact that tells
+/// the two apart: what Enter does with the string, which charset a
+/// keystroke is checked against, and the two words the box's title and
+/// the field's placeholder wear.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NamingFor {
+    /// SAVE / SAVE AS: the theme's own file name, `Self::theme_name_char`.
+    /// Enter runs [`Settings::editor_save_named`], which writes to disk.
+    ThemeName,
+    /// The BACKDROP's wallpaper file, `Self::wallpaper_path_char`. Enter
+    /// only sets `Settings::backdrop_image` and previews it — nothing
+    /// reaches disk until SAVE / SAVE AS, exactly like every other
+    /// control on the page.
+    WallpaperPath,
+}
+
 pub struct Settings {
     pub open: bool,
     view: View,
@@ -3698,9 +3785,35 @@ pub struct Settings {
     bg_depth: u32,
     /// Wash coverage in percent, FROSTED only.
     bg_coverage: u32,
+    /// The BACKDROP's own wallpaper — `[backdrop]`, the plate BEHIND the
+    /// board (elev 0), never glass, and a different axis than BACKGROUND
+    /// above: that section is `Glass` over a panel's bed, this is what
+    /// stands under everything, before any panel is drawn at all.
+    ///
+    /// `Some(path)` is a file chosen this session; `None` is "no wallpaper
+    /// — the theme's own `backdrop.solid` stands". Seeded off the live
+    /// theme like `current_border`/`current_background`
+    /// ([`Settings::seed_editor_from_theme`]), and read back the COLD way
+    /// (`nacelle::theme::diagnostics().text(...)`) because `backdrop.image`
+    /// is a TEXT token, off `ResolvedTheme` entirely — the same split
+    /// `theme::backdrop::bake_wallpaper`'s own module header draws.
+    backdrop_image: Option<String>,
+    /// Whether this session's hand has touched the wallpaper picker or
+    /// its CLEAR button at all — the same "untouched leaves the theme's
+    /// own word standing" mark [`Settings::edge_width_touched`] and
+    /// [`Settings::glow_reach_touched`] carry, and for the same reason:
+    /// a page opened and left alone must save the theme exactly as it
+    /// was, not narrate a source of `solid` nobody asked for.
+    backdrop_touched: bool,
     /// The SAVE AS prompt, when it is open — the same `InputModel` the
     /// layout editor names its files with, driven here purely by the
     /// keyboard: the field is focused on open, Enter saves, Esc closes.
+    ///
+    /// Since the wallpaper path prompt (2026-08-23), this ONE field asks
+    /// two different questions — [`NamingFor`] says which — because both
+    /// are "type a string, Enter commits it, Esc throws it away" and
+    /// nothing about the model or the modal around it differs; only what
+    /// Enter DOES with the string does.
     naming: Option<nacelle::object::text_input::InputModel>,
     /// Which picker's value plate is open for inline typing, if any — the
     /// "one at a time" bookkeeping [`naming`](Settings::naming) already
@@ -3715,6 +3828,10 @@ pub struct Settings {
     /// (commits) whichever picker this names — see
     /// `Settings::blur_editing_picker`.
     editing_picker: Option<PickerId>,
+    /// Which question [`Settings::naming`] is currently asking. Read only
+    /// while `naming` is `Some`; the value left over from the last prompt
+    /// otherwise, which is never looked at.
+    naming_for: NamingFor,
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
@@ -4193,8 +4310,13 @@ impl Settings {
             bg_opacity: 100,
             bg_depth: 50,
             bg_coverage: 42,
+            backdrop_image: None,
+            backdrop_touched: false,
             naming: None,
             editing_picker: None,
+            // Unread while `naming` is `None`; `ThemeName` is the older
+            // of the two questions and the harmless default.
+            naming_for: NamingFor::ThemeName,
             // The editor opens on ADVANCED — the page that has always
             // been there — with BASIC's move at rest and no
             // seeds yet, so a BASIC page that was somehow reached before
@@ -5024,19 +5146,20 @@ impl Settings {
         // origin measures (`Settings::tone_of`, `theme::edit::tone_edits`
         // unchanged: only what the move is measured against moved).
         //
-        // RGB, not the picker's default ARGB (ZGŁOSZENIE, 2026-08-19 —
-        // the owner's second word on this page, after OPACITY's slider
-        // came back: transparency is that slider's question alone now,
-        // so the swatch answers a question with no alpha in it at all,
-        // not one that happens to show FF). Seeded opaque for the same
-        // reason — `self.tone_bed`'s OWN alpha (whatever the live
-        // `component.panel.fill` carries) has nothing to do with what
-        // this picker is FOR any more, and showing it would be a number
-        // nobody asked and RGB has no digits to spell besides.
+        // Seeded opaque (ZGŁOSZENIE, 2026-08-19 — the owner's second word
+        // on this page, after OPACITY's slider came back: transparency
+        // is that slider's question alone now, so this picker answers a
+        // question with no alpha in it at all) — `self.tone_bed`'s OWN
+        // alpha (whatever the live `component.panel.fill` carries) has
+        // nothing to do with what this picker is FOR any more, and
+        // showing it would be a number nobody asked. HSL is the only
+        // notation left (2026-08-28) and it CAN spell alpha, unlike the
+        // RGB this page forced back when the picker's own default still
+        // could — but locking `alpha` to 1.0 here keeps `with_alpha`
+        // from ever appending one, so the guarantee holds the same way.
         let bed_rgb =
             nacelle::theme::color::Oklch { alpha: 1.0, ..self.tone_bed };
         self.pickers[PickerId::Tone.idx()].set_oklch(bed_rgb);
-        self.pickers[PickerId::Tone.idx()].format = nacelle::object::color_picker::Format::Rgb;
     }
 
     /// The whole of what the editor is set to, as the token edits both the
@@ -5055,7 +5178,7 @@ impl Settings {
             accent_edit, border_colour_edit, border_width_edit,
             focus_ring_edits, glass_edits, menu_edits, panel_fill_edit,
             scrollbar_edits, severity_role_edit, shape_edits, surface_edits, text_edits,
-            tooltip_edits, unfocused_dim_edit, CornerCut, FocusRing, Glass,
+            tooltip_edits, unfocused_dim_edit, CornerCut, Edit, FocusRing, Glass,
             GlassReach, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
         /// ONE ASSIGNMENT PER TOKEN. A list carrying a token twice would
@@ -5183,6 +5306,38 @@ impl Settings {
                     ..carry.shift(self.tone_bed)
                 };
                 set_edit(&mut edits, panel_fill_edit(Scope::Theme, picked));
+            }
+        }
+        // WALLPAPER — `[backdrop]`, the plate behind the board (elev 0),
+        // never glass and no `Glass`/`Border` kind of its own in
+        // `theme/edit.rs` to build on: nobody has written a
+        // `backdrop_edit` there yet (out of that module's own stated
+        // scope — its header names `backdrop` among the sets it
+        // deliberately does not offer), so this writes the two tokens
+        // directly, by name, the same way the theme FILE spells them.
+        // `Edit`'s fields are public for exactly this: a token this
+        // window's model has no builder for is still one construction
+        // away, not a wall.
+        //
+        // Untouched (`backdrop_touched` false) writes NOTHING, same rule
+        // as `edge_width_touched`/`glow_reach_touched` above: a page
+        // opened and left alone must save the theme exactly as it was.
+        // Touched with a path writes `image` + the file; touched with
+        // none (CLEAR) writes `solid` — an EXPLICIT revert, not a
+        // silence, because a silence here would leave the file's OLD
+        // image standing after a hand asked for it gone.
+        if self.backdrop_touched {
+            match self.backdrop_image.as_deref().filter(|p| !p.trim().is_empty()) {
+                Some(path) => {
+                    set_edit(&mut edits, Edit { token: "backdrop.source", value: "image".to_string() });
+                    set_edit(
+                        &mut edits,
+                        Edit { token: "backdrop.image", value: Self::quote_theme_text(path) },
+                    );
+                }
+                None => {
+                    set_edit(&mut edits, Edit { token: "backdrop.source", value: "solid".to_string() });
+                }
             }
         }
         // ---- the whole-theme sets (2026-08-16), in the model's order.
@@ -5506,6 +5661,24 @@ impl Settings {
             self.bg_coverage = (wash_a * 100.0).round().clamp(0.0, 100.0) as u32;
         }
 
+        // WALLPAPER: `backdrop.source` is an ENUM token — POD, so `word`
+        // reads it the same way it reads `corner.mode` and every other
+        // kind on this page. `backdrop.image` is not: a TEXT token off
+        // `ResolvedTheme` entirely (`theme::backdrop`'s own module header
+        // says so), read the one way a text token can be, by name, off
+        // the diagnostics side of the theme. Read ONLY while the source
+        // says IMAGE — a path a theme happens to carry while showing
+        // SOLID is not a wallpaper this page has any business opening on.
+        self.backdrop_image = if word("backdrop.source").as_deref() == Some("image") {
+            nacelle::theme::diagnostics()
+                .text("backdrop.image")
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty())
+        } else {
+            None
+        };
+        self.backdrop_touched = false;
+
         // ---- the whole-theme sections (2026-08-16) ----
         // ACCENT: the seed itself.
         if let Some(c) = col_of("palette.accent") {
@@ -5621,6 +5794,38 @@ impl Settings {
     /// A theme's name may be its file's name, nothing more.
     fn theme_name_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+
+    /// What the wallpaper path prompt accepts a keystroke of. Wide open
+    /// compared to [`Self::theme_name_char`] on purpose — a path is a
+    /// filesystem's own business, not this program's, and the one thing
+    /// that would actually corrupt the saved theme is a literal `"`
+    /// closing the token's quoted string early. Control characters are
+    /// refused too: none is legal in a path this program can open, and a
+    /// stray one pasted from elsewhere is never what a hand meant to
+    /// type.
+    fn wallpaper_path_char(c: char) -> bool {
+        !c.is_control() && c != '"'
+    }
+
+    /// Spells a TEXT token's value the way this file's own strings are
+    /// written: a quoted literal, `"` and `\` escaped — the two bytes
+    /// that would otherwise end it early or change what the next one
+    /// means. `backdrop.image`'s own contract is "quoted; the bytes ARE
+    /// the value" (`default.theme`, `[backdrop]`), so nothing here
+    /// interprets the path — it only keeps the quote that carries it
+    /// intact.
+    fn quote_theme_text(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            if c == '"' || c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+        out
     }
 
     /// The theme the editor is EDITING — the file the preview on screen is
@@ -6192,6 +6397,7 @@ impl Settings {
             }
             Act::EditorSaveAs => {
                 use nacelle::object::text_input::{InputModel, Validator};
+                self.naming_for = NamingFor::ThemeName;
                 self.naming = Some(
                     InputModel::new()
                         .with_validator(Validator::Charset(Self::theme_name_char))
@@ -6213,6 +6419,7 @@ impl Settings {
                     || !known.iter().any(|n| n.eq_ignore_ascii_case(&name))
                 {
                     use nacelle::object::text_input::{InputModel, Validator};
+                    self.naming_for = NamingFor::ThemeName;
                     self.naming = Some(
                         InputModel::new()
                             .with_validator(Validator::Charset(Self::theme_name_char))
@@ -6221,6 +6428,30 @@ impl Settings {
                 } else {
                     return self.editor_save_named(&name);
                 }
+            }
+            // The BACKDROP's own door: the same InputModel SAVE AS opens,
+            // asking the other question ([`NamingFor::WallpaperPath`]) and
+            // pre-filled with whatever is chosen already — editing a path
+            // is retyping it from nothing otherwise, which a SAVE AS
+            // prompt never asks of a theme's own name either.
+            Act::EditorWallpaperEdit => {
+                use nacelle::object::text_input::{InputModel, Validator};
+                let mut model = InputModel::new()
+                    .with_validator(Validator::Charset(Self::wallpaper_path_char))
+                    .with_max_len(1024);
+                if let Some(path) = self.backdrop_image.as_deref() {
+                    model.set_value(path);
+                }
+                self.naming_for = NamingFor::WallpaperPath;
+                self.naming = Some(model);
+            }
+            // CLEAR drops the choice AND marks the backdrop touched in
+            // the same press — the mark is what tells `editor_edits` this
+            // is a hand asking for `solid`, not a page nobody has visited.
+            Act::EditorWallpaperClear => {
+                self.backdrop_image = None;
+                self.backdrop_touched = true;
+                self.apply_editor_preview();
             }
             Act::Back => {
                 self.say(Sfx::Click);
@@ -6656,10 +6887,12 @@ impl Settings {
         if !self.open {
             return KeyOut::Ignored;
         }
-        // The SAVE AS prompt owns the keyboard while it stands: Enter
-        // saves, Esc closes, everything else is the field's. Purely
-        // keyboard-driven — the field needs no focus bookkeeping because
-        // nothing else can hear a key while it is open.
+        // The SAVE-AS-shaped prompt owns the keyboard while it stands:
+        // Enter commits, Esc closes, everything else is the field's.
+        // Purely keyboard-driven — the field needs no focus bookkeeping
+        // because nothing else can hear a key while it is open. What
+        // Enter DOES with the text, and which charset a paste is filtered
+        // through, is [`NamingFor`]'s one branch in here.
         if self.naming.is_some() {
             use nacelle::object::text_input::{self, InputEdited, InputMsg};
             if ev.mods == Mods::NONE && ev.key == FKey::Escape {
@@ -6667,21 +6900,41 @@ impl Settings {
                 return KeyOut::Consumed;
             }
             if ev.mods == Mods::NONE && ev.key == FKey::Enter {
-                let name = self
+                let text = self
                     .naming
                     .as_ref()
                     .map(|m| m.value().trim().to_string())
                     .unwrap_or_default();
-                if name.is_empty() {
-                    return KeyOut::Consumed;
-                }
-                return if self.editor_save_named(&name) {
-                    KeyOut::Changed
-                } else {
-                    KeyOut::Consumed
+                return match self.naming_for {
+                    NamingFor::ThemeName => {
+                        if text.is_empty() {
+                            return KeyOut::Consumed;
+                        }
+                        if self.editor_save_named(&text) {
+                            KeyOut::Changed
+                        } else {
+                            KeyOut::Consumed
+                        }
+                    }
+                    // Nothing reaches disk here — same as every other
+                    // control on the page, this only sets the field and
+                    // previews it; SAVE / SAVE AS is what writes a file.
+                    // An empty field is a CLEAR said with the keyboard
+                    // rather than the button beside it.
+                    NamingFor::WallpaperPath => {
+                        self.naming = None;
+                        self.backdrop_image = (!text.is_empty()).then_some(text);
+                        self.backdrop_touched = true;
+                        self.apply_editor_preview();
+                        KeyOut::Consumed
+                    }
                 };
             }
             if let Some(msg) = text_input::key_msg(ev) {
+                let filter = match self.naming_for {
+                    NamingFor::ThemeName => Self::theme_name_char,
+                    NamingFor::WallpaperPath => Self::wallpaper_path_char,
+                };
                 let out = self.naming.as_mut().map(|m| m.apply(msg));
                 match out {
                     Some(InputEdited::CopyRequest { text, .. }) => {
@@ -6691,10 +6944,8 @@ impl Settings {
                         if let Some(text) =
                             nacelle::clipboard::load(nacelle::clipboard::Board::Clipboard)
                         {
-                            let text: String = text
-                                .chars()
-                                .filter(|&c| Self::theme_name_char(c))
-                                .collect();
+                            let text: String =
+                                text.chars().filter(|&c| filter(c)).collect();
                             if let Some(m) = self.naming.as_mut() {
                                 m.apply(InputMsg::Insert(text));
                             }
@@ -7136,13 +7387,27 @@ impl Settings {
         nacelle::object::window::frame(ctx, box_);
         static TITLE_FG: OnceLock<TokenId> = OnceLock::new();
         let title_px = role_title(ctx).px;
+        // Which question is standing decides the title, the field's
+        // placeholder, the focus path and the hint's verb — the four
+        // words this modal wears for its two callers ([`NamingFor`]).
+        let (title, placeholder, focus_path, hint_text) = match self.naming_for {
+            NamingFor::ThemeName => {
+                ("SAVE THEME AS", "theme name", "settings.editor.naming", "ENTER SAVES \u{2014} ESC CANCELS")
+            }
+            NamingFor::WallpaperPath => (
+                "WALLPAPER IMAGE PATH",
+                "path to an image file",
+                "settings.editor.backdrop.naming",
+                "ENTER SETS \u{2014} ESC CANCELS",
+            ),
+        };
         ctx.dl.module_title(
             ctx.fonts,
             bx + pad,
             by + pad,
             bw - 2.0 * pad,
             title_px,
-            "SAVE THEME AS",
+            title,
             "",
             col(t.color(tok(&TITLE_FG, "component.panel.title"))),
             true,
@@ -7155,9 +7420,9 @@ impl Settings {
                 ctx,
                 field,
                 model,
-                FocusId::of("settings.editor.naming"),
+                FocusId::of(focus_path),
                 &InputStyle {
-                    placeholder: "theme name",
+                    placeholder,
                     hover: field.contains(mx, my),
                     disabled: false,
                     focused_fallback: true,
@@ -7171,7 +7436,7 @@ impl Settings {
             hint.px,
             bx + bw / 2.0,
             field.bottom() + t.px(tok(&HINT_INSET, "settings.hint_inset")),
-            "ENTER SAVES \u{2014} ESC CANCELS",
+            hint_text,
             col(t.color(tok(&HINT_C, "text.muted"))),
             hint.track * hint.px,
         );
@@ -9670,6 +9935,8 @@ mod tests {
             Act::EditorSave,
             Act::EditorSaveAs,
             Act::EditorCancel,
+            Act::EditorWallpaperEdit,
+            Act::EditorWallpaperClear,
             Act::EditorTrack(Knob::SurfHue),
             Act::EditorTrack(Knob::CornerSm),
             Act::EditorTrack(Knob::Hairline),
@@ -13104,7 +13371,6 @@ mod tests {
     fn pressing_the_value_plate_opens_the_inline_editor_seeded_from_it() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         let seeded = s.pickers[PickerId::Edge.idx()].text();
         assert!(s.editing_picker.is_none(), "nothing is open before the press");
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
@@ -13125,13 +13391,12 @@ mod tests {
     fn enter_commits_a_good_value_reaches_the_field_and_closes_the_editor() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         let mut fc = FocusCtl::new();
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         s.pickers[PickerId::Edge.idx()]
             .editing_mut()
             .unwrap()
-            .set_value("#FF00FF00");
+            .set_value("hsl(120, 100, 50)");
         assert!(matches!(s.key(&enter_key(), &mut fc), KeyOut::Changed));
         assert!(s.editing_picker.is_none(), "Enter on a good value closes the editor");
         assert!(!s.pickers[PickerId::Edge.idx()].is_editing());
@@ -13149,6 +13414,29 @@ mod tests {
         (v.clamp(0.0, 1.0) * 255.0).round() as u8
     }
 
+    /// `oklch(L, C, H)` or `oklch(L, C, H / A)` back to its three (or
+    /// four) numbers — the same plain split libnacelle's own
+    /// `theme::edit` tests read a written token with, now that the
+    /// picker's `Format::Oklch` is gone (HSL is the one notation the
+    /// control itself reads). Reading the numbers straight out of the
+    /// FILE'S OWN string, rather than round-tripping through the
+    /// picker's sRGB `Color`, is a closer check of what got written, not
+    /// a looser one.
+    fn parse_oklch_token(s: &str) -> nacelle::theme::color::Oklch {
+        let inner = s.trim().trim_start_matches("oklch(").trim_end_matches(')');
+        let (head, alpha) = match inner.split_once('/') {
+            Some((h, a)) => (h, a.trim().parse::<f32>().unwrap()),
+            None => (inner, 1.0),
+        };
+        let mut n = head.split(',').map(|p| p.trim().parse::<f32>().unwrap());
+        nacelle::theme::color::Oklch {
+            l: n.next().unwrap(),
+            c: n.next().unwrap(),
+            h: n.next().unwrap(),
+            alpha,
+        }
+    }
+
     /// A bad parse on Enter STAYS OPEN, text untouched — the SAVE AS
     /// prompt's own `if name.is_empty()` guard, read the other way round
     /// (`Settings::key`'s own note on its editing-picker block).
@@ -13156,7 +13444,6 @@ mod tests {
     fn enter_on_a_bad_parse_stays_open_and_keeps_the_colour() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         let mut fc = FocusCtl::new();
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         let before = s.pickers[PickerId::Edge.idx()].colour();
@@ -13181,14 +13468,13 @@ mod tests {
     fn escape_cancels_the_inline_editor_without_touching_the_colour() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         let mut fc = FocusCtl::new();
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         let before = s.pickers[PickerId::Edge.idx()].colour();
         s.pickers[PickerId::Edge.idx()]
             .editing_mut()
             .unwrap()
-            .set_value("#00000000");
+            .set_value("hsl(0, 0, 0)");
         assert!(matches!(s.key(&escape_key(), &mut fc), KeyOut::Consumed));
         assert!(s.editing_picker.is_none());
         assert!(!s.pickers[PickerId::Edge.idx()].is_editing());
@@ -13205,12 +13491,11 @@ mod tests {
     fn a_press_on_a_different_picker_blurs_and_commits_the_open_editor() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         s.pickers[PickerId::Edge.idx()]
             .editing_mut()
             .unwrap()
-            .set_value("#FF112233");
+            .set_value("hsl(210, 50, 13.333)");
         // A slider on ACCENT — a different picker altogether.
         s.perform(Act::PickerSlider(PickerId::Accent, 0), 0.5);
         assert!(s.editing_picker.is_none(), "the other picker's press blurred the open editor");
@@ -13229,7 +13514,6 @@ mod tests {
     fn a_click_on_blank_space_blurs_the_open_editor() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         assert!(s.editing_picker.is_some());
         s.hits.clear(); // nothing under the point below
@@ -13244,17 +13528,16 @@ mod tests {
     fn pressing_the_same_plate_again_does_not_reset_the_typed_text() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         s.pickers[PickerId::Edge.idx()]
             .editing_mut()
             .unwrap()
-            .set_value("#8899AA");
+            .set_value("hsl(200, 20, 60)");
         s.perform(Act::PickerText(PickerId::Edge), 0.0);
         assert_eq!(s.editing_picker, Some(PickerId::Edge), "still the same picker, still open");
         assert_eq!(
             s.pickers[PickerId::Edge.idx()].editing_mut().unwrap().value(),
-            "#8899AA",
+            "hsl(200, 20, 60)",
             "a second press on its own plate did not restart the typed text"
         );
         nacelle::theme::clear_preview();
@@ -13327,7 +13610,6 @@ mod tests {
     /// this test wrote itself.
     #[test]
     fn a_colour_picked_in_basic_travels_as_the_distance_from_the_theme() {
-        use nacelle::object::color_picker::{parse, Format};
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
         s.tone_seeds.expect("BASIC opened without seeds");
@@ -13372,10 +13654,7 @@ mod tests {
             .find(|e| e.token == "palette.accent")
             .map(|e| e.value.clone())
             .expect("BASIC wrote no accent");
-        let got = parse(&written, Format::Oklch)
-            .expect("the accent is written in the notation the picker reads")
-            .to_linear()
-            .to_oklch();
+        let got = parse_oklch_token(&written);
         let shown = s.pickers[PickerId::Tone.idx()].oklch();
         let off = (got.h - shown.h).rem_euclid(360.0);
         let off = off.min(360.0 - off);
@@ -13425,7 +13704,6 @@ mod tests {
     /// second control on the page.
     #[test]
     fn the_border_follows_the_theme_colour_picker_in_basic() {
-        use nacelle::object::color_picker::{parse, Format};
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
         let seed = s.tone_seeds.expect("BASIC opened without seeds").accent;
@@ -13447,10 +13725,7 @@ mod tests {
             .find(|e| e.token == "border.default")
             .map(|e| e.value.clone())
             .expect("BASIC dropped the ring's colour");
-        let got = parse(&ring, Format::Oklch)
-            .expect("the ring is written in the notation the picker reads")
-            .to_linear()
-            .to_oklch();
+        let got = parse_oklch_token(&ring);
         let off = (got.h - seed.h).rem_euclid(360.0);
         let off = off.min(360.0 - off);
         assert!(off > 30.0, "the ring stayed near the seed hue {} (got {})", seed.h, got.h);
@@ -13490,7 +13765,7 @@ mod tests {
         // away, and an assertion about ulps would be an assertion about
         // nothing anybody can see.
         let hex = |c: nacelle::theme::Color| {
-            nacelle::object::color_picker::write(c, nacelle::object::color_picker::Format::Argb)
+            nacelle::object::color_picker::write(c, nacelle::object::color_picker::Format::Hsl)
         };
         assert_eq!(
             hex(s.pickers[PickerId::Tone.idx()].colour()),

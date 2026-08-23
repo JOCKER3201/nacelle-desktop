@@ -3298,7 +3298,16 @@ fn draw_screen(
     // colours, and mid-resize it stretches for a frame or two until the
     // fresh bake lands.
     let backdrop = sc.backdrop_id();
-    nacelle::deco::board_ground(&mut dl, w, h, backdrop);
+    // `board_ground` gained a WALLPAPER slot ahead of the decor plate
+    // (`elev.backdrop`, `source = image`, libnacelle `feat/wallpaper-
+    // backdrop`) — the settings window can now WRITE that token
+    // (`Act::EditorWallpaperEdit`, `widgets/settings.rs`), but nothing in
+    // this file bakes `theme::backdrop::bake_wallpaper` or uploads its
+    // `Plate` as a texture yet, so there is no `ImageId` to hand in. `None`
+    // here is not a fallback for a failure — it is the honest answer for
+    // "not wired up", and `board_ground` already draws `backdrop.solid`
+    // first for exactly this case.
+    nacelle::deco::board_ground(&mut dl, w, h, None, backdrop);
     // Rings are withheld while board rects are mid-flight (the cube
     // ride) — set before any registration is answered this frame.
     focus_ctl.set_ring_suppressed(sc.cube.is_some());
@@ -3628,7 +3637,10 @@ fn draw_screen(
                     // so the ride may carry the quad and the frost
                     // stays put.
                     if horizontal {
-                        nacelle::deco::board_ground(ctx.dl, w, h, backdrop);
+                        // `None`: see the frame's own call at the head of
+                        // this function for why there is no wallpaper
+                        // `ImageId` to hand in yet.
+                        nacelle::deco::board_ground(ctx.dl, w, h, None, backdrop);
                     }
                     let thm = nacelle::theme::resolved();
                     if b.1 != 0 {
@@ -4599,7 +4611,8 @@ mod tests {
         // through the widget context. WITH THE SCREEN'S OWN EXTENT: a
         // ground drawn at no size is no ground, and the pyramid is back
         // to holding the clear alone.
-        let frames_ground = format!("{}{}", "deco::", "board_ground(&mut dl, w, h, backdrop)");
+        let frames_ground =
+            format!("{}{}", "deco::", "board_ground(&mut dl, w, h, None, backdrop)");
         assert!(
             src.contains(&frames_ground),
             "the frame stopped laying its ground across the whole screen through \
