@@ -49,7 +49,7 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
 
-use super::{reads_differently, Act, Backend, Icon, Names, Outcome, Verb, Window, WindowId};
+use nacelle::wm::{reads_differently, Act, Backend, Icon, Names, Outcome, Verb, Window, WindowId};
 
 /// Everything one toplevel has said since its last `done`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -342,6 +342,12 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for Feed {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // The protocol requires the handle to be destroyed once closed:
+        // "the client should destroy the handle", and the compositor
+        // will not reuse the toplevel's id until it is.
+        if let ext_foreign_toplevel_handle_v1::Event::Closed = event {
+            proxy.destroy();
+        }
         state.hear(proxy.id().protocol_id(), event);
     }
 }

@@ -1,10 +1,10 @@
 //! Reading nacelle's own window out of winit.
 //!
 //! The one file in this module that knows what a window library is.
-//! [`Host`] itself is four words of plain data, so the vocabulary can
-//! move to libnacelle whole (see the module header); this is what stays
-//! behind in the desktop, because "which window is ours" is a question
-//! only the program that opened it can answer.
+//! The vocabulary moved to libnacelle's `nacelle::wm` whole (see the
+//! module header); [`Host`] stays behind in the desktop, because
+//! "which window is ours" is a question only the program that opened
+//! it can answer.
 //!
 //! Both halves are read from the same window, and both are allowed to
 //! come back empty: a Wayland session has no X11 window, an X11 session
@@ -41,6 +41,12 @@ impl Host {
     /// Spelled out rather than derived, so that reaching for it is a
     /// sentence somebody wrote: every OTHER caller has a window, and
     /// passing this one instead puts the desktop in its own list.
+    ///
+    /// Only the two `#[ignore]`d hand probes in `x11::tests` reach for
+    /// it (`cargo test --offline -- --ignored`), so a plain `cargo
+    /// build` sees no caller at all — hence the narrow allow, on this
+    /// one function rather than the module.
+    #[allow(dead_code)]
     pub fn nobody() -> Host {
         Host { wayland_display: None, x11_window: None }
     }

@@ -53,9 +53,9 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use super::{
-    reads_differently, Act, Backend, Host, Icon, Names, Outcome, Place, State, Verb, Window,
-    WindowId,
+use super::Host;
+use nacelle::wm::{
+    reads_differently, Act, Backend, Icon, Names, Outcome, Place, State, Verb, Window, WindowId,
 };
 
 x11rb::atom_manager! {
@@ -132,6 +132,14 @@ pub enum Policy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     /// No request exists for this verb in EWMH.
+    ///
+    /// [`Ewmh::act`] already answers `Outcome::Unsupported` for this
+    /// arm, but nothing constructs it today —
+    /// `every_verb_ewmh_offers_has_a_request_behind_it` below proves
+    /// [`route`] is total over the whole vocabulary as it stands. The
+    /// arm stays for the next verb that is not one EWMH can do, so
+    /// that day's diff is one match arm shorter and not a new variant.
+    #[allow(dead_code)]
     Nothing,
     /// A client message addressed to `window`, delivered through the
     /// root — which is how EWMH says everything.
@@ -762,10 +770,16 @@ impl Backend for Ewmh {
 /// The gamescope arrangement, under the name and the signature
 /// `main.rs` already calls.
 ///
-/// A carrier in [`Policy::Enlarge`] and nothing more. It stays a
-/// separate name only because `main.rs:599` is held by another fleet;
-/// once that file is free this is `Connector::start` with the policy
-/// passed in, and this type goes.
+/// A carrier in [`Policy::Enlarge`] and nothing more, kept as its own
+/// type rather than folded into [`connect`](super::connect): that
+/// function opens [`Policy::Observe`] and is meant to run alongside
+/// this one, not replace it — under gamescope both the "enlarge
+/// everything" policy and a real window list are wanted at once, on
+/// two separate connections, each paying only for what it asks the
+/// server for (see [`root_mask`]). Merging the two into one
+/// policy-parametrised call would make them share a connection and a
+/// poll, which is a real simplification but a separate one from the
+/// vocabulary's move to libnacelle, so it is left for its own change.
 pub struct Fullscreen(Ewmh);
 
 impl Fullscreen {
@@ -774,8 +788,8 @@ impl Fullscreen {
     /// window or display.
     pub fn start(window: &winit::window::Window) -> Option<Fullscreen> {
         // One reader for "which window is ours", shared with
-        // [`Connector::start`] — the two must not be able to disagree
-        // about which window must never be enlarged.
+        // [`connect`](super::connect) — the two must not be able to
+        // disagree about which window must never be enlarged.
         let host = Host::of(window).x11_window?;
         Ewmh::start(Policy::Enlarge, Some(host)).map(Fullscreen)
     }
@@ -1074,14 +1088,12 @@ mod tests {
     /// window is in `_NET_CLIENT_LIST` exactly like every other
     /// client's. Nothing in the properties says "this one is you": the
     /// only way to know is to be told, which is why [`Host`] is an
-    /// argument of [`Connector::start`] and not something worked out
-    /// here.
+    /// argument of [`connect`](super::connect) and not something worked
+    /// out here.
     ///
     /// The second half matters as much as the first. Under
     /// [`Policy::Enlarge`] the same number is what stops the desktop
     /// being sent a fullscreen message about itself.
-    ///
-    /// [`Connector::start`]: super::super::Connector::start
     #[test]
     fn the_desktop_is_never_a_window_in_its_own_list() {
         let a = bench();
