@@ -2381,7 +2381,7 @@ fn editor_advanced(s: &Settings) -> bool {
 ///   REACHES, which is ZGŁOSZENIE 7 and is answered in
 ///   [`Settings::editor_edits`], not here.
 /// * CORNER SIZE — with a cut that has a size ([`corner_sized`]).
-static EDITOR_BASIC_ROWS: [Row; 12] = [
+static EDITOR_BASIC_ROWS: [Row; 13] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
@@ -2421,13 +2421,24 @@ static EDITOR_BASIC_ROWS: [Row; 12] = [
     ),
     row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Backgrounds }),
-    // OPACITY's slider is GONE from this page (2026-08-19, the owner's
-    // own words: "suwaka opacity ma niebyć"). The Tone picker at the head
-    // of this page IS the background now, and its alpha channel is the
-    // transparency knob — the last bytes of its RGBA hex, not a second
-    // control saying the same thing a different way (`editor_edits`,
-    // `theme::edit::panel_fill_edit`). `s.bg_opacity` and `Knob::BgOpacity`
-    // stay ADVANCED's own; nothing on this page reads them any more.
+    // OPACITY is BACK on this page (2026-08-19, owner's second word: the
+    // Tone picker reads RGB now, no alpha of its own to answer for
+    // transparency with — this slider is the one control that does, on
+    // both pages alike, and `editor_edits` reads it here exactly as
+    // ADVANCED does (`theme::edit::panel_fill_edit`'s alpha argument).
+    row_shown(
+        Ctrl::Slider {
+            label: "OPACITY",
+            act: Act::EditorTrack(Knob::BgOpacity),
+            unit: Unit::None,
+            range: (0, 100),
+            step: step_1,
+            get: |s| s.bg_opacity,
+            set: |s, v| s.bg_opacity = v,
+            save: |s| s.apply_editor_preview(),
+        },
+        bg_chosen,
+    ),
     row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Corners }),
     row_shown(
@@ -5441,15 +5452,19 @@ impl Settings {
         // origin measures (`Settings::tone_of`, `theme::edit::tone_edits`
         // unchanged: only what the move is measured against moved).
         //
-        // RGBA, not the picker's default ARGB: the owner's own words for
-        // this page, "ostatnie 2 cyfry koloru mają oznaczać
-        // przeźroczystość" — the alpha stands at the tail of the hex a
-        // person reads here, because this picker's alpha IS the
-        // background's opacity now (`editor_edits`, `panel_fill_edit`),
-        // and OPACITY's slider is gone from this page for exactly that
-        // reason (ZGŁOSZENIE, 2026-08-19).
-        self.pickers[PickerId::Tone.idx()].set_oklch(self.tone_bed);
-        self.pickers[PickerId::Tone.idx()].format = nacelle::object::color_picker::Format::Rgba;
+        // RGB, not the picker's default ARGB (ZGŁOSZENIE, 2026-08-19 —
+        // the owner's second word on this page, after OPACITY's slider
+        // came back: transparency is that slider's question alone now,
+        // so the swatch answers a question with no alpha in it at all,
+        // not one that happens to show FF). Seeded opaque for the same
+        // reason — `self.tone_bed`'s OWN alpha (whatever the live
+        // `component.panel.fill` carries) has nothing to do with what
+        // this picker is FOR any more, and showing it would be a number
+        // nobody asked and RGB has no digits to spell besides.
+        let bed_rgb =
+            nacelle::theme::color::Oklch { alpha: 1.0, ..self.tone_bed };
+        self.pickers[PickerId::Tone.idx()].set_oklch(bed_rgb);
+        self.pickers[PickerId::Tone.idx()].format = nacelle::object::color_picker::Format::Rgb;
     }
 
     /// The whole of what the editor is set to, as the token edits both the
@@ -5618,16 +5633,16 @@ impl Settings {
             //
             // THE ALPHA DOES NOT RIDE IT. `Tone` has no fourth number —
             // hue, saturation and lightness are the whole of what a
-            // notched move carries — so transparency is read live off the
-            // picker instead, the one channel this page has always kept
-            // outside the tone triple (the old OPACITY slider was the
-            // same kind of read, direct off its own field, never folded
-            // into the three). This is what makes the picker's alpha the
-            // transparency knob for real: type a softer tail on the hex
-            // and the body answers before any hue or lightness has moved.
+            // notched move carries — so transparency is OPACITY's answer
+            // still (ZGŁOSZENIE, 2026-08-19: the slider came back and the
+            // picker went RGB), the SAME `self.bg_opacity` `glass_edits`
+            // just read above — one number, read twice, never two numbers
+            // that could disagree.
             if self.editor_basic && matches!(kind, Glass::Solid) {
-                let mut picked = carry.shift(self.tone_bed);
-                picked.alpha = self.pickers[PickerId::Tone.idx()].oklch().alpha;
+                let picked = nacelle::theme::color::Oklch {
+                    alpha: self.bg_opacity as f32 / 100.0,
+                    ..carry.shift(self.tone_bed)
+                };
                 set_edit(&mut edits, panel_fill_edit(Scope::Theme, picked));
             }
         }
@@ -12945,33 +12960,6 @@ mod tests {
             out
         }
 
-        /// The same measurement, over BASIC's OWN transparency knob
-        /// (2026-08-19): the Tone picker's alpha channel, not `bg_opacity`
-        /// — the OPACITY slider is gone from this page, and this is what
-        /// answers for it now. H, L and C are held fixed so only the
-        /// alpha moves between the two reads.
-        fn reach_of_basic(s: &mut Settings) -> Vec<&'static str> {
-            let base = s.pickers[PickerId::Tone.idx()].oklch();
-            let with_alpha = |a: f32| nacelle::theme::color::Oklch { alpha: a, ..base };
-            s.pickers[PickerId::Tone.idx()].set_oklch(with_alpha(0.4));
-            let low = s.editor_edits();
-            s.pickers[PickerId::Tone.idx()].set_oklch(with_alpha(0.9));
-            let high = s.editor_edits();
-            let mut out: Vec<&'static str> = Vec::new();
-            for e in &high {
-                if wrote(&low, e.token).as_deref() != Some(e.value.as_str()) {
-                    out.push(e.token);
-                }
-            }
-            for e in &low {
-                if wrote(&high, e.token).is_none() {
-                    out.push(e.token);
-                }
-            }
-            out.sort_unstable();
-            out
-        }
-
         for (kind, body) in
             [("SOLID", "component.panel.fill"), ("FROSTED GLASS", "elev.panel.glass.tint")]
         {
@@ -12985,14 +12973,14 @@ mod tests {
                 wide.contains(&body),
                 "{kind}: ADVANCED's transparency does not reach the body at all ({wide:?})"
             );
-            // BASIC: the body, and nothing else in the world. On SOLID the
-            // knob is the Tone picker's own alpha now (2026-08-19); on the
-            // glassy kinds it is still `bg_opacity`, unchanged — the
-            // literal write only ever replaces `component.panel.fill`,
-            // never the glass pair.
+            // BASIC: the body, and nothing else in the world. `bg_opacity`
+            // is the one transparency knob again either way (2026-08-19):
+            // on SOLID the literal write reads it for the alpha it puts
+            // on `component.panel.fill`, on the glassy kinds `glass_edits`
+            // still does — the same field, the same lever, unchanged.
             s.editor_basic = true;
             s.seed_tone_from_theme();
-            let narrow = if kind == "SOLID" { reach_of_basic(&mut s) } else { reach_of(&mut s) };
+            let narrow = reach_of(&mut s);
             assert_eq!(
                 narrow,
                 vec![body],
