@@ -387,7 +387,23 @@ impl Drop for Audio {
         // while ALSA may still hold threads of its own buys nothing.
         self.stop.store(true, Ordering::Relaxed);
         if let Some(w) = self.writer.take() {
-            let _ = w.join();
+            // The PCM is opened without SND_PCM_NONBLOCK, so the writer
+            // thread's `writei` is a blocking syscall; a wedged driver
+            // (a card that never returns from it — a yanked USB device,
+            // a hung sound chip) would otherwise never notice `stop` and
+            // this join would hang the exit forever. Joining is done on
+            // a proxy thread and given a bound instead: past it, `drop`
+            // gives up and returns, leaving that one thread to finish
+            // closing the device on its own time, or not.
+            let (tx, rx) = std::sync::mpsc::channel();
+            if crate::threads::spawn(crate::threads::AUDIO_JOIN, move || {
+                let _ = w.join();
+                let _ = tx.send(());
+            })
+            .is_ok()
+            {
+                let _ = rx.recv_timeout(Duration::from_secs(2));
+            }
         }
     }
 }

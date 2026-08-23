@@ -1016,7 +1016,7 @@ impl Editor {
         self.list.set_rect(id, Some(pct(moved, w, h)));
     }
 
-    pub fn mouse_up(&mut self) {
+    pub fn mouse_up(&mut self, w: f32, h: f32) {
         if self.drag.is_some() {
             // Snapping makes the release land on the grid, so it gets
             // the sharper confirmation of the two.
@@ -1029,7 +1029,19 @@ impl Editor {
         self.drag = None;
         self.adding = None;
         // Releasing mid-animation finishes the growth instantly.
-        self.grow = None;
+        if let Some((id, _, _, _)) = self.grow.take() {
+            if let Some(r) = self.px_rect(id, w, h) {
+                let (tw, th) = self.spawn_size(w, h);
+                let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                let nr = Rect::new(
+                    (cx - tw / 2.0).clamp(0.0, (w - tw).max(0.0)),
+                    (cy - th / 2.0).clamp(0.0, (h - th).max(0.0)),
+                    tw,
+                    th,
+                );
+                self.list.set_rect(id, Some(pct(nr, w, h)));
+            }
+        }
     }
 
     /// Opaque parallelogram button (nacelle::object).
@@ -1844,7 +1856,7 @@ mod tests {
     /// Drags one widget out of the ADD WIDGET window and drops it.
     fn place(ed: &mut Editor, widget: Panel, x: f32, y: f32) -> InstanceId {
         let id = ed.pull_out(widget, (160.0, 90.0), (x, y), W, H);
-        ed.mouse_up();
+        ed.mouse_up(W, H);
         id
     }
 
@@ -1915,7 +1927,7 @@ mod tests {
         let r = Editor::px_of(ed.list.get(a).expect("just placed"), W, H);
         ed.mouse_down(r.cx(), r.y + r.h / 2.0, W, H);
         ed.mouse_move(r.cx() + 200.0, r.y + r.h / 2.0 + 100.0, W, H);
-        ed.mouse_up();
+        ed.mouse_up(W, H);
 
         assert!(rect_of(&ed, a).x > 0.0);
         assert!(!same_spec(&rect_of(&ed, a), &before));

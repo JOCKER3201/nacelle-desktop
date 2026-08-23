@@ -26,6 +26,7 @@ use nacelle::base::{Panel, Rect, SizeTable};
 use nacelle::draw::ImageId;
 use nacelle::layout::{BoardId, InstanceId, LayoutDef};
 use nacelle::stage::BoardWorld;
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 use winit::monitor::MonitorHandle;
@@ -46,7 +47,6 @@ pub struct Cube {
 /// One running widget: which placement it answers for, what it runs,
 /// and the two things its last frame left behind.
 struct Live {
-    id: InstanceId,
     widget: Panel,
     /// None only while the factory refused the file: the placement
     /// takes part in the layout and draws nothing.
@@ -81,7 +81,7 @@ struct Live {
 /// with it.
 #[derive(Default)]
 pub struct WidgetSet {
-    items: Vec<Live>,
+    items: HashMap<InstanceId, Live>,
 }
 
 impl WidgetSet {
@@ -111,21 +111,23 @@ impl WidgetSet {
         // terminal, and keeping the old box would leave a shell running
         // under a name that no longer means it.
         self.items
-            .retain(|l| present.iter().any(|(id, w)| *id == l.id && *w == l.widget));
+            .retain(|id, l| present.iter().any(|(pid, w)| *pid == *id && *w == l.widget));
         let dropped = before - self.items.len();
         let mut built = 0;
         for (id, widget) in present {
-            if self.items.iter().any(|l| l.id == *id) {
+            if self.items.contains_key(id) {
                 continue;
             }
             built += 1;
-            self.items.push(Live {
-                id: *id,
-                widget: *widget,
-                inst: make(*widget),
-                content: None,
-                scale: 1.0,
-            });
+            self.items.insert(
+                *id,
+                Live {
+                    widget: *widget,
+                    inst: make(*widget),
+                    content: None,
+                    scale: 1.0,
+                },
+            );
         }
         (built, dropped)
     }
@@ -138,15 +140,12 @@ impl WidgetSet {
         &mut self,
         id: InstanceId,
     ) -> Option<&mut (dyn widgets::Widget + 'static)> {
-        self.items
-            .iter_mut()
-            .find(|l| l.id == id)
-            .and_then(|l| l.inst.as_deref_mut())
+        self.items.get_mut(&id).and_then(|l| l.inst.as_deref_mut())
     }
 
     /// Every widget that came up, to be told something they all hear.
     pub fn each_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn widgets::Widget>> {
-        self.items.iter_mut().filter_map(|l| l.inst.as_mut())
+        self.items.values_mut().filter_map(|l| l.inst.as_mut())
     }
 
     /// Which widget a placement is currently running — the other half
@@ -155,27 +154,27 @@ impl WidgetSet {
     /// button went down). An id alone cannot say whether that state is
     /// still about the same thing; the pair can.
     pub fn widget_of(&self, id: InstanceId) -> Option<Panel> {
-        self.items.iter().find(|l| l.id == id).map(|l| l.widget)
+        self.items.get(&id).map(|l| l.widget)
     }
 
     /// The content box one placement's last draw used; None before it
     /// has drawn once.
     pub fn content(&self, id: InstanceId) -> Option<Rect> {
-        self.items.iter().find(|l| l.id == id).and_then(|l| l.content)
+        self.items.get(&id).and_then(|l| l.content)
     }
 
     pub fn set_content(&mut self, id: InstanceId, r: Rect) {
-        if let Some(l) = self.items.iter_mut().find(|l| l.id == id) {
+        if let Some(l) = self.items.get_mut(&id) {
             l.content = Some(r);
         }
     }
 
     pub fn scale(&self, id: InstanceId) -> f32 {
-        self.items.iter().find(|l| l.id == id).map(|l| l.scale).unwrap_or(1.0)
+        self.items.get(&id).map(|l| l.scale).unwrap_or(1.0)
     }
 
     pub fn set_scale(&mut self, id: InstanceId, s: f32) {
-        if let Some(l) = self.items.iter_mut().find(|l| l.id == id) {
+        if let Some(l) = self.items.get_mut(&id) {
             l.scale = s;
         }
     }
@@ -183,7 +182,7 @@ impl WidgetSet {
     /// How many placements actually came up — what the start-up line
     /// counts.
     pub fn running(&self) -> usize {
-        self.items.iter().filter(|l| l.inst.is_some()).count()
+        self.items.values().filter(|l| l.inst.is_some()).count()
     }
 
     pub fn len(&self) -> usize {
@@ -195,7 +194,7 @@ impl WidgetSet {
     pub fn grid_holder(&self) -> Option<(InstanceId, (usize, usize))> {
         self.items
             .iter()
-            .find_map(|l| l.inst.as_ref().and_then(|w| w.grid()).map(|g| (l.id, g)))
+            .find_map(|(id, l)| l.inst.as_ref().and_then(|w| w.grid()).map(|g| (*id, g)))
     }
 }
 

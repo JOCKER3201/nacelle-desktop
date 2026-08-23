@@ -605,6 +605,15 @@ fn main() {
         eprintln!("nacelle-desktop: gamescope clients go fullscreen");
     }
 
+    // The window-management connector (nacelle::wm, JEDEN MODEL OKNA):
+    // a snapshot of whatever windows the compositor is willing to name,
+    // polled once a frame below next to `fullscreen`. Nothing in the
+    // interface reads a snapshot yet — no board lists a foreign window,
+    // no control sends it a Close — so this is the "opened and polled"
+    // half of the connector and not the "acted on" half; see
+    // `fullscreen`'s own module header for what that leaves undone.
+    let mut wm_connector = fullscreen::connect(fullscreen::Host::of(&screens[0].window));
+
     // Which screen the application's own interface is on — the settings
     // window, the popup, the context menu, the focus chain. It follows
     // the hand from screen to screen; with one screen it is always 0,
@@ -876,14 +885,26 @@ fn main() {
     // XWayland; until then a terminal composition simply never starts
     // and typing degrades to plain KeyboardInput — which is what
     // gamescope offers anyway (it usually runs no IME at all).
-    let mut ime_allowed = false;
+    // It starts unowned, and which screen it and `ime_area` describe
+    // once it is not: every screen runs the block below once a frame,
+    // and without an owner a naming field active on one screen alone
+    // would have every OTHER screen's turn read as a change (want_ime
+    // = false against a global "allowed" left true by the owner) and
+    // clear it, only for the owner's own turn, later the same frame,
+    // to read that as a change right back and re-arm it — sixty times
+    // a second between them.
+    let mut ime_owner: Option<usize> = None;
     // The last IME cursor area sent, so the anchor is re-sent on
     // change, not sixty times a second.
     let mut ime_area: Option<(i32, i32, i32, i32)> = None;
     // Double/triple click, tracked HERE because a widget cannot see
-    // click counts: the count picks the selection kind on Begin.
+    // click counts: the count picks the selection kind on Begin. The
+    // screen rides along with the point — local coordinates are only
+    // comparable within the same screen, and without it a click on one
+    // monitor shortly after a click at the same spot on another would
+    // read as the second half of a double click.
     let mut click_streak: u32 = 0;
-    let mut click_last: Option<(Instant, f32, f32)> = None;
+    let mut click_last: Option<(Instant, f32, f32, usize)> = None;
 
     // The F1 §1 command registry. OVER_GREEDY: the terminal is a greedy
     // control and eats plain chords as bytes — Ctrl+Shift+C/V and the
@@ -1065,7 +1086,7 @@ fn main() {
             let r = sc.widgets.content(id).unwrap_or(fallback);
             let occupied: Vec<bool> =
                 (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
-            let snap = sys.lock().unwrap().clone();
+            let snap = sys.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let host = widgets::Host {
                 snap: &snap,
                 term: sessions[active].as_ref().map(|s| &s.term),
@@ -1172,13 +1193,20 @@ fn main() {
                     }
                 }
                 widgets::Action::OpenFile(file) => {
-                    // Application associated with the extension.
-                    let _ = std::process::Command::new("xdg-open")
+                    // Application associated with the extension. Reaped
+                    // on a thread of its own so it does not sit as a
+                    // zombie until the desktop itself exits.
+                    if let Ok(mut child) = std::process::Command::new("xdg-open")
                         .arg(&file)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
-                        .spawn();
+                        .spawn()
+                    {
+                        let _ = crate::threads::spawn(crate::threads::REAP, move || {
+                            let _ = child.wait();
+                        });
+                    }
                 }
                 // A tab number comes from a widget, and a widget is a
                 // file someone can replace: the number is checked here
@@ -1695,6 +1723,16 @@ fn main() {
     // of that.
     const FRAME: std::time::Duration = std::time::Duration::from_nanos(1_000_000_000 / 60);
     let mut next_frame = Instant::now();
+    // Below this cap the world still redraws — the telemetry clock and
+    // a shell producing output on its own do not wait for a hand on the
+    // mouse — but a screen with nothing recent to answer for (no input,
+    // no mood transition running) is asked for far fewer of those
+    // redraws: a static, idle desktop has no eighteen-frame transition
+    // to keep smooth, so it does not need the cadence that transition
+    // is sized for.
+    const IDLE_AFTER: std::time::Duration = std::time::Duration::from_millis(1000);
+    const IDLE_FRAME: std::time::Duration = std::time::Duration::from_millis(250);
+    let mut last_active = Instant::now();
 
     event_loop
         .run(move |event, elwt| {
@@ -1709,6 +1747,12 @@ fn main() {
                     else {
                         return;
                     };
+                    // A real event (not the redraw this loop asks for
+                    // itself) is the idle cadence's own reset — the
+                    // hand did something, so the desktop is not idle.
+                    if !matches!(event, WindowEvent::RedrawRequested) {
+                        last_active = Instant::now();
+                    }
                     match event {
                     WindowEvent::CloseRequested => {
                         // A screen of the desktop is not a document
@@ -1919,7 +1963,7 @@ fn main() {
                             (0..SESSIONS).map(|i| sessions[i].is_some()).collect();
                         let action = {
                             let host = widgets::Host {
-                                snap: &sys.lock().unwrap().clone(),
+                                snap: &sys.lock().unwrap_or_else(|e| e.into_inner()).clone(),
                                 term: sessions[active].as_ref().map(|s| &s.term),
                                 tabs: &occupied,
                                 tab_active: active,
@@ -1976,7 +2020,8 @@ fn main() {
                         // must not decide whether its release arrives.
                         release_pressed!(si, elwt);
                         if screens[si].editor.active && !settings.open {
-                            screens[si].editor.mouse_up();
+                            let (w, h) = screens[si].size();
+                            screens[si].editor.mouse_up(w, h);
                             return;
                         }
                         if screens[si].editor.active && settings.open {
@@ -2055,7 +2100,7 @@ fn main() {
                         // that cache the only place that reads /proc.
                         let clicked_cwd = sessions[active].as_mut().and_then(|s| s.cwd());
                         let action = {
-                            let snap = sys.lock().unwrap().clone();
+                            let snap = sys.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let host = widgets::Host {
                                 snap: &snap,
                                 term: sessions[active].as_ref().map(|s| &s.term),
@@ -2237,8 +2282,9 @@ fn main() {
                         // same hand and the same accessibility setting.
                         let slop = drag_slop();
                         click_streak = match click_last {
-                            Some((t, x, y))
-                                if t.elapsed() < std::time::Duration::from_millis(400)
+                            Some((t, x, y, s))
+                                if s == si
+                                    && t.elapsed() < std::time::Duration::from_millis(400)
                                     && (mouse.0 - x).abs() < slop
                                     && (mouse.1 - y).abs() < slop =>
                             {
@@ -2246,7 +2292,7 @@ fn main() {
                             }
                             _ => 1,
                         };
-                        click_last = Some((Instant::now(), mouse.0, mouse.1));
+                        click_last = Some((Instant::now(), mouse.0, mouse.1, si));
                         let layout = screens[si].content_layout();
                         let hit = layout.hit(mouse.0, mouse.1);
                         // The keyboard follows the press, whether or not
@@ -2811,6 +2857,9 @@ fn main() {
                             if let Some(f) = fullscreen.as_mut() {
                                 f.poll();
                             }
+                            if let Some(c) = wm_connector.as_mut() {
+                                c.poll();
+                            }
                         }
                         // Live preview of the size sliders while dragging.
                         if let Some((tscale, uscale)) = settings.live_scales() {
@@ -2862,7 +2911,7 @@ fn main() {
                         // collector rewrites it once a second and can wait
                         // the few milliseconds a frame takes. Nothing
                         // below locks it again — that would deadlock.
-                        let snap_held = sys.lock().unwrap();
+                        let snap_held = sys.lock().unwrap_or_else(|e| e.into_inner());
                         let clock = hashframe::clock(start.elapsed().as_secs_f64());
                         let host = widgets::Host {
                             snap: &snap_held,
@@ -2952,13 +3001,22 @@ fn main() {
                             focus_ctl.begin_frame();
                         }
 
-                        // Fit all session grids to the panel size.
-                        if let Some((cols, rows)) = grid_now {
-                            if (cols, rows) != grid {
-                                grid = (cols, rows);
-                                for s in sessions.iter_mut().flatten() {
-                                    s.term.resize(cols, rows);
-                                    s.pty.resize(cols as u16, rows as u16);
+                        // Fit all session grids to the panel size — as
+                        // measured on the screen the hand is on. The
+                        // sessions are shared and mirrored across every
+                        // screen, so on a multi-monitor desktop with
+                        // mismatched resolutions letting whichever
+                        // screen last drew win would have two panels of
+                        // different pixel size fighting over the same
+                        // PTY, each redraw undoing the other's resize.
+                        if hosts_ui {
+                            if let Some((cols, rows)) = grid_now {
+                                if (cols, rows) != grid {
+                                    grid = (cols, rows);
+                                    for s in sessions.iter_mut().flatten() {
+                                        s.term.resize(cols, rows);
+                                        s.pty.resize(cols as u16, rows as u16);
+                                    }
                                 }
                             }
                         }
@@ -2992,7 +3050,7 @@ fn main() {
                         // strictly while a TEXT control owns the
                         // keyboard — the SAVE AS field is the only one
                         // wired in this slice (the terminal's stays
-                        // off; see the ime_allowed declaration). The
+                        // off; see the ime_owner declaration). The
                         // caret box the field just drew anchors the
                         // candidate window; winit's call wants LOGICAL
                         // coordinates and converts a Physical value
@@ -3000,18 +3058,21 @@ fn main() {
                         // logical-px trap, handled by the type).
                         {
                             let want_ime = screens[si].editor.naming.is_some();
-                            if want_ime != ime_allowed {
-                                ime_allowed = want_ime;
-                                screens[si].window.set_ime_allowed(want_ime);
-                                if want_ime {
+                            if want_ime {
+                                // Claiming the anchor for THIS screen —
+                                // untouched if it is already the owner,
+                                // so an owner's later turn the same
+                                // frame does not read its own state as
+                                // a change and re-arm what is already
+                                // armed.
+                                if ime_owner != Some(si) {
+                                    ime_owner = Some(si);
+                                    ime_area = None;
+                                    screens[si].window.set_ime_allowed(true);
                                     screens[si].window.set_ime_purpose(
                                         winit::window::ImePurpose::Normal,
                                     );
-                                } else {
-                                    ime_area = None;
                                 }
-                            }
-                            if want_ime {
                                 if let Some(cr) = screens[si].editor.naming_caret {
                                     let area = (
                                         cr.x as i32,
@@ -3031,6 +3092,10 @@ fn main() {
                                         );
                                     }
                                 }
+                            } else if ime_owner == Some(si) {
+                                ime_owner = None;
+                                ime_area = None;
+                                screens[si].window.set_ime_allowed(false);
                             }
                         }
 
@@ -3067,6 +3132,12 @@ fn main() {
                     // other frame of the session.
                     if nacelle::theme::epoch() != lens_epoch {
                         apply_lens!();
+                        // A mood's own wash rides this same epoch bump,
+                        // so the idle cadence below treats it exactly
+                        // like a fresh input: the transition it is
+                        // about to fade in is the "board animation"
+                        // FRAME is sized for.
+                        last_active = now;
                         // The gutter deliberately does NOT ride this guard.
                         // `render.text_gamma` is one number for the session,
                         // so re-reading it off whichever bake is published
@@ -3083,7 +3154,12 @@ fn main() {
                         // Catching up frame by frame after a stall would
                         // burn through the backlog at full speed; the
                         // cadence simply restarts from now.
-                        next_frame = now + FRAME;
+                        let cadence = if last_active.elapsed() < IDLE_AFTER {
+                            FRAME
+                        } else {
+                            IDLE_FRAME
+                        };
+                        next_frame = now + cadence;
                         for sc in screens.iter() {
                             sc.window.request_redraw();
                         }

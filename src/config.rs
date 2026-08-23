@@ -2846,6 +2846,11 @@ fn do_write_job(job: WriteJob) {
     report_write(&job.path, wrote);
 }
 
+/// How long [`flush_writes`] waits on a writer that is still `running`
+/// before giving up on it too — see the sentence beside the timed wait
+/// below for what a thread can be stuck on that no panic ever ends.
+const CONF_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Waits until every save asked for so far is on the disk.
 ///
 /// Called on the way out of the event loop, which is what turns "the
@@ -2853,6 +2858,7 @@ fn do_write_job(job: WriteJob) {
 /// calls it for the same reason: an assertion about a file is an
 /// assertion about a write that has finished.
 pub fn flush_writes() {
+    let deadline = std::time::Instant::now() + CONF_FLUSH_TIMEOUT;
     let mut desk = lock_desk();
     loop {
         let Some(d) = desk.as_ref() else { return };
@@ -2880,7 +2886,28 @@ pub fn flush_writes() {
             );
             return;
         }
-        desk = wait_at_desk(desk);
+        // A THREAD that answers is not the same as one that finishes:
+        // `write_conf`'s `fsync`/rename can block for as long as the
+        // filesystem underneath it does, and an unplugged USB disk or a
+        // hung network mount under `$HOME` never panics — it just never
+        // returns. `running` and `busy` stay true either way, so an
+        // unbounded wait here would hang the desktop's own exit on a
+        // disk it does not control. Past the deadline this gives up
+        // exactly as it does above for a writer that is gone outright.
+        let left_time = deadline.saturating_duration_since(std::time::Instant::now());
+        if left_time.is_zero() {
+            let left = d.queue.len();
+            drop(desk);
+            eprintln!(
+                "nacelle-desktop: {left} settings writes could not be finished \u{2014} \
+                 the writer did not answer in time"
+            );
+            return;
+        }
+        let (guard, _) = WRITE_BELL
+            .wait_timeout(desk, left_time)
+            .unwrap_or_else(|e| e.into_inner());
+        desk = guard;
     }
 }
 

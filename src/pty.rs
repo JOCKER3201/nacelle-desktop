@@ -403,9 +403,26 @@ impl Pty {
         unsafe {
             // Reap the child so it does not linger as a zombie. Closing
             // the master gives the shell EOF and SIGHUP terminates it, so
-            // this returns promptly (a zombie is reaped immediately).
+            // this usually returns promptly — but nothing guarantees it: a
+            // shell (or a foreground job it left running) that traps or
+            // ignores SIGHUP would leave this blocked forever, and this
+            // runs on the UI thread during shutdown. So the wait is
+            // bounded: poll for the exit without blocking, and once the
+            // deadline passes, SIGKILL — which cannot be trapped or
+            // ignored — before the final, now-brief, blocking wait.
             let mut status = 0;
-            libc::waitpid(self.child, &mut status, 0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if libc::waitpid(self.child, &mut status, libc::WNOHANG) != 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    libc::kill(self.child, libc::SIGKILL);
+                    libc::waitpid(self.child, &mut status, 0);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
         why
     }

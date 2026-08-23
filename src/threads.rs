@@ -89,12 +89,20 @@ pub const PLATE: &str = "nacelle-plate";
 /// it outlives the call that started it and an audit will meet it.
 pub const CONF: &str = "nacelle-conf";
 
+/// The proxy that bounds `Audio::drop`'s join on the writer thread to a
+/// timeout, so a wedged ALSA driver cannot hang the whole desktop's exit.
+pub const AUDIO_JOIN: &str = "nacelle-adrop";
+
+/// Reaps a spawned child (`xdg-open` and the like) so it does not sit as
+/// a zombie until the desktop itself exits.
+pub const REAP: &str = "nacelle-reap";
+
 /// The roll call: every name above, gathered so the tests can check them
 /// all at once. It carries no run-time duty — a thread is started by
 /// naming its own constant — so it is built only for the test binary,
 /// and a test below makes sure it never falls behind the table.
 #[cfg(test)]
-pub const ALL: [&str; 5] = [AUDIO, TELEMETRY, PTY, PLATE, CONF];
+pub const ALL: [&str; 7] = [AUDIO, TELEMETRY, PTY, PLATE, CONF, AUDIO_JOIN, REAP];
 
 /// Starts a named thread. The only way this program makes one.
 ///
