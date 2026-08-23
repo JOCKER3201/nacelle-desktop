@@ -206,12 +206,30 @@ fn chrome_of(v: View) -> Chrome {
 ///
 /// Named rather than indexed because a swapped pair would be a value that
 /// is merely wrong instead of a compile error.
+///
+/// Most of these variants lost their row in 2026-08-23's picker-only
+/// simplification of `EDITOR_ROWS` (the ADVANCED page), the same change
+/// [`EdgeWidth`](Knob::EdgeWidth) already explains: `editor_edits` still
+/// answers every one of them correctly for the `Settings` fields that
+/// feed it, and the tests pinning that answer are the reason the variant
+/// stays a working, tested read on the model rather than a stub waiting
+/// to be reinvented if a control for it returns.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Knob {
     /// The BORDER's own thickness — `border.edge.width`, ZGŁOSZENIE 6's
     /// first reading of "promień borderu". NOT `stroke.hair`, which is
     /// the global kerf 72 derivations share and which this page already
     /// offers under HAIRLINE.
+    ///
+    /// No row constructs this any more (BORDER WIDTH left BASIC
+    /// 2026-08-23, at the owner's word, and never stood on ADVANCED) —
+    /// kept, and allowed, rather than torn out: `border_width_edit` and
+    /// the two tests pinning it (`the_borders_thickness_and_its_lights_
+    /// reach_are_two_answers...`, `a_light_that_is_not_drawn_is_not_
+    /// asked_how_far_it_reaches`) are a real, working answer to ZGŁOSZENIE
+    /// 6 that a future row can reuse without re-deriving it.
+    #[allow(dead_code)]
     EdgeWidth,
     /// How far a lit border's light reaches — `glow.panel_edge.radius`,
     /// the second reading. Only on screen with a kind that lights
@@ -288,6 +306,11 @@ enum Knob {
 /// Which of the editor's switches a toggle row flips. Named like [`Knob`]
 /// and for the same reason: a swapped pair would be a switch that is
 /// merely wrong instead of a compile error.
+///
+/// Every toggle row that used to flip one of these left `EDITOR_ROWS` in
+/// 2026-08-23's picker-only simplification — see [`Knob`]'s note, which
+/// applies here the same way.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flip {
     /// OFF restores `surface.hue = @hue.accent` as a REFERENCE (the
@@ -386,7 +409,9 @@ enum Act {
     EditorCornerStep,
     /// One of the theme editor's colour tracks.
     EditorTrack(Knob),
-    /// One of the theme editor's switches ([`Flip`]).
+    /// One of the theme editor's switches ([`Flip`]). No row constructs
+    /// this any more — see [`Flip`]'s note.
+    #[allow(dead_code)]
     EditorFlip(Flip),
     /// Write the edit set into the theme in force — or, for `default`,
     /// fall through to SAVE AS: the master is not a file.
@@ -1262,15 +1287,23 @@ enum ListId {
     Backgrounds,
     /// The severity role the picker under it pins — §5.10's closed
     /// set, offered whole because each role is its own author token.
+    /// No dropdown offers it any more (2026-08-23) — see [`Knob`]'s note.
+    #[allow(dead_code)]
     Severities,
     /// The one corner shape the whole interface wears (`corner.mode`) —
     /// a right angle, a radius or a chamfer.
     Corners,
-    /// How the focus ring is stroked (`focus.ring.style`).
+    /// How the focus ring is stroked (`focus.ring.style`). No dropdown
+    /// offers it any more (2026-08-23) — see [`Knob`]'s note.
+    #[allow(dead_code)]
     RingStyles,
-    /// Whether the scrollbar takes layout space (`scrollbar.mode`).
+    /// Whether the scrollbar takes layout space (`scrollbar.mode`). No
+    /// dropdown offers it any more (2026-08-23) — see [`Knob`]'s note.
+    #[allow(dead_code)]
     ScrollModes,
-    /// Which side of the content the bar sits on (`scrollbar.edge`).
+    /// Which side of the content the bar sits on (`scrollbar.edge`). No
+    /// dropdown offers it any more (2026-08-23) — see [`Knob`]'s note.
+    #[allow(dead_code)]
     ScrollEdges,
     /// COLOR's colour space. The one list in the window whose NAME and
     /// whose CONTENTS both move: the HDR switch under it turns SPACE
@@ -1666,15 +1699,13 @@ fn always(_: &Settings) -> bool {
 }
 
 // The constant answers to `Ctrl::Slider`'s step. Percent tracks step 5
-// per press; cell counts, pixels and every 0..100 track step 1; the
-// blur's pyramid steps 2. Exactly the numbers the descriptions carried
-// as literals before the field became a question — one function each,
-// the way [`always`] is the constant answer to `Row::when`.
+// per press; cell counts, pixels and every 0..100 track step 1. Exactly
+// the numbers the descriptions carried as literals before the field
+// became a question — one function each, the way [`always`] is the
+// constant answer to `Row::when`. `step_2` (the blur pyramid's own step)
+// left with BLUR DEPTH in 2026-08-23's picker-only simplification.
 fn step_1(_: &Settings) -> u32 {
     1
-}
-fn step_2(_: &Settings) -> u32 {
-    2
 }
 fn step_5(_: &Settings) -> u32 {
     5
@@ -1769,57 +1800,20 @@ fn corner_step_word(s: &Settings) -> String {
 /// The words [`corner_step_word`] cycles through. Index 0 is the theme's
 /// own ladder; 1..=3 are its three named steps, in the master's order.
 const CORNER_STEPS: [&str; 4] = ["AS WRITTEN", "SMALL", "MEDIUM", "LARGE"];
-fn bg_blurs(s: &Settings) -> bool {
-    matches!(s.current_background.as_deref(), Some("BLUR") | Some("FROSTED GLASS"))
-}
-fn bg_frosted(s: &Settings) -> bool {
-    s.current_background.as_deref() == Some("FROSTED GLASS")
-}
-fn bg_solid_or_frosted(s: &Settings) -> bool {
-    matches!(s.current_background.as_deref(), Some("SOLID") | Some("FROSTED GLASS"))
-}
 
-// The whole-theme sections' conditions, one small function per question so
-// the rows and `editor_edits` ask the SAME one: a slider is on screen
-// exactly when the set it feeds is in the edit — the iron rule's UI half,
-// a control over a set that would not be written is a control that looks
-// like it works.
-
-/// OWN HUE on: the surfaces' HUE track exists, and the set writes degrees.
-fn surface_own(s: &Settings) -> bool {
-    s.surface_own_hue
-}
-/// A severity role stands in the list: the picker under it pins ITS author.
-fn severity_chosen(s: &Settings) -> bool {
-    s.current_severity.is_some()
-}
-/// A corner cut stands: the shape set is in the edit at all.
-fn corner_chosen(s: &Settings) -> bool {
-    s.current_corner.is_some()
-}
-/// The ring is on AND its style is known — the model's enabled branch
-/// cannot be written without a style word.
-fn ring_dressed(s: &Settings) -> bool {
-    s.ring_on && s.current_ring_style.is_some()
-}
-fn ring_dashed(s: &Settings) -> bool {
-    ring_dressed(s) && s.current_ring_style.as_deref() == Some("DASHED")
-}
-fn ring_haloed(s: &Settings) -> bool {
-    ring_dressed(s) && s.ring_halo
-}
-/// Both scrollbar words stand: the bar set is in the edit at all.
-fn bar_chosen(s: &Settings) -> bool {
-    s.current_scroll_mode.is_some() && s.current_scroll_edge.is_some()
-}
-/// The declaration reads the fade only while auto_hide is on.
-fn bar_fades(s: &Settings) -> bool {
-    bar_chosen(s) && s.bar_auto_hide
-}
-/// Track OFF is the switch alone; the groove's colour is only written on.
-fn bar_tracked(s: &Settings) -> bool {
-    bar_chosen(s) && s.bar_track
-}
+// The whole-theme sections' conditions used to live here — one small
+// function per question, so the rows and `editor_edits` asked the SAME
+// one. `bg_blurs`, `bg_frosted`, `bg_solid_or_frosted`, `surface_own`,
+// `severity_chosen`, `corner_chosen`, `ring_dressed`, `ring_dashed`,
+// `ring_haloed`, `bar_chosen`, `bar_fades` and `bar_tracked` all guarded
+// rows that stood in `EDITOR_ROWS` before 2026-08-23's picker-only
+// simplification removed every row that was not a `Ctrl::Picker` — with
+// the dropdowns and toggles that fed these conditions gone too, none of
+// them could ever answer true again, so they went with the rows they
+// guarded rather than stand here unreachable. `editor_edits` still writes
+// every token the removed rows used to (a set's write does not depend on
+// this page ever having offered a knob for it), so nothing a saved theme
+// carries changed — only what this page's controls can reach did.
 
 /// A row that exists only while `when` holds — see `Row::when`.
 const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
@@ -2373,7 +2367,6 @@ fn editor_advanced(s: &Settings) -> bool {
 /// — `Row::when` and not a greyed-out row, which is what the owner asked
 /// for in as many words ("nie wyszarzonej, tylko nieobecnej"):
 ///
-/// * BORDER WIDTH — always, because every kind draws a line.
 /// * GLOW REACH — with GLOW and NEON ([`border_lit`]).
 /// * OPACITY — with a background kind chosen ([`bg_chosen`]). The SAME
 ///   control ADVANCED wears, writing the same field, exactly as the three
@@ -2381,26 +2374,18 @@ fn editor_advanced(s: &Settings) -> bool {
 ///   REACHES, which is ZGŁOSZENIE 7 and is answered in
 ///   [`Settings::editor_edits`], not here.
 /// * CORNER SIZE — with a cut that has a size ([`corner_sized`]).
-static EDITOR_BASIC_ROWS: [Row; 13] = [
+///
+/// BORDER WIDTH stood here until 2026-08-23, unconditionally (every kind
+/// draws a line) — removed at the owner's word. `Knob::EdgeWidth`,
+/// `edge_width` and `edge_width_touched` stay: `border_width_edit` still
+/// answers `editor_edits` when `edge_width_touched` is set, which nothing
+/// in BASIC does any more, so a save leaves the token exactly as the
+/// theme already had it. Nothing else in this window sets that flag.
+static EDITOR_BASIC_ROWS: [Row; 11] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
-    row(Ctrl::Slider {
-        label: "BORDER WIDTH",
-        act: Act::EditorTrack(Knob::EdgeWidth),
-        unit: Unit::None,
-        // 0..100 over 0..1u — the master's heaviest stroke is bold =
-        // 0.7u, so 1u is past every weight the file states.
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.edge_width,
-        set: |s, v| {
-            s.edge_width = v;
-            s.edge_width_touched = true;
-        },
-        save: |s| s.apply_editor_preview(),
-    }),
     row_shown(
         Ctrl::Slider {
             label: "GLOW REACH",
@@ -2449,15 +2434,11 @@ static EDITOR_BASIC_ROWS: [Row; 13] = [
         },
         corner_sized,
     ),
-    // The door to per-element colour: pressing it swaps the whole editor
-    // for the ADVANCED COLOUR grid IN PLACE, and that grid's own back
-    // button returns here. It reuses `Act::EditorMode` — the state the
-    // deleted BASIC/ADVANCED switch used to toggle.
-    row(Ctrl::Button {
-        label: Text::Fixed("ADVANCED COLOUR"),
-        kind: BtnKind::Wide,
-        act: Act::EditorMode,
-    }),
+    // The door to per-element colour used to stand here as its own row
+    // (`Ctrl::Button { label: "ADVANCED COLOUR", ... }`, `Act::EditorMode`
+    // — the state the deleted BASIC/ADVANCED switch used to toggle). Moved
+    // 2026-08-23 into the Tone picker's own row, at the end of its
+    // notation strip — drawn in the `Ctrl::Picker` arm, not listed here.
 ];
 
 /// The editor's first section. The border is one kind and one colour, and
@@ -2486,445 +2467,35 @@ static EDITOR_BASIC_ROWS: [Row; 13] = [
 /// UNCHANGED by the other one: the switch above it and BASIC's three
 /// sliders are bands of their own, and the only thing that happened to
 /// these eighty-six rows is that their band now has a condition.
-static EDITOR_ROWS: [Row; 66] = [
-    // Back to BASIC — the ADVANCED COLOUR grid is reached from there and
-    // returns there; reuses `Act::EditorMode`, the toggle the deleted
-    // switch was.
+/// Since 2026-08-23, at the owner's word: everything here that is not a
+/// colour picker is gone. The eighty-plus dropdowns, sliders and toggles
+/// this page used to carry — border kind, background kind and its glass
+/// knobs, the surface ladder's hue/lift/chroma, corner radii, the focus
+/// ring's dash and width, severity's role picker — are removed, not
+/// hidden; a `Row::when` guard tied to one of them would only ever answer
+/// false now, which is a picker nobody can reach, not a simplification.
+/// Every picker below is therefore unconditional (`row`, never
+/// `row_shown`) even where its guard used to gate it on a choice this
+/// page no longer offers a way to make.
+static EDITOR_ROWS: [Row; 12] = [
+    // Back to BASIC — the only navigation this page keeps; a page with
+    // color pickers and no way off it is not a simplification either.
     row(Ctrl::Button {
         label: Text::Fixed("‹ BASIC"),
         kind: BtnKind::Wide,
         act: Act::EditorMode,
     }),
-    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::Borders }),
     row(Ctrl::Picker(PickerId::Edge)),
-    // BACKGROUND: the kind, then the glass pair — TINT multiplies the
-    // blurred scene (it can only darken), WASH lays over with alpha (the
-    // only knob that brightens). SOLID reads its colour from the WASH
-    // group, the one that behaves like an ordinary colour.
-    row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::Backgrounds }),
-    // The kind's own knobs appear WITH the kind: a slider for a thing the
-    // choice does not have would be a question about nothing (Row::when).
-    row_shown(
-        Ctrl::Slider {
-            label: "OPACITY",
-            act: Act::EditorTrack(Knob::BgOpacity),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bg_opacity,
-            set: |s, v| s.bg_opacity = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bg_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "BLUR DEPTH",
-            act: Act::EditorTrack(Knob::BgDepth),
-            unit: Unit::None,
-            // 0..100 mapped onto the pyramid's 1.0..3.0: the emitter mixes
-            // two rungs by the fraction, so every stop is a real depth.
-            range: (0, 100),
-            step: step_2,
-            get: |s| s.bg_depth,
-            set: |s, v| s.bg_depth = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bg_blurs,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "WASH COVERAGE",
-            act: Act::EditorTrack(Knob::BgCoverage),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bg_coverage,
-            set: |s, v| s.bg_coverage = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bg_frosted,
-    ),
-    // The two glass quads, a picker each — and each still appears only
-    // WITH the kind that has it (`Row::when`), because a colour for a
-    // quad the choice does not draw is a question about nothing.
-    row_after(Ctrl::Section { title: "TINT" }, Gap::None),
-    row_shown(Ctrl::Picker(PickerId::Tint), bg_blurs),
-    row_shown_after(Ctrl::Section { title: "WASH" }, bg_solid_or_frosted, Gap::None),
-    row_shown(Ctrl::Picker(PickerId::Wash), bg_solid_or_frosted),
-    // ------------------------------------------------------------------
-    // The whole-theme sections (2026-08-16): one section per set of
-    // theme/edit.rs, in the model's own order. Every slider's save is
-    // the preview pulse, like every editor track above — the SAVE
-    // buttons at the bottom write the same builder's answer to a file.
-    // ------------------------------------------------------------------
-    // ACCENT: the one seed the master re-derives the interface from.
-    // Three sliders because a colour is three numbers; no alpha knob,
-    // because the model writes the seed opaque by force.
-    row_after(Ctrl::Section { title: "ACCENT" }, Gap::None),
+    row(Ctrl::Picker(PickerId::Tint)),
+    row(Ctrl::Picker(PickerId::Wash)),
     row(Ctrl::Picker(PickerId::Accent)),
-    // SURFACES: the three meta-knobs over the six-level ladder — never
-    // eighteen sliders, the rungs are §5.5's. The HUE track appears
-    // with OWN HUE, because off it the set restores `@hue.accent` as a
-    // reference and a hue slider would be a question about nothing.
-    row_after(Ctrl::Section { title: "MAIN BACKGROUND" }, Gap::None),
-    // The picked colour LEADS the six-level ladder — its hue, lightness
-    // and chroma become the surface seeds, so every bed keeps its depth
-    // ([`Settings::set_surface_family_from_picker`]). The three knobs
-    // below fine-tune the very seeds it sets.
     row(Ctrl::Picker(PickerId::BgMain)),
-    row(Ctrl::Toggle {
-        label: "OWN HUE",
-        get: |s| s.surface_own_hue,
-        act: Act::EditorFlip(Flip::SurfaceOwnHue),
-    }),
-    row_shown(
-        Ctrl::Slider {
-            label: "HUE",
-            act: Act::EditorTrack(Knob::SurfHue),
-            unit: Unit::None,
-            range: (0, 359),
-            step: step_5,
-            get: |s| s.surface_hue,
-            set: |s, v| s.surface_hue = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        surface_own,
-    ),
-    row(Ctrl::Slider {
-        // 0..100 over the bake's -0.09..0.09, 50 the ladder as derived.
-        label: "LIFT",
-        act: Act::EditorTrack(Knob::SurfLift),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.surface_lift,
-        set: |s, v| s.surface_lift = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        // 0..100 over the bake's 0..4, 25 the derived scale of 1.
-        label: "CHROMA",
-        act: Act::EditorTrack(Knob::SurfChroma),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.surface_chroma,
-        set: |s, v| s.surface_chroma = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    // TEXT: the FONT picker leads the seven-role ladder — one colour for
-    // all neutral text, worn by the menu's hint and the tooltip's too. The
-    // two knobs below fine-tune the lift and chroma it sets.
-    row_after(Ctrl::Section { title: "TEXT" }, Gap::None),
     row(Ctrl::Picker(PickerId::Text)),
-    row(Ctrl::Slider {
-        label: "LIFT",
-        act: Act::EditorTrack(Knob::TextLift),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.text_lift,
-        set: |s, v| s.text_lift = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    row(Ctrl::Slider {
-        label: "CHROMA",
-        act: Act::EditorTrack(Knob::TextChroma),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.text_chroma,
-        set: |s, v| s.text_chroma = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    // SEVERITY: pick a role, pin its author colour. The sliders write
-    // the CHOSEN role and only a touched role joins the edit — six
-    // untouched roles keep the theme's own words.
-    row_after(Ctrl::Section { title: "SEVERITY" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::Severities }),
-    row_shown(Ctrl::Picker(PickerId::Severity), severity_chosen),
-    // SHAPE: the corner language, its three radii, the tessellation and
-    // the hairline. The sliders appear with the cut, because the model
-    // writes the six as ONE set and a radius without its cut is half a
-    // decision — the theme file's own words.
-    row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::Corners }),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over the model's 4u wall, here and for MD and LG.
-            label: "CORNER SM",
-            act: Act::EditorTrack(Knob::CornerSm),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.corner_sm,
-            set: |s, v| s.corner_sm = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        corner_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "CORNER MD",
-            act: Act::EditorTrack(Knob::CornerMd),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.corner_md,
-            set: |s, v| s.corner_md = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        corner_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "CORNER LG",
-            act: Act::EditorTrack(Knob::CornerLg),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.corner_lg,
-            set: |s, v| s.corner_lg = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        corner_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            // The declared range itself (3..16): a fraction of a
-            // tessellation quad does not exist, so the track is bare.
-            label: "SEGMENTS",
-            act: Act::EditorTrack(Knob::CornerSeg),
-            unit: Unit::None,
-            range: (3, 16),
-            step: step_1,
-            get: |s| s.corner_segments,
-            set: |s, v| s.corner_segments = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        corner_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over the kerf's 1u wall.
-            label: "HAIRLINE",
-            act: Act::EditorTrack(Knob::Hairline),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.stroke_hair,
-            set: |s, v| s.stroke_hair = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        corner_chosen,
-    ),
-    // FOCUS RING: the switch first — OFF is one flag and the dress
-    // stands, so everything under it folds away. DASH and GAP appear
-    // with DASHED (SOLID leaves the rhythm alone), the halo's alpha
-    // with the halo. The dim is the section's one always-on track: it
-    // is read on the window, not on the ring, and works with it off.
-    row_after(Ctrl::Section { title: "FOCUS RING" }, Gap::None),
-    row(Ctrl::Toggle {
-        label: "FOCUS RING",
-        get: |s| s.ring_on,
-        act: Act::EditorFlip(Flip::Ring),
-    }),
-    row_shown(Ctrl::Drop { list: ListId::RingStyles }, ring_dressed),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over the declared 2u, WIDTH and OFFSET alike.
-            label: "WIDTH",
-            act: Act::EditorTrack(Knob::RingW),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_width,
-            set: |s, v| s.ring_width = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dressed,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "OFFSET",
-            act: Act::EditorTrack(Knob::RingOffset),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_offset,
-            set: |s, v| s.ring_offset = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dressed,
-    ),
-    row_shown(Ctrl::Picker(PickerId::Ring), ring_dressed),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over 4u of rhythm, DASH and GAP alike — the model
-            // only floors these at zero.
-            label: "DASH",
-            act: Act::EditorTrack(Knob::RingDash),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_dash,
-            set: |s, v| s.ring_dash = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dashed,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "GAP",
-            act: Act::EditorTrack(Knob::RingGap),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_gap,
-            set: |s, v| s.ring_gap = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_dashed,
-    ),
-    row_shown(
-        Ctrl::Toggle {
-            label: "HALO",
-            get: |s| s.ring_halo,
-            act: Act::EditorFlip(Flip::Halo),
-        },
-        ring_dressed,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "HALO ALPHA",
-            act: Act::EditorTrack(Knob::HaloAlpha),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.ring_halo_alpha,
-            set: |s, v| s.ring_halo_alpha = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        ring_haloed,
-    ),
-    row(Ctrl::Slider {
-        // The declared floor is the track's own start: dimming an
-        // unfocused window must not hide it (30 = the model's 0.3).
-        label: "UNFOCUSED DIM",
-        act: Act::EditorTrack(Knob::UnfocusedDim),
-        unit: Unit::None,
-        range: (30, 100),
-        step: step_1,
-        get: |s| s.unfocused_dim,
-        set: |s, v| s.unfocused_dim = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    // MENU: only its OWN tokens now — the bed (FILL) and the border WIDTH.
-    // Its border colour is the one BORDER picker's and its hint the one
-    // TEXT picker's (role, not object). The fill's alpha is the SEED's and
-    // stays with it: there is no opacity knob here to own the channel.
-    row_after(Ctrl::Section { title: "MENU" }, Gap::None),
-    row_after(Ctrl::Section { title: "FILL" }, Gap::None),
+    row(Ctrl::Picker(PickerId::Severity)),
+    row(Ctrl::Picker(PickerId::Ring)),
     row(Ctrl::Picker(PickerId::MenuFill)),
-    row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
-    row(Ctrl::Slider {
-        // 0..100 over 1u; zero is a legal answer — no ring at all,
-        // menu.rs's own floor. The border COLOUR is the BORDER picker's.
-        label: "WIDTH",
-        act: Act::EditorTrack(Knob::MenuEdgeW),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.menu_edge_w,
-        set: |s, v| s.menu_edge_w = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    // TOOLTIP: the menu's sibling float — its OWN bed (FILL) and edge
-    // WIDTH; its edge colour is the BORDER picker's and its text the TEXT
-    // picker's, the same role sharing the menu makes.
-    row_after(Ctrl::Section { title: "TOOLTIP" }, Gap::None),
-    row_after(Ctrl::Section { title: "FILL" }, Gap::None),
     row(Ctrl::Picker(PickerId::TipFill)),
-    row_after(Ctrl::Section { title: "EDGE" }, Gap::None),
-    row(Ctrl::Slider {
-        label: "WIDTH",
-        act: Act::EditorTrack(Knob::TipEdgeW),
-        unit: Unit::None,
-        range: (0, 100),
-        step: step_1,
-        get: |s| s.tip_edge_w,
-        set: |s, v| s.tip_edge_w = v,
-        save: |s| s.apply_editor_preview(),
-    }),
-    // SCROLLBAR: the two words, the two widths, and the two switches
-    // with the rows each one alone makes real — the fade is read only
-    // while the bar auto-hides, the groove's colour only while the
-    // groove is drawn.
-    row_after(Ctrl::Section { title: "SCROLLBAR" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::ScrollModes }),
-    row(Ctrl::Drop { list: ListId::ScrollEdges }),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over the model's 0.5u..4u, WIDTH and HOVER alike.
-            label: "WIDTH",
-            act: Act::EditorTrack(Knob::BarW),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bar_w,
-            set: |s, v| s.bar_w = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            label: "HOVER WIDTH",
-            act: Act::EditorTrack(Knob::BarWHover),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bar_w_hover,
-            set: |s, v| s.bar_w_hover = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_chosen,
-    ),
-    row_shown(
-        Ctrl::Toggle {
-            label: "AUTO HIDE",
-            get: |s| s.bar_auto_hide,
-            act: Act::EditorFlip(Flip::BarAutoHide),
-        },
-        bar_chosen,
-    ),
-    row_shown(
-        Ctrl::Slider {
-            // 0..100 over the declared 0..2000ms.
-            label: "FADE",
-            act: Act::EditorTrack(Knob::BarFade),
-            unit: Unit::None,
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.bar_fade,
-            set: |s, v| s.bar_fade = v,
-            save: |s| s.apply_editor_preview(),
-        },
-        bar_fades,
-    ),
-    row_shown(
-        Ctrl::Toggle {
-            label: "TRACK",
-            get: |s| s.bar_track,
-            act: Act::EditorFlip(Flip::BarTrack),
-        },
-        bar_chosen,
-    ),
-    row_shown_after(Ctrl::Section { title: "TRACK" }, bar_tracked, Gap::None),
-    row_shown(Ctrl::Picker(PickerId::BarTrack), bar_tracked),
+    row(Ctrl::Picker(PickerId::BarTrack)),
 ];
 
 /// The editor's three verbs. They were three centred rows at the far
@@ -8233,17 +7804,54 @@ impl Settings {
     /// go through here, so a part that is painted is still a part that
     /// can be pressed and reached, and no third list can fall behind.
     fn picker_targets(&self, id: PickerId, rc: RowCtx) -> Vec<(Rect, Act)> {
-        nacelle::object::color_picker::parts(&self.picker_layout(rc))
+        let mut out: Vec<(Rect, Act)> = nacelle::object::color_picker::parts(&self.picker_layout(id, rc))
             .into_iter()
             .map(|(part, r)| (r, picker_act(id, part)))
-            .collect()
+            .collect();
+        if let Some(r) = self.advanced_colour_button(id, rc) {
+            out.push((r, Act::EditorMode));
+        }
+        out
     }
 
     /// Where the picker's parts stand in a row's band — ONE statement of
     /// it, so the drawing, the hit map and the Tab chain cannot disagree
     /// about where the field is.
-    fn picker_layout(&self, rc: RowCtx) -> nacelle::object::color_picker::Layout {
-        nacelle::object::color_picker::layout(rc.band, self.picker_custom.len())
+    ///
+    /// BASIC's Tone row is the one exception: its band is narrowed by
+    /// [`ADVANCED_BUTTON_FRAC`] so the picker's own notation strip stops
+    /// short of the row's right edge, leaving room for the ADVANCED
+    /// COLOUR button ([`Settings::advanced_colour_button`]) — moved here
+    /// 2026-08-23 from a standalone row at the foot of the page.
+    fn picker_layout(&self, id: PickerId, rc: RowCtx) -> nacelle::object::color_picker::Layout {
+        let band = if id == PickerId::Tone && !editor_advanced(self) {
+            let w = (rc.band.w * (1.0 - Self::ADVANCED_BUTTON_FRAC) - rc.m.gap).max(0.0);
+            Rect::new(rc.band.x, rc.band.y, w, rc.band.h)
+        } else {
+            rc.band
+        };
+        nacelle::object::color_picker::layout(band, self.picker_custom.len())
+    }
+
+    /// The fraction of the Tone row's band the ADVANCED COLOUR button
+    /// takes, once it is on that row at all — the button and the picker's
+    /// narrowed strip both read this, so neither can leave the other a
+    /// row too wide or too narrow for the space actually reserved.
+    const ADVANCED_BUTTON_FRAC: f32 = 0.28;
+
+    /// The ADVANCED COLOUR button's own rect: the end of the Tone row,
+    /// the same height as the notation strip beside it (`picker_layout`'s
+    /// narrowed [`Layout::text`]) — `None` everywhere else, including
+    /// Tone's OWN row once ADVANCED is open, where the picker owns the
+    /// whole band again and this button does not exist to press.
+    fn advanced_colour_button(&self, id: PickerId, rc: RowCtx) -> Option<Rect> {
+        if id != PickerId::Tone || editor_advanced(self) {
+            return None;
+        }
+        let l = self.picker_layout(id, rc);
+        let x = l.text.x + l.text.w + rc.m.gap;
+        let w = (rc.band.x + rc.band.w - x).max(0.0);
+        Some(Rect::new(x, l.text.y, w, l.text.h))
     }
 
     /// A row the frame did not draw, taking its place in the chain from
@@ -8532,7 +8140,7 @@ impl Settings {
             // `picker_layout` the targets do, so a part that is drawn is a
             // part that can be pressed and the two cannot come apart.
             Ctrl::Picker(id) => {
-                let l = self.picker_layout(rc);
+                let l = self.picker_layout(*id, rc);
                 nacelle::object::color_picker::draw_focusable(
                     ctx,
                     &l,
@@ -8540,6 +8148,10 @@ impl Settings {
                     &self.picker_custom,
                     |part| focus_id(picker_act(*id, part)),
                 );
+                if let Some(r) = self.advanced_colour_button(*id, rc) {
+                    let text = self.text_of(Text::Fixed("ADVANCED COLOUR"));
+                    self.button(ctx, r, &text, Act::EditorMode);
+                }
                 for (r, act) in self.picker_targets(*id, rc) {
                     self.push_hit(r, act);
                 }
@@ -11353,14 +10965,13 @@ mod tests {
         assert!(is_track(Act::RowsTrack));
         assert!(is_track(Act::PadTrack));
         assert!(is_track(Act::SizeTrack(Sect::Term)));
-        // The whole-theme sections' knobs are sliders like any other —
-        // one witness per section shape, arrows not Enter.
-        assert!(is_track(Act::EditorTrack(Knob::SurfHue)));
-        assert!(is_track(Act::EditorTrack(Knob::CornerSeg)));
-        assert!(is_track(Act::EditorTrack(Knob::UnfocusedDim)));
-        assert!(is_track(Act::EditorTrack(Knob::MenuEdgeW)));
-        assert!(is_track(Act::EditorTrack(Knob::TipEdgeW)));
-        assert!(is_track(Act::EditorTrack(Knob::BarW)));
+        // The whole-theme sections' knobs used to be sliders like any
+        // other here — one witness per section shape, arrows not Enter
+        // (`SurfHue`, `CornerSeg`, `UnfocusedDim`, `MenuEdgeW`,
+        // `TipEdgeW`, `BarW`). Every row that drove one of them left
+        // `EDITOR_ROWS` in 2026-08-23's picker-only simplification, so
+        // `is_track` correctly answers false for all six now — there is
+        // no live witness left to assert true on, per [`Knob`]'s note.
         // A PICKER IS NOT A TRACK, and its two dragged areas least of
         // all: arrows must not move a field, whose two axes have no
         // "next" between them.
@@ -12390,60 +12001,13 @@ mod tests {
         }
     }
 
-    /// The owner's own gesture, end to end: open the editor page, unfold
-    /// the BORDER list, click NEON — and the click must NOT report a
-    /// configuration change. `true` from `perform` tells main to re-resolve
-    /// the configuration, which reloads the theme, which builds a fresh
-    /// engine with an EMPTY preview: a border pick would erase its own
-    /// preview in the same breath. That was a real bug, and its shape was
-    /// deceptive — NEON looked fine because the post-reload state (a theme
-    /// with its glow on) matched what NEON asks for, while LINE looked dead
-    /// until the first slider pulse re-sent the set.
-    #[test]
-    fn choosing_a_border_kind_does_not_reload_the_theme() {
-        let _g = crate::widgets::theme_test_lock();
-        viewport_home();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = furnished();
-        s.view = View::ThemeEditor;
-        // ADVANCED, said out loud. Since 2026-08-17 BOTH pages carry a
-        // BORDER list, so the page this gesture is made on is a choice
-        // and not a leftover — BASIC's leg is
-        // [`a_kind_picked_on_basic_does_not_reload_the_theme`].
-        s.editor_basic = false;
-        let mut dl = nacelle::draw::DrawList::recording();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-        let anchor = s.hits.iter().find(|&&(_, a)| a == Act::ListBtn(ListId::Borders))
-            .map(|&(r, _)| r).expect("the editor page drew no BORDER anchor");
-        let (w, h) = (1080.0 * 16.0 / 9.0, 1080.0);
-        s.click(anchor.x + anchor.w / 2.0, anchor.y + anchor.h / 2.0, w, h, None);
-        assert!(matches!(s.dropdown, Some(Dropdown::List(ListId::Borders))),
-            "the anchor did not open the list");
-        // A second frame: the list is drawn and its rows registered.
-        let mut dl2 = nacelle::draw::DrawList::recording();
-        let mut ctx2 = probe(&mut dl2, &mut fonts, 1080.0, 1.0);
-        s.dropdown_since = None; // fully unfolded, no animation
-        s.draw(&mut ctx2);
-        // Row 2 is NEON, the tube (row 1 is GLOW, the halo it was called
-        // until 2026-08-18). Picked by INDEX and checked against the
-        // list's own member, so a re-ordering fails loudly here instead
-        // of quietly testing a different kind.
-        let want = s.border_kinds[2].clone();
-        let neon = s.hits.iter().find(|&&(_, a)| a == Act::Pick(ListId::Borders, 2))
-            .map(|&(r, _)| r).expect("the open BORDER list registered no NEON row");
-        assert!(
-            !s.click(neon.x + neon.w / 2.0, neon.y + neon.h / 2.0, w, h, None),
-            "a border pick reported a configuration change — main will \
-             reload the theme and erase the preview the pick just set"
-        );
-        assert_eq!(
-            s.current_border.as_deref(),
-            Some(want.as_str()),
-            "the pick did not set the border kind"
-        );
-        assert_eq!(want, "NEON", "the list's third border is no longer NEON");
-    }
+    // `choosing_a_border_kind_does_not_reload_the_theme` — ADVANCED's leg
+    // of this gesture — stood here until 2026-08-23: EDITOR_ROWS carries
+    // no BORDER list (no dropdown at all) since that page became
+    // picker-only, so the gesture it drove ("open the editor page, unfold
+    // the BORDER list, click NEON") can no longer happen on ADVANCED.
+    // BASIC still carries the list and still needs the guarantee, and
+    // still has it: [`a_kind_picked_on_basic_does_not_reload_the_theme`].
 
     /// The three lists BASIC grew on 2026-08-17: each anchor is drawn,
     /// and each one already stands on the member THE THEME is wearing.
@@ -12765,10 +12329,9 @@ mod tests {
                 "on {kind} the GLOW REACH row should {} the page",
                 if lit { "stand on" } else { "be absent from" }
             );
-            assert!(
-                basic_shows(&s, Act::EditorTrack(Knob::EdgeWidth)),
-                "on {kind} the BORDER WIDTH row went missing — every kind draws a line"
-            );
+            // BORDER WIDTH stood here, unconditionally, until 2026-08-23 —
+            // removed at the owner's word, so there is no row left to
+            // assert present on any kind.
         }
     }
 
@@ -12848,6 +12411,16 @@ mod tests {
         let mut s = editor_open();
         s.editor_basic = true;
         s.current_border = Some("NEON".to_string());
+        // Forced undressed (2026-08-23: the master itself now ships a
+        // NEON dress, `glow.panel_edge.{enabled,radius,alpha,falloff}`
+        // no longer 0/0/0/gauss, so `editor_open` would seed
+        // `edge_halo_dressed = true` off the bare master and the floor
+        // this test contests would never be written at all). This test
+        // is about the editor's OWN floor-injection mechanism for a
+        // theme that has not dressed its halo, which still exists and
+        // still needs a witness — it no longer falls out of the master's
+        // bare state for free.
+        s.edge_halo_dressed = false;
         // Untouched: neither key is in the set. The master writes
         // `border.edge.width = @stroke.hair`, a REFERENCE, and a page
         // that pinned it to a literal on every visit would cost every
@@ -13273,7 +12846,22 @@ mod tests {
         // of ADVANCED's per-element controls.
         assert!(s.editor_basic, "the editor did not open on BASIC");
         let basic = described_acts(&s, page);
-        assert!(basic.contains(&Act::EditorMode), "BASIC has no ADVANCED COLOUR button");
+        // ADVANCED COLOUR moved onto the Tone row itself in 2026-08-23's
+        // picker-only simplification (at the end of its notation strip,
+        // [`Settings::advanced_colour_button`]) — a STATIC row scan no
+        // longer finds it, because it is not a row of its own any more.
+        // A real draw pass and the hits it registers are the only way to
+        // ask "is this button on screen", which is exactly what pressing
+        // it means, two lines down.
+        viewport_home();
+        let mut fonts = nacelle::font::FontSystem::new();
+        let mut dl = nacelle::draw::DrawList::recording();
+        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+        s.draw(&mut ctx);
+        assert!(
+            s.hits.iter().any(|&(_, a)| a == Act::EditorMode),
+            "BASIC has no ADVANCED COLOUR button"
+        );
         // The picker and every part of it: the one control the three tone
         // sliders became on 2026-08-18.
         for part in [
@@ -14127,6 +13715,11 @@ mod tests {
         // The two sets that carry a dress question, both switched on:
         // NEON for the panel edge, and a haloed focus ring.
         s.current_border = Some("NEON".to_string());
+        // Forced undressed — see the same note in
+        // `the_borders_thickness_and_its_lights_reach_are_two_answers_
+        // and_both_wait_to_be_asked` (2026-08-23: the bare master no
+        // longer seeds `edge_halo_dressed = false` on its own).
+        s.edge_halo_dressed = false;
         s.ring_on = true;
         s.current_ring_style = Some("SOLID".to_string());
         s.ring_halo = true;
@@ -14287,23 +13880,29 @@ mod tests {
         assert_eq!(Settings::editor_source_of(Some("skasowany"), &known), None);
     }
 
-    /// THE OWNER'S SAVED THEME OPENS ON GLOW.
+    /// THE OWNER'S SAVED THEME NOW OPENS ON NEON.
     ///
     /// `~/.local/share/nacelle-desktop/themes/` carries a theme whose
     /// whole `[glow]` section is `panel_edge.enabled = true`. It was
     /// saved when the lit kind was called NEON and there was one of them;
-    /// on 2026-08-18 that kind became GLOW and NEON became a lit tube.
-    /// A file that says nothing about a falloff inherits the master's
-    /// `gauss` and draws exactly what it always drew, so the list has to
-    /// open on GLOW — and the edit set it then builds has to keep saying
-    /// `gauss`, because the first slider drag SAVES whatever the set
-    /// says.
+    /// on 2026-08-18 that kind became GLOW and NEON became a lit tube,
+    /// and a file that said nothing about a falloff inherited the
+    /// master's `gauss` — so until 2026-08-23 the list opened on GLOW.
+    /// The master's own falloff moved to `tube` that day (the
+    /// neon-by-default change), so the SAME file now inherits NEON
+    /// instead: the picture the owner's file draws changed, on purpose,
+    /// and this proves the list follows it rather than a word cached
+    /// from before. The edit set the list then builds has to keep saying
+    /// `tube`, because the first slider drag SAVES whatever the set
+    /// says, and `tube` is what the file now draws whether or not a
+    /// drag ever writes the word down.
     ///
     /// Both halves are here on purpose. Opening on the right row and then
-    /// writing `tube` on the first drag is the same bug arriving one
-    /// gesture later, and it is the one that reaches the FILE.
+    /// writing a DIFFERENT word on the first drag would be the bug this
+    /// file exists to catch, arriving one gesture later than the row
+    /// itself does.
     #[test]
-    fn a_theme_saved_before_the_tube_existed_opens_on_glow() {
+    fn a_theme_saved_before_the_tube_existed_opens_on_neon() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         nacelle::theme::clear_preview();
@@ -14317,8 +13916,8 @@ mod tests {
         nacelle::theme::clear_preview();
         assert_eq!(
             s.current_border.as_deref(),
-            Some("GLOW"),
-            "a theme saved under the old NEON opened on the tube"
+            Some("NEON"),
+            "a theme silent about its falloff did not follow the master's own to NEON"
         );
         let edits = s.editor_edits();
         let falloff = edits
@@ -14326,8 +13925,8 @@ mod tests {
             .find(|e| e.token == "glow.panel_edge.falloff")
             .expect("the lit kind named no falloff at all");
         assert_eq!(
-            falloff.value, "gauss",
-            "the first drag would have written a tube into a theme that has none"
+            falloff.value, "tube",
+            "the first drag would have written a shape the file does not currently draw"
         );
     }
 
