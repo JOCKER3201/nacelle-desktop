@@ -440,13 +440,6 @@ enum Act {
     /// can disagree, and no half able to notice.
     PickerField(PickerId),
     PickerValue(PickerId),
-    /// The HDR luminance bar (`nacelle::object::color_picker::Part::Luminance`).
-    /// Only ever reachable when [`active_gamut_space`] handed the picker a
-    /// `GamutSpace` with an HDR ceiling — otherwise `Layout::luminance` is
-    /// `None` and no rect for this act is ever registered, the same
-    /// "absent, not merely hidden" contract `row_shown` states for a page
-    /// row.
-    PickerLuminance(PickerId),
     PickerFormat(PickerId),
     /// The value written out. It has an act so it is a TARGET — a place
     /// the Tab chain lands and a rect the pointer can find — before it
@@ -609,7 +602,6 @@ fn focus_id(act: Act) -> FocusId {
         // which is a declaration order like a list's rows'.
         PickerField(p) => FocusId::of("settings.editor.picker.field").item(p.idx()),
         PickerValue(p) => FocusId::of("settings.editor.picker.value").item(p.idx()),
-        PickerLuminance(p) => FocusId::of("settings.editor.picker.luminance").item(p.idx()),
         PickerFormat(p) => FocusId::of("settings.editor.picker.format").item(p.idx()),
         PickerText(p) => FocusId::of("settings.editor.picker.text").item(p.idx()),
         PickerBase(p, i) => {
@@ -1503,7 +1495,6 @@ fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
     match part {
         Part::Field => Act::PickerField(id),
         Part::Value => Act::PickerValue(id),
-        Part::Luminance => Act::PickerLuminance(id),
         Part::Format => Act::PickerFormat(id),
         Part::Text => Act::PickerText(id),
         Part::Base(i) => Act::PickerBase(id, i),
@@ -1512,31 +1503,22 @@ fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
     }
 }
 
-/// `picker.hdr_nits` — the HDR luminance bar's own ceiling, read the same
-/// way every other picker length is (`nacelle::object::color_picker`'s
-/// own `Metrics::read`, mirrored here because the ceiling is a NUMBER the
-/// caller hands into `GamutSpace`, not something the control reads off
-/// the theme for itself — [`GamutSpace`]'s own doc explains why).
-///
-/// [`GamutSpace`]: nacelle::object::color_picker::GamutSpace
-fn picker_hdr_nits_token() -> f32 {
-    static HDR_NITS: OnceLock<TokenId> = OnceLock::new();
-    theme::resolved().px(tok(&HDR_NITS, "picker.hdr_nits"))
-}
-
 /// The active gamut the COLOR page's own state names, if any — the one
 /// thing every one of the twelve pickers on this page reads to decide
-/// whether to draw a boundary curve of its own and, in HDR, a luminance
-/// bar. `None` when this session has no colour manager at all
-/// (`color_enabled == false`: this program cannot ask the compositor what
-/// it is showing) and for `"auto"`, which names no primaries
-/// (`config::model::COLOR_SPACE_TABLE`'s own `SpaceRange::Either` row).
+/// whether to draw a boundary curve of its own. `None` when this session
+/// has no colour manager at all (`color_enabled == false`: this program
+/// cannot ask the compositor what it is showing) and for `"auto"`, which
+/// names no primaries (`config::model::COLOR_SPACE_TABLE`'s own
+/// `SpaceRange::Either` row).
 ///
 /// EVERY PICKER ON THE PAGE READS THE SAME ANSWER. Every themed colour
 /// the settings window edits is rendered by the compositor into whatever
-/// space `color_space`/`color_hdr` currently name, so a boundary curve or
-/// a luminance bar belongs on all twelve, uniformly, and not on whichever
-/// one a change happened to touch first.
+/// space `color_space` currently names, so a boundary curve belongs on
+/// all twelve, uniformly, and not on whichever one a change happened to
+/// touch first. `color_hdr` plays no part here any more (2026-08-23): the
+/// picker's own HDR-editing feature is gone, though the switch itself
+/// stays in COLOR's own section — the compositor still needs to be told
+/// which range to request, independent of what this control can edit.
 fn active_gamut_space(s: &Settings) -> Option<nacelle::object::color_picker::GamutSpace> {
     use nacelle::theme::color::Primaries;
     if !s.color_enabled {
@@ -1551,8 +1533,7 @@ fn active_gamut_space(s: &Settings) -> Option<nacelle::object::color_picker::Gam
         // named, so there is no gamut to draw a boundary against.
         _ => return None,
     };
-    let hdr_ceiling_nits = s.color_hdr.then(picker_hdr_nits_token);
-    Some(nacelle::object::color_picker::GamutSpace { primaries, hdr_ceiling_nits })
+    Some(nacelle::object::color_picker::GamutSpace { primaries })
 }
 
 /// One control of a page, as a description. Everything a row needs to
@@ -4521,17 +4502,6 @@ impl Settings {
                 self.pickers[id.idx()].pick_value(fy);
                 id
             }
-            // The luminance bar's own ceiling, read the SAME way the
-            // layout that reserved this rect in the first place did
-            // (`active_gamut_space`) — a re-bake between the two would
-            // otherwise move the ceiling out from under a drag already
-            // under way.
-            Act::PickerLuminance(id) => {
-                let ceiling =
-                    active_gamut_space(self).and_then(|g| g.hdr_ceiling_nits).unwrap_or_else(picker_hdr_nits_token);
-                self.pickers[id.idx()].pick_luminance(fy, ceiling);
-                id
-            }
             _ => return,
         };
         self.commit_picker(id);
@@ -5877,7 +5847,7 @@ impl Settings {
         // same pulse as the tracks below: a colour dragged across the
         // field re-bakes the desktop on the theme's pulse, not on every
         // frame.
-        if let Act::PickerField(_) | Act::PickerValue(_) | Act::PickerLuminance(_) = act {
+        if let Act::PickerField(_) | Act::PickerValue(_) = act {
             self.set_picker_from(act, x, y);
             if self.preview_pulse_due() {
                 self.apply_editor_preview();
@@ -6510,7 +6480,7 @@ impl Settings {
             // same way, so `set_picker_from` has one road in for all
             // three. [`Settings::drag`] is where the second coordinate is
             // read.
-            Act::PickerField(_) | Act::PickerValue(_) | Act::PickerLuminance(_) => {
+            Act::PickerField(_) | Act::PickerValue(_) => {
                 self.dragging = Some(act);
                 self.set_picker_from(act, x, y);
                 self.apply_editor_preview();
@@ -6873,7 +6843,7 @@ impl Settings {
                 // whatever happens to be in the middle of it, which is a
                 // colour nobody chose. The swatches are how this control
                 // is used from the keyboard today.
-                if let Act::PickerField(_) | Act::PickerValue(_) | Act::PickerLuminance(_) = act {
+                if let Act::PickerField(_) | Act::PickerValue(_) = act {
                     return KeyOut::Consumed;
                 }
                 // The CENTRE of whatever the chain is standing on, both
@@ -7895,7 +7865,7 @@ impl Settings {
         } else {
             rc.band
         };
-        nacelle::object::color_picker::layout(band, self.picker_custom.len(), active_gamut_space(self))
+        nacelle::object::color_picker::layout(band, self.picker_custom.len())
     }
 
     /// The fraction of the Tone row's band the ADVANCED COLOUR button
@@ -8068,11 +8038,9 @@ impl Settings {
             // with the count that decides its last row: the control is a
             // block whose height depends on how many rows of swatches its
             // grids come to, and only the object knows that.
-            Ctrl::Picker(_) => nacelle::object::color_picker::height(
-                content.w,
-                self.picker_custom.len(),
-                active_gamut_space(self),
-            ),
+            Ctrl::Picker(_) => {
+                nacelle::object::color_picker::height(content.w, self.picker_custom.len())
+            }
         }
     }
 
@@ -12751,8 +12719,7 @@ mod tests {
     /// [`active_gamut_space`]'s own mapping, checked directly against the
     /// name table `config::model::COLOR_SPACE_TABLE` states — the one
     /// function every one of the twelve pickers on the ADVANCED page
-    /// reads to decide whether it draws a boundary curve and, in HDR, a
-    /// luminance bar of its own.
+    /// reads to decide whether it draws a boundary curve of its own.
     #[test]
     fn active_gamut_space_reads_the_pages_own_state_and_nothing_else() {
         let _g = crate::widgets::theme_test_lock();
@@ -12769,8 +12736,7 @@ mod tests {
         let s = color_on("auto");
         assert!(active_gamut_space(&s).is_none(), "\"auto\" named a space");
 
-        // Every SDR name in the table, mapped to its own primaries, with
-        // no HDR ceiling.
+        // Every SDR name in the table, mapped to its own primaries.
         for (name, want) in [
             ("srgb", Primaries::SRGB),
             ("display p3", Primaries::DISPLAY_P3),
@@ -12779,104 +12745,15 @@ mod tests {
             let s = color_on(name);
             let space = active_gamut_space(&s).unwrap_or_else(|| panic!("{name} named no space"));
             assert_eq!(space.primaries, want, "{name} named the wrong primaries");
-            assert_eq!(space.hdr_ceiling_nits, None, "{name} is SDR and named an HDR ceiling");
         }
 
         // The three HDR names share BT.2020's own primaries (one gamut,
         // three transfer functions — `COLOR_SPACE_TABLE`'s own comment).
-        // Every one of them is `SpaceRange::Hdr`, so `seed_color` (which
-        // `color_on` calls) already turns the switch on for them — the
-        // pair is read straight off the page's own state and not turned
-        // by hand here.
         for name in ["bt2020 pq", "bt2020 hlg", "scrgb linear"] {
             let s = color_on(name);
-            assert!(s.color_hdr, "{name} is an HDR-range name and did not seed the switch on");
             let space = active_gamut_space(&s).unwrap_or_else(|| panic!("{name} named no space"));
             assert_eq!(space.primaries, Primaries::BT2020, "{name} named the wrong primaries");
-            assert_eq!(
-                space.hdr_ceiling_nits,
-                Some(picker_hdr_nits_token()),
-                "{name} with HDR on did not name the theme's own ceiling"
-            );
         }
-
-        // The switch is read as it stands, not inferred from the space's
-        // own natural range: an SDR name with the switch forced on all
-        // the same names an HDR ceiling, because that pair is exactly
-        // what `Settings::flip_hdr` can leave standing for a moment
-        // between turning the switch and settling on a still-offered
-        // space.
-        let mut s = color_on("srgb");
-        s.color_hdr = true;
-        let space = active_gamut_space(&s).expect("srgb named no space");
-        assert_eq!(
-            space.hdr_ceiling_nits,
-            Some(picker_hdr_nits_token()),
-            "the switch, forced on, was not read as on"
-        );
-    }
-
-    /// End to end, the way a hand actually reaches this control: an HDR
-    /// space reserves a luminance bar THE PAGE ACTUALLY DRAWS AND
-    /// REGISTERS (`Settings::draw`, not a layout computed by hand), a
-    /// drag on it moves that picker's own `nits` and no other picker's —
-    /// the same isolation `a_press_on_one_picker_moves_one_colour` checks
-    /// for the grids, asked of the bar `active_gamut_space` adds.
-    #[test]
-    fn an_hdr_luminance_drag_reaches_through_the_real_page_and_touches_one_picker() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = editor_open();
-        s.color_space = "display p3".to_string();
-        s.color_hdr = true;
-        // BASIC is one picker (Tone); the per-element grid is where the
-        // other eleven stand. Edge is the FIRST of them (`row(Ctrl::Picker
-        // (PickerId::Edge))` heads that part of the description), so it
-        // stands without scrolling — `push_hit` only keeps the VISIBLE
-        // part of a row, and this test is about reachability, not about
-        // also driving the page's own scroll to reach a row further down.
-        s.perform(Act::EditorMode, 0.0, 0.0);
-        assert!(editor_advanced(&s), "the per-element grid did not open");
-
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-
-        let r = s
-            .rect_of_act(Act::PickerLuminance(PickerId::Edge))
-            .expect("an HDR space did not reserve a reachable luminance bar");
-        assert!(r.w > 0.0 && r.h > 0.0, "the luminance bar has no size");
-
-        let ceiling = active_gamut_space(&s)
-            .and_then(|g| g.hdr_ceiling_nits)
-            .expect("the space just drawn from is not naming an HDR ceiling");
-        let before: Vec<f32> =
-            PickerId::ALL.iter().map(|id| s.pickers[id.idx()].luminance_at(ceiling)).collect();
-
-        // A press at the bar's own top: fy = 0, so the picker's nits land
-        // exactly on the ceiling and `luminance_at` reads 0.0 — a fixed
-        // destination regardless of where the picker happened to start.
-        s.perform(Act::PickerLuminance(PickerId::Edge), r.cx(), r.y);
-
-        let after: Vec<f32> =
-            PickerId::ALL.iter().map(|id| s.pickers[id.idx()].luminance_at(ceiling)).collect();
-        for (i, id) in PickerId::ALL.iter().enumerate() {
-            if *id == PickerId::Edge {
-                assert!(
-                    after[i].abs() < 1e-4,
-                    "the pressed bar did not land on its own ceiling: {}",
-                    after[i]
-                );
-            } else {
-                assert!(
-                    (after[i] - before[i]).abs() < 1e-6,
-                    "pressing Edge's bar moved {id:?} as well: {} -> {}",
-                    before[i],
-                    after[i]
-                );
-            }
-        }
-        nacelle::theme::clear_preview();
     }
 
     /// The SEVERITY picker writes THE ROLE THAT IS STANDING, and marks
@@ -19497,11 +19374,7 @@ mod tests {
             // and the two are checked against each other by the sweep
             // that calls both.
             Ctrl::Picker(id) => nacelle::object::color_picker::parts(
-                &nacelle::object::color_picker::layout(
-                    Rect::new(0.0, 0.0, 0.0, 0.0),
-                    s.picker_custom.len(),
-                    active_gamut_space(s),
-                ),
+                &nacelle::object::color_picker::layout(Rect::new(0.0, 0.0, 0.0, 0.0), s.picker_custom.len()),
             )
             .into_iter()
             .map(|(part, _)| picker_act(*id, part))
