@@ -1117,7 +1117,7 @@ dependencies = [
 [[package]]
 name = "libnacelle"
 version = "0.1.0"
-source = "git+https://github.com/JOCKER3201/libnacelle#5ffc2f9729746ebbaf10c2b4ef4e5d063a4c6654"
+source = "git+https://github.com/JOCKER3201/libnacelle#b14fce6ca1c8473ef3c211ed8e6d5b284e8c10aa"
 dependencies = [
  "chrono",
  "fontdue",
