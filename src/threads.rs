@@ -97,12 +97,18 @@ pub const AUDIO_JOIN: &str = "nacelle-adrop";
 /// a zombie until the desktop itself exits.
 pub const REAP: &str = "nacelle-reap";
 
+/// The accessibility portal listener (`a11y_portal.rs`): opens the session
+/// bus once and then blocks on `SettingChanged` for the rest of the
+/// session, which is exactly the "outlives the call that started it" shape
+/// [`CONF`] is here for — an audit will meet this one running too.
+pub const A11Y_PORTAL: &str = "nacelle-a11y";
+
 /// The roll call: every name above, gathered so the tests can check them
 /// all at once. It carries no run-time duty — a thread is started by
 /// naming its own constant — so it is built only for the test binary,
 /// and a test below makes sure it never falls behind the table.
 #[cfg(test)]
-pub const ALL: [&str; 7] = [AUDIO, TELEMETRY, PTY, PLATE, CONF, AUDIO_JOIN, REAP];
+pub const ALL: [&str; 8] = [AUDIO, TELEMETRY, PTY, PLATE, CONF, AUDIO_JOIN, REAP, A11Y_PORTAL];
 
 /// Starts a named thread. The only way this program makes one.
 ///

@@ -48,6 +48,20 @@ nacelle-widget-aisort = { git = "https://github.com/JOCKER3201/nacelle-addons", 
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 
+# The XDG Desktop Portal's Settings interface (src/a11y_portal.rs): the
+# platform's own high-contrast signal (org.freedesktop.appearance's
+# `contrast`), read once at startup and kept live over the portal's
+# SettingChanged signal, so the desktop's own accessibility switch reaches
+# this program without the user having to know `variant: Named("hc")` is a
+# line in nacelle-desktop.ron — see config::wanted_variant for how the two
+# are weighed against each other. `zbus::blocking` only, on a thread of its
+# own (a11y_portal::spawn): the render loop in main.rs is plain synchronous
+# winit and stays that way, and zbus's own little async-io reactor never
+# leaves the thread it was opened on. Checked on crates.io before adding:
+# license = "MIT", no default features pull in tokio (the "async-io"
+# default is what supplies the `blocking` module this crate actually uses).
+zbus = "4"
+
 # Making gamescope clients fullscreen (src/fullscreen.rs): plain X11
 # requests on the shared XWayland display. The same crate winit
 # already builds on, so this adds no new code to the tree.

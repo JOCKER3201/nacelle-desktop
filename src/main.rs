@@ -2,6 +2,7 @@
 //! Left column with telemetry, central terminal, right column with network
 //! and files, on-screen keyboard and control panel at the bottom.
 
+mod a11y_portal;
 mod audio;
 mod clipboard;
 mod config;
@@ -419,6 +420,12 @@ fn main() {
     // system ones. Nothing is created here; the directory appears the
     // first time the user changes a setting.
     let (_cfg, startup_warning) = config::load();
+    // The desktop's own high-contrast signal, on a thread of its own — see
+    // a11y_portal's module doc comment for why AFTER the theme has already
+    // loaded once is exactly the right place: nothing this program draws
+    // before its first frame depends on the portal's answer, which is why
+    // nothing here waits for it.
+    a11y_portal::spawn();
     let mut fonts = font::FontSystem::new();
     // Font preferences (size scales + family/weight, terminal and UI).
     let (mut font_scale, tfam, twgt) = config::term_font_prefs();

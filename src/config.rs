@@ -630,6 +630,15 @@ pub fn set_engine_theme(name: &str) {
 /// `hc` is the one the engine's master declares, and every theme resolves it:
 /// a theme that declares no `[variant.*]` of its own inherits the master's,
 /// so high contrast does not disappear as a side effect of choosing a colour.
+///
+/// `#[allow(dead_code)]` for the same reason [`set_engine_variant`] carries
+/// it: the settings screen's contrast switch is the caller this was written
+/// for, and it does not exist yet. [`apply_engine_variant`] used to be that
+/// caller, but it now has to tell [`Choice::Off`] apart from
+/// [`Choice::Inherit`] — the one distinction this collapses, both being
+/// "no name" — so it reads `conf().variant` itself instead. The allow comes
+/// off the day either caller is wired in.
+#[allow(dead_code)]
 pub fn current_engine_variant() -> Option<String> {
     conf().variant.name().map(str::to_string)
 }
@@ -1137,18 +1146,80 @@ pub fn load_engine_theme() -> std::sync::Arc<nacelle::theme::ThemeDiagnostics> {
 /// every configuration change, and the answer cannot change in between.
 static REFUSED_VARIANT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Selects the configured variant on the theme just loaded.
+/// Whether the desktop's own accessibility settings ask for high contrast —
+/// `org.freedesktop.appearance`'s `contrast`, read by `a11y_portal.rs` at
+/// startup and kept live over the portal's `SettingChanged` signal.
+///
+/// Process-wide rather than carried on a `Config` value, for the same reason
+/// libnacelle's `motion::PLATFORM_REDUCE` is: it is a fact about the desktop
+/// the user is sitting at, not a fact about any one reload, and the portal's
+/// signal can arrive on its own thread at any point in the session — there
+/// is no "current config" for it to ride in on. It lives HERE rather than in
+/// `a11y_portal.rs` itself because [`apply_engine_variant`] is the one place
+/// a `variant:` choice is already turned into an `nacelle::theme::set_variant`
+/// call, and folding the platform's answer in anywhere else would be a
+/// second place that call can be made from — precisely the "written out
+/// twice" failure `apply_config!`'s own doc comment in main.rs warns about,
+/// just for a second input instead of a second copy.
+static PLATFORM_HIGH_CONTRAST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the configuration layer what the platform's high-contrast
+/// preference is, and answers what it was — called by `a11y_portal.rs`
+/// alone, both for the portal's first answer and for every
+/// `SettingChanged` afterwards.
+pub(crate) fn set_platform_high_contrast(on: bool) -> bool {
+    PLATFORM_HIGH_CONTRAST.swap(on, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn platform_high_contrast() -> bool {
+    PLATFORM_HIGH_CONTRAST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The precedence between an explicit `variant:` choice and the platform's
+/// own high-contrast signal, reduced to one pure function so the rule is
+/// unit-testable without a live D-Bus connection — the same way
+/// `motion::set_platform_reduce_motion` decouples the platform's fact from
+/// any real portal in libnacelle.
+///
+/// [`current_engine_variant`] is not what this reads the choice through: it
+/// collapses [`Choice::Off`] and [`Choice::Inherit`] to the same `None`,
+/// which is exactly the distinction this needs — an explicit `Off` is the
+/// user overruling the platform the same way it overrules a system file,
+/// while `Inherit` is the one state that has not answered yet and so is the
+/// only one the platform gets to answer for it.
+fn wanted_variant(platform_high_contrast: bool, choice: &Choice) -> Option<String> {
+    match choice {
+        Choice::Named(name) => Some(name.clone()),
+        Choice::Off => None,
+        Choice::Inherit => platform_high_contrast.then(|| "hc".to_string()),
+    }
+}
+
+/// Selects the wanted variant — the configured `variant:` choice, with the
+/// platform's own high-contrast signal deciding for it under
+/// [`Choice::Inherit`] (see [`wanted_variant`]) — on the theme just loaded.
+///
+/// `pub(crate)` rather than private: `a11y_portal.rs` calls this again,
+/// standing alone rather than on the far side of a theme load, every time
+/// `SettingChanged` reports a new answer — the whole reason `want = None`
+/// below sets the plain sibling explicitly instead of trusting a load to
+/// have done it already (`nacelle::theme::set_sibling`'s own no-op guard
+/// makes the redundant call after a real load free).
 ///
 /// A name this theme has no sibling for is a sentence in the log and nothing
 /// more. Falling back to the plain theme costs the user contrast; refusing to
 /// start costs them the desktop, and a typo in a text file may not be the
 /// reason a machine does not come up.
-fn apply_engine_variant() {
-    let want = current_engine_variant();
-    // An unset key has nothing to undo: the load already landed on plain.
+pub(crate) fn apply_engine_variant() {
+    let want = wanted_variant(platform_high_contrast(), &conf().variant);
     let refused = match &want {
         Some(name) if !nacelle::theme::set_variant(Some(name)) => Some(name.clone()),
-        _ => None,
+        Some(_) => None,
+        None => {
+            nacelle::theme::set_variant(None);
+            None
+        }
     };
     let Ok(mut said) = REFUSED_VARIANT.lock() else { return };
     if *said == refused {
@@ -4078,6 +4149,88 @@ mod tests {
                 "theme '{name}' dropped the high-contrast variant"
             );
         }
+
+        restore_plain(&dir);
+    }
+
+    /// The precedence between the platform's high-contrast signal and an
+    /// explicit `variant:` choice, tested against [`wanted_variant`] alone —
+    /// no D-Bus connection, no theme engine, no filesystem: the same reason
+    /// libnacelle's reduced-motion contract is tested against a plain
+    /// settable `bool` rather than a real portal.
+    ///
+    /// `Named` and `Off` are the user's own word on the matter, and both
+    /// outrank the platform WHICHEVER WAY it points — an explicit choice is
+    /// not merely a default the platform can talk over. `Inherit` is the one
+    /// state with no opinion of its own, and there alone the platform's
+    /// answer stands.
+    #[test]
+    fn the_platform_signal_only_answers_for_an_inherited_choice() {
+        assert_eq!(
+            wanted_variant(true, &Choice::Inherit),
+            Some("hc".to_string()),
+            "nobody has an opinion here but the platform"
+        );
+        assert_eq!(
+            wanted_variant(false, &Choice::Inherit),
+            None,
+            "the platform has nothing to say either"
+        );
+        assert_eq!(
+            wanted_variant(true, &Choice::Off),
+            None,
+            "an explicit off must refuse the platform exactly as it refuses a system file"
+        );
+        assert_eq!(
+            wanted_variant(false, &Choice::Off),
+            None,
+            "off stays off with no platform signal to refuse"
+        );
+        assert_eq!(
+            wanted_variant(true, &Choice::named("crimson")),
+            Some("crimson".to_string()),
+            "a named variant is the user's own word, not the platform's"
+        );
+        assert_eq!(
+            wanted_variant(false, &Choice::named("crimson")),
+            Some("crimson".to_string()),
+            "a named variant does not need the platform to agree"
+        );
+    }
+
+    /// [`apply_engine_variant`] is what `a11y_portal.rs` calls on every
+    /// `SettingChanged`, standing alone rather than on the far side of a
+    /// theme load — this is the test that a `None` want clears a variant a
+    /// PREVIOUS call left selected, rather than relying on a load that is
+    /// not happening here to have done it.
+    #[test]
+    fn the_platform_signal_is_undone_when_the_desktop_stops_asking() {
+        let _theme = crate::widgets::theme_test_lock();
+        fixture_registry();
+        let _env = env_lock();
+        let dir = variant_conf_dir("platform-undo");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        // Inherit: nothing of the user's own stands in the platform's way.
+        set_engine_theme("default");
+        let (_cfg, _) = resolve();
+        assert_eq!(current_engine_variant(), None, "Inherit is the default with a fresh file");
+
+        assert_eq!(set_platform_high_contrast(true), false);
+        apply_engine_variant();
+        assert_eq!(
+            nacelle::theme::current_variant().as_deref(),
+            Some("hc"),
+            "Inherit defers to the platform's own answer"
+        );
+
+        assert_eq!(set_platform_high_contrast(false), true);
+        apply_engine_variant();
+        assert_eq!(
+            nacelle::theme::current_variant(),
+            None,
+            "the platform withdrawing its answer must not leave hc selected behind it"
+        );
 
         restore_plain(&dir);
     }
