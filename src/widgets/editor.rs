@@ -1599,6 +1599,7 @@ mod tests {
                 panel_scale: 1.0,
                 focus: None,
                 tips: None,
+                access: None,
             };
             draw(&mut ctx);
         }

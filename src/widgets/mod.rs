@@ -144,6 +144,7 @@ pub(crate) fn drawn_list(
             panel_scale: 1.0,
             focus: None,
             tips: None,
+            access: None,
         };
         draw(&mut ctx);
     }
@@ -202,6 +203,7 @@ pub(crate) fn drawn_text(
             panel_scale: 1.0,
             focus: None,
             tips: None,
+            access: None,
         };
         draw(&mut ctx);
     }

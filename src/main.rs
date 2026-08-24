@@ -3334,6 +3334,13 @@ fn draw_screen(
         // explains, so it cannot be drawn while that is still being
         // drawn. One manager cannot answer to two windows at once.
         tips: hosts_ui.then_some(&mut *tips),
+        // No AT bridge is wired into this process yet — the
+        // accessibility data model exists (libnacelle's access.rs) and
+        // every widget already reports into it, but nothing consumes
+        // it: no accesskit_unix::Adapter exists here to read it out
+        // over AT-SPI. That wiring is a real follow-up, not done by
+        // this merge.
+        access: None,
     };
 
     let mut grid_now: Option<(usize, usize)> = None;
@@ -3969,6 +3976,11 @@ fn run_resolution_dialog(
                             focus: None,
                             // Nor a tooltip: nothing on it is trimmed.
                             tips: None,
+                            // No AT bridge is wired into this process
+                            // yet — the accessibility data model exists
+                            // (libnacelle's access.rs) but nothing
+                            // consumes it. See the a11y follow-up notes.
+                            access: None,
                         };
                         widgets::popup::draw_resolution_dialog(&mut ctx, mw, mh);
                         // Only the touched rows travel — a glyph-churn frame

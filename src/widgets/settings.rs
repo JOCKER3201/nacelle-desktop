@@ -115,6 +115,7 @@
 use super::{Ctx, PanelSpec, Rect};
 use std::borrow::Cow;
 use crate::config::{self, GRID_MAX, GRID_MIN};
+use nacelle::access::{AccessInfo, Role};
 use nacelle::focus::{Caps, FocusCtl, FocusId, Key as FKey, KeyEv, Mods, Nav};
 use nacelle::theme::bake::StateStyle;
 // The two ladders' walls and ceilings, TAKEN from the stage that applies
@@ -333,7 +334,7 @@ enum Flip {
     BarTrack,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Act {
     Close,
     Back,
@@ -456,7 +457,7 @@ enum Act {
 }
 
 /// Font section: terminal or the rest of the interface.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Sect {
     Term,
     Ui,
@@ -728,10 +729,15 @@ fn hit_into(hits: &mut Vec<(Rect, Act)>, clip: Option<Rect>, ctx: &mut Ctx, r: R
     // a row would otherwise still answer the pointer, under a chrome
     // button that is painted over it.
     let Some(seen) = visible(r, clip) else { return };
-    let ring = ctx
-        .focus
-        .as_deref_mut()
-        .map_or(false, |fc| fc.register(focus_id(act), r, Caps::NONE).ring);
+    // TODO(a11y): `act`'s Debug form is a placeholder, not a curated
+    // name — this window's `Act` enum has hundreds of variants and
+    // giving each a proper human-readable label (the way libnacelle's
+    // own object/ widgets do) is its own follow-up pass, out of scope
+    // for wiring the merge through.
+    let ring = ctx.focus.as_deref_mut().map_or(false, |fc| {
+        fc.register(focus_id(act), r, Caps::NONE, AccessInfo::new(Role::Button, format!("{act:?}")))
+            .ring
+    });
     if ring {
         nacelle::object::focus_ring::draw(ctx, r);
     }
@@ -7064,7 +7070,13 @@ impl Settings {
         // sliding past must not paint over the way out. Registering and
         // painting are two moments here, and only here.
         let ring = ctx.focus.as_deref_mut().map_or(false, |fc| {
-            fc.register(focus_id(chrome_act), corner, Caps::NONE).ring
+            fc.register(
+                focus_id(chrome_act),
+                corner,
+                Caps::NONE,
+                AccessInfo::new(Role::Button, chrome_label),
+            )
+            .ring
         });
         // The navigation comes next, and the page after it: the chain is
         // corner button, rail, the section's pages, the page. Where the
@@ -7883,9 +7895,13 @@ impl Settings {
             Ctrl::Slider { .. } => Caps::GREEDY_ARROWS,
             _ => Caps::NONE,
         };
+        // TODO(a11y): same placeholder-name gap as `hit_into` above —
+        // `act`'s Debug form stands in for a curated label pending a
+        // dedicated pass over this window's `Act` enum.
+        let role = if matches!(ctrl, Ctrl::Slider { .. }) { Role::Slider } else { Role::Button };
         for &(r, act) in targets {
             if let Some(fc) = ctx.focus.as_deref_mut() {
-                fc.register(focus_id(act), r, caps);
+                fc.register(focus_id(act), r, caps, AccessInfo::new(role, format!("{act:?}")));
             }
         }
     }
@@ -11954,6 +11970,7 @@ mod tests {
             panel_scale: 1.0,
             focus: None,
             tips: None,
+            access: None,
         }
     }
 
