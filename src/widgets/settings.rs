@@ -424,28 +424,28 @@ enum Act {
     /// The colour picker's parts, one act each
     /// ([`nacelle::object::color_picker::Part`]).
     ///
-    /// SEVEN ACTS AND NOT ONE, because they are seven answers to
-    /// different questions and the window's whole event road is built on
-    /// an act naming what a press MEANS: the field and the bar are
-    /// dragged, the notation plate steps, a ready-made colour is picked
-    /// in one press, and the bank cell writes the current colour into
-    /// the row of the user's own. One act with a part inside it would
-    /// have been shorter and would have put the same focus id on seven
-    /// rects.
+    /// SIX KINDS AND NOT ONE, because they are six answers to different
+    /// questions and the window's whole event road is built on an act
+    /// naming what a press MEANS: a slider is dragged (with WHICH channel
+    /// carried as its own field, since the wheel's two-axis field and its
+    /// bar collapsed into one bank of interchangeable 1-D tracks — the
+    /// slider-bank rewrite, 2026-08-24), the notation plate steps, the
+    /// value plate opens the inline editor, a ready-made colour is picked
+    /// in one press, and the bank cell writes the current colour into the
+    /// row of the user's own. One act with a part inside it would have
+    /// been shorter and would have put the same focus id on every rect.
     ///
-    /// AND EACH OF THE SEVEN NAMES ITS PICKER ([`PickerId`]), since
-    /// 2026-08-18 — the owner asked for a picker at EVERY place a colour
-    /// is chosen, and there are fourteen of them. The alternative was one
-    /// picker and a "which colour is it standing on" field somewhere
-    /// else, which is the same fault the rail's fold had: two facts that
-    /// can disagree, and no half able to notice.
-    PickerField(PickerId),
-    PickerValue(PickerId),
+    /// AND EACH ONE NAMES ITS PICKER ([`PickerId`]), since 2026-08-18 —
+    /// the owner asked for a picker at EVERY place a colour is chosen,
+    /// and there are fourteen of them. The alternative was one picker and
+    /// a "which colour is it standing on" field somewhere else, which is
+    /// the same fault the rail's fold had: two facts that can disagree,
+    /// and no half able to notice.
+    PickerSlider(PickerId, usize),
     PickerFormat(PickerId),
-    /// The value written out. It has an act so it is a TARGET — a place
-    /// the Tab chain lands and a rect the pointer can find — before it
-    /// can be typed into; what a press does there is the next stage's
-    /// (a caret in this plate, `object::text_input`).
+    /// The value written out. A press opens the inline editor over it
+    /// (`Settings::editing_picker`) — see that field's own doc for the
+    /// whole of how typing a colour in place works end to end.
     PickerText(PickerId),
     PickerBase(PickerId, usize),
     PickerCustom(PickerId, usize),
@@ -595,14 +595,16 @@ fn focus_id(act: Act) -> FocusId {
         // door is no longer a row of that list — an id derived from the
         // list would now collide with its first theme.
         ThemesEditor => FocusId::of("settings.lookfeel.themes.editor"),
-        // The picker's seven, under one path each, DERIVED BY THE PICKER
+        // The picker's parts, under one path each, DERIVED BY THE PICKER
         // THEY BELONG TO: `item` is a child id and it chains, so a part
-        // is `<part path> -> which picker -> which cell` and fourteen
-        // pickers can stand on one page without two of them sharing a
-        // ring. The index is the picker's place in [`PickerId::ALL`],
-        // which is a declaration order like a list's rows'.
-        PickerField(p) => FocusId::of("settings.editor.picker.field").item(p.idx()),
-        PickerValue(p) => FocusId::of("settings.editor.picker.value").item(p.idx()),
+        // is `<part path> -> which picker -> which cell` (a slider adds a
+        // THIRD link, which channel) and fourteen pickers can stand on
+        // one page without two of them sharing a ring. The index is the
+        // picker's place in [`PickerId::ALL`], which is a declaration
+        // order like a list's rows'.
+        PickerSlider(p, i) => {
+            FocusId::of("settings.editor.picker.slider").item(p.idx()).item(i)
+        }
         PickerFormat(p) => FocusId::of("settings.editor.picker.format").item(p.idx()),
         PickerText(p) => FocusId::of("settings.editor.picker.text").item(p.idx()),
         PickerBase(p, i) => {
@@ -1499,8 +1501,7 @@ impl PickerId {
 fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
     use nacelle::object::color_picker::Part;
     match part {
-        Part::Field => Act::PickerField(id),
-        Part::Value => Act::PickerValue(id),
+        Part::Slider(i) => Act::PickerSlider(id, i),
         Part::Format => Act::PickerFormat(id),
         Part::Text => Act::PickerText(id),
         Part::Base(i) => Act::PickerBase(id, i),
@@ -1508,6 +1509,14 @@ fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
         Part::Add => Act::PickerAdd(id),
     }
 }
+
+// `active_gamut_space` and its `GamutSpace` wiring left with the wheel
+// (the slider-bank rewrite, 2026-08-24): a bank of 1-D tracks has no
+// honest place for a 2-D gamut-boundary shape, and
+// `nacelle::object::color_picker`'s own module header explains why at
+// length rather than silently dropping the question. `color_space` and
+// `color_enabled` stay on `Settings` regardless — the HDR/ICC switches on
+// the COLOR page still read them directly.
 
 /// One control of a page, as a description. Everything a row needs to
 /// draw itself, register itself and answer a key lives here: nothing
@@ -3715,6 +3724,19 @@ pub struct Settings {
     /// layout editor names its files with, driven here purely by the
     /// keyboard: the field is focused on open, Enter saves, Esc closes.
     naming: Option<nacelle::object::text_input::InputModel>,
+    /// Which picker's value plate is open for inline typing, if any — the
+    /// "one at a time" bookkeeping [`naming`](Settings::naming) already
+    /// has, mirrored for a control that has FOURTEEN plates instead of
+    /// one. The typed text itself is NOT here: it lives in that picker's
+    /// own `editing: Option<InputModel>`
+    /// (`nacelle::object::color_picker::Picker`), because with fourteen
+    /// pickers on the page "which one, and what's in the box" is a fact
+    /// about the picker being typed into, not a fact about the window.
+    /// `Settings::perform`'s own head guard and `Settings::click`'s
+    /// "hit nothing" branch are where a press ELSEWHERE blurs
+    /// (commits) whichever picker this names — see
+    /// `Settings::blur_editing_picker`.
+    editing_picker: Option<PickerId>,
     /// When the editor last re-baked the desktop during a drag; the pulse
     /// that keeps a live slider from leaking a bake per frame.
     editor_pulse: Option<Instant>,
@@ -4210,6 +4232,7 @@ impl Settings {
             bg_depth: 50,
             bg_coverage: 42,
             naming: None,
+            editing_picker: None,
             // The editor opens on ADVANCED — the page that has always
             // been there — with BASIC's move at rest and no
             // seeds yet, so a BASIC page that was somehow reached before
@@ -4446,37 +4469,27 @@ impl Settings {
         set(self, (lo as f32 + t * (hi - lo) as f32).round() as u32);
     }
 
-    /// The picker's two dragged areas, from a point in the window.
+    /// The picker's dragged slider, from a point in the window.
     ///
     /// The rect comes from the hit map, exactly as a track's does, so the
-    /// hand and the ink are reading one layout. What differs from
-    /// [`Settings::set_from_x`] is that a FIELD has two axes: the same
-    /// press that chooses a hue chooses a saturation, and clamping is the
-    /// object's ([`Picker::pick_field`]) so a hand that wanders off the
-    /// area keeps dragging along its edge rather than letting go — the
-    /// behaviour every slider in this window already has, in two
-    /// directions instead of one.
+    /// hand and the ink are reading one layout — ONE COORDINATE now, and
+    /// not two: every slider in the bank is a single 0..1 axis, which is
+    /// the whole reason a bank of them replaced the old two-axis field
+    /// (`nacelle::object::color_picker`'s own module header). Clamping is
+    /// the object's ([`Picker::pick_slider`]), so a hand that wanders off
+    /// the track keeps dragging along its edge rather than letting go —
+    /// the behaviour every slider in this window already has.
     ///
     /// AND IT ENDS WHERE THE PICKER'S OWN PAGE KEEPS ITS ANSWER
     /// ([`Settings::commit_picker`]) — a relative move for BASIC, the
     /// HSV track for each of ADVANCED's thirteen — so the control and the
     /// value it stands for are re-derived together on every step of the
     /// drag and can never be a frame apart.
-    fn set_picker_from(&mut self, act: Act, x: f32, y: f32) {
+    fn set_picker_from(&mut self, act: Act, x: f32) {
+        let Act::PickerSlider(id, i) = act else { return };
         let Some(r) = self.rect_of_act(act) else { return };
-        let fx = (x - r.x) / r.w.max(1.0);
-        let fy = (y - r.y) / r.h.max(1.0);
-        let id = match act {
-            Act::PickerField(id) => {
-                self.pickers[id.idx()].pick_field(fx, fy);
-                id
-            }
-            Act::PickerValue(id) => {
-                self.pickers[id.idx()].pick_value(fy);
-                id
-            }
-            _ => return,
-        };
+        let frac = (x - r.x) / r.w.max(1.0);
+        self.pickers[id.idx()].pick_slider(i, frac);
         self.commit_picker(id);
     }
 
@@ -4527,6 +4540,29 @@ impl Settings {
             PickerId::TipFill => self.tip_fill = track,
             PickerId::BarTrack => self.bar_track_colour = track,
         }
+    }
+
+    /// Closes whichever picker's inline editor is open, COMMITTING it —
+    /// never cancelling. `Picker::commit_edit` closes on a good parse by
+    /// itself; a bad one is force-closed with `Picker::cancel_edit`,
+    /// which is safe precisely because a bad parse never touched the
+    /// colour (`set_text`'s own contract) — there is nothing left to
+    /// discard but the typed text. This is BLUR, not Enter: Enter's own
+    /// handling (`Settings::key`) leaves a bad parse OPEN for another
+    /// try, because focus has not left yet and there is still an
+    /// affordance to fix it; a blur has none, so it takes the last-good
+    /// colour and moves on.
+    ///
+    /// A no-op when nothing is open, so every caller can reach for this
+    /// unconditionally before a press it does not otherwise know is
+    /// "elsewhere".
+    fn blur_editing_picker(&mut self) {
+        let Some(id) = self.editing_picker.take() else { return };
+        if !self.pickers[id.idx()].commit_edit() {
+            self.pickers[id.idx()].cancel_edit();
+        }
+        self.commit_picker(id);
+        self.apply_editor_preview();
     }
 
     /// The main-background picker leads the surface family: the picked
@@ -5816,12 +5852,11 @@ impl Settings {
             return;
         }
         let Some(act) = self.dragging else { return };
-        // The picker's areas take BOTH coordinates and then follow the
-        // same pulse as the tracks below: a colour dragged across the
-        // field re-bakes the desktop on the theme's pulse, not on every
-        // frame.
-        if let Act::PickerField(_) | Act::PickerValue(_) = act {
-            self.set_picker_from(act, x, y);
+        // A dragged slider follows the same pulse as the tracks below: a
+        // colour dragged across the bank re-bakes the desktop on the
+        // theme's pulse, not on every frame.
+        if let Act::PickerSlider(..) = act {
+            self.set_picker_from(act, x);
             if self.preview_pulse_due() {
                 self.apply_editor_preview();
             }
@@ -6114,8 +6149,14 @@ impl Settings {
             .find(|(r, _)| r.contains(x, y))
             .map(|&(_, a)| a);
         let Some(act) = act else {
-            // No element hit: swallow the click; a click inside the
+            // No element hit: a click on blank space is "elsewhere" too —
+            // it blurs (commits) an open inline editor exactly as a press
+            // on another control would (`Settings::perform`'s own head
+            // guard handles every act that IS one; this is the one gap
+            // that guard cannot close, since there is no act here at
+            // all) — and then swallows the click; a click inside the
             // window closes an open dropdown.
+            self.blur_editing_picker();
             if modal_rect(w, h).contains(x, y) {
                 self.dropdown = None;
             }
@@ -6124,7 +6165,7 @@ impl Settings {
         if let Some(fc) = fc {
             fc.focus(Some(focus_id(act)));
         }
-        self.perform(act, x, y)
+        self.perform(act, x)
     }
 
     /// Every sound an activation makes leaves the window through here.
@@ -6146,11 +6187,21 @@ impl Settings {
     /// The body every activation runs — mouse ([`Settings::click`])
     /// and keyboard ([`Settings::key`]) share it, so the two ways of
     /// pressing a control cannot drift apart (F1 §1.5). `x` is where
-    /// along a slider track the press landed and `y` its companion for
-    /// the one control that reads both — the picker's field, where a
-    /// press chooses a hue and a saturation at once. Buttons ignore
-    /// them.
-    fn perform(&mut self, act: Act, x: f32, y: f32) -> bool {
+    /// along a slider track the press landed; buttons ignore it.
+    fn perform(&mut self, act: Act, x: f32) -> bool {
+        // ANY PRESS ELSEWHERE BLURS AN OPEN INLINE EDITOR FIRST —
+        // including a different picker's own value plate — the one
+        // funnel every activation runs through (this function's own
+        // head note), so `Settings::click`'s hit-dispatch, `Settings::
+        // key`'s Enter/Space path and a direct test call all answer the
+        // same way. Pressing the SAME picker's own plate again is the one
+        // exception: that act IS `Act::PickerText(id)` and leaves the
+        // editor exactly where it stands.
+        if let Some(id) = self.editing_picker {
+            if act != Act::PickerText(id) {
+                self.blur_editing_picker();
+            }
+        }
         self.flash = Some((act, self.now));
         #[cfg(test)]
         self.heard.clear();
@@ -6445,15 +6496,12 @@ impl Settings {
                 self.set_from_x(act, x);
                 self.mark_dirty(act);
             }
-            // THE PICKER'S TWO AREAS ARE DRAGGED, and they are the only
-            // targets in this window whose value depends on BOTH
-            // coordinates — a field is two questions at once, which is
-            // the whole reason it is a field and not two tracks. They
-            // join `dragging` like every other held control, and
-            // [`Settings::drag`] is where the second coordinate is read.
-            Act::PickerField(_) | Act::PickerValue(_) => {
+            // A DRAGGED SLIDER, one coordinate: the wheel's two-axis field
+            // is gone, so every picker act that answers to a drag now
+            // reads `x` alone, through `set_picker_from`.
+            Act::PickerSlider(..) => {
                 self.dragging = Some(act);
-                self.set_picker_from(act, x, y);
+                self.set_picker_from(act, x);
                 self.apply_editor_preview();
             }
             // The notation steps. Nothing about the COLOUR moves, so
@@ -6463,11 +6511,17 @@ impl Settings {
             // like any other button. It emitted a second one here until
             // 2026-08-18, which was audible: two clicks for one press.
             Act::PickerFormat(id) => self.pickers[id.idx()].cycle_format(),
-            // A target, and for now nothing more: the plate is a place
-            // the Tab chain lands and a rect the pointer finds, so that
-            // typing into it is a change to what a press DOES and not a
-            // change to the page's shape.
-            Act::PickerText(_) => {}
+            // Opens the inline editor over the value plate — a no-op if
+            // this picker's own plate is already open, so a second press
+            // on it does not restart the typed text. `Settings::perform`'s
+            // own head guard has already blurred (committed) any OTHER
+            // picker's editor before this arm ever runs.
+            Act::PickerText(id) => {
+                if self.editing_picker != Some(id) {
+                    self.pickers[id.idx()].begin_edit();
+                    self.editing_picker = Some(id);
+                }
+            }
             // A ready-made colour, in one press. `Base` reads the
             // THEME's grid and `Custom` the user's own, and both are
             // taken from the same lists the drawing and the hit map used.
@@ -6765,6 +6819,60 @@ impl Settings {
             }
             return KeyOut::Consumed;
         }
+        // A PICKER'S INLINE EDITOR OWNS THE KEYBOARD WHILE IT STANDS, THE
+        // SAME WAY THE SAVE AS PROMPT DOES ABOVE — Enter commits, Escape
+        // cancels, everything else is the field's — but it does NOT claim
+        // the mouse the way `naming` does (`draw_naming`'s own
+        // `ctx.mouse.cover(win)`): this editor is a plate INSIDE the page
+        // the owner explicitly asked to keep working, so a click
+        // elsewhere (`Settings::perform`'s and `Settings::click`'s own
+        // blur guards) is what closes it, never a scrim.
+        if let Some(id) = self.editing_picker {
+            use nacelle::object::text_input::{self, InputEdited, InputMsg};
+            if ev.mods == Mods::NONE && ev.key == FKey::Escape {
+                self.pickers[id.idx()].cancel_edit();
+                self.editing_picker = None;
+                return KeyOut::Consumed;
+            }
+            if ev.mods == Mods::NONE && ev.key == FKey::Enter {
+                if self.pickers[id.idx()].commit_edit() {
+                    self.editing_picker = None;
+                    self.commit_picker(id);
+                    self.apply_editor_preview();
+                    return KeyOut::Changed;
+                }
+                // A bad parse STAYS OPEN, text untouched — `commit_edit`'s
+                // own contract, and the SAVE AS prompt's own
+                // `if name.is_empty()` guard above, read the other way
+                // round: there, an empty name leaves ITS field open
+                // rather than discarding what was typed.
+                return KeyOut::Consumed;
+            }
+            if let Some(msg) = text_input::key_msg(ev) {
+                let out = self.pickers[id.idx()].editing_mut().map(|m| m.apply(msg));
+                match out {
+                    Some(InputEdited::CopyRequest { text, .. }) => {
+                        nacelle::clipboard::store(nacelle::clipboard::Board::Clipboard, &text);
+                    }
+                    Some(InputEdited::PasteRequest) => {
+                        // No charset filter, unlike the SAVE AS prompt's
+                        // own paste: a colour's own parser is already
+                        // forgiving about punctuation (`color_picker::
+                        // parse`'s own doc), and a live filter here would
+                        // reject perfectly normal in-progress typing.
+                        if let Some(text) =
+                            nacelle::clipboard::load(nacelle::clipboard::Board::Clipboard)
+                        {
+                            if let Some(m) = self.pickers[id.idx()].editing_mut() {
+                                m.apply(InputMsg::Insert(text));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return KeyOut::Consumed;
+        }
         // Bare only: the same rule `Nav::of` applies to the arrows —
         // a modified key is a shortcut's business, never navigation.
         if ev.mods == Mods::NONE
@@ -6808,24 +6916,23 @@ impl Settings {
                     // A slider has no press; its keys are the arrows.
                     return KeyOut::Consumed;
                 }
-                // AND NEITHER HAS THE PICKER'S FIELD, for the same
-                // reason written larger: a synthetic press at the centre
-                // of a two-dimensional field would set the colour to
-                // whatever happens to be in the middle of it, which is a
-                // colour nobody chose. The swatches are how this control
-                // is used from the keyboard today.
-                if let Act::PickerField(_) | Act::PickerValue(_) = act {
+                // AND NEITHER HAS A PICKER SLIDER, for the same reason
+                // written larger: a synthetic press at the centre of a
+                // track would set that one channel to whatever happens to
+                // stand at its own midpoint, which is a colour nobody
+                // chose — the old two-axis field's reasoning, unchanged
+                // by the axis count. The swatches are how this control is
+                // used from the keyboard today.
+                if let Act::PickerSlider(..) = act {
                     return KeyOut::Consumed;
                 }
-                // The CENTRE of whatever the chain is standing on, both
-                // ways: a keyboard press has no point of its own, and the
-                // middle of the target is the only honest answer for a
-                // control that reads one (the picker's field; the tracks
-                // take the arrows instead and never arrive here).
-                let (x, y) = fc
-                    .rect_of(focus_id(act))
-                    .map_or((0.0, 0.0), |r| (r.cx(), r.y + r.h / 2.0));
-                if self.perform(act, x, y) {
+                // The CENTRE of whatever the chain is standing on: a
+                // keyboard press has no point of its own, and the middle
+                // of the target is the only honest answer for a control
+                // that reads one (a picker slider; the tracks take the
+                // arrows instead and never arrive here).
+                let x = fc.rect_of(focus_id(act)).map_or(0.0, |r| r.cx());
+                if self.perform(act, x) {
                     KeyOut::Changed
                 } else {
                     KeyOut::Consumed
@@ -7828,7 +7935,7 @@ impl Settings {
 
     /// Where the picker's parts stand in a row's band — ONE statement of
     /// it, so the drawing, the hit map and the Tab chain cannot disagree
-    /// about where the field is.
+    /// about where the slider bank is.
     ///
     /// BASIC's Tone row is the one exception: its band is narrowed by
     /// [`ADVANCED_BUTTON_FRAC`] so the picker's own notation strip stops
@@ -7842,7 +7949,11 @@ impl Settings {
         } else {
             rc.band
         };
-        nacelle::object::color_picker::layout(band, self.picker_custom.len())
+        nacelle::object::color_picker::layout(
+            band,
+            self.pickers[id.idx()].slider_count(),
+            self.picker_custom.len(),
+        )
     }
 
     /// The fraction of the Tone row's band the ADVANCED COLOUR button
@@ -8155,20 +8266,31 @@ impl Settings {
             // what the hand may reach. The rects come from the same
             // `picker_layout` the targets do, so a part that is drawn is a
             // part that can be pressed and the two cannot come apart.
+            // `nacelle::object::color_picker::draw_focusable` now takes
+            // `&mut Picker` — `text_input::draw` mutates its own
+            // `InputModel` even while only drawing (blink phase, scroll,
+            // its measure cache), and that model lives on the picker
+            // since the slider-bank rewrite (2026-08-24). So every `&self`
+            // computation this arm needs (the layout, the ADVANCED COLOUR
+            // button's rect, the hit targets) is hoisted BEFORE the
+            // `&mut self.pickers[id.idx()]` borrow below — the mechanical
+            // consequence that rewrite's own report named ahead of time.
             Ctrl::Picker(id) => {
                 let l = self.picker_layout(*id, rc);
+                let adv = self.advanced_colour_button(*id, rc);
+                let targets = self.picker_targets(*id, rc);
                 nacelle::object::color_picker::draw_focusable(
                     ctx,
                     &l,
-                    &self.pickers[id.idx()],
+                    &mut self.pickers[id.idx()],
                     &self.picker_custom,
                     |part| focus_id(picker_act(*id, part)),
                 );
-                if let Some(r) = self.advanced_colour_button(*id, rc) {
+                if let Some(r) = adv {
                     let text = self.text_of(Text::Fixed("ADVANCED COLOUR"));
                     self.button(ctx, r, &text, Act::EditorMode);
                 }
-                for (r, act) in self.picker_targets(*id, rc) {
+                for (r, act) in targets {
                     self.push_hit(r, act);
                 }
             }
@@ -9678,11 +9800,11 @@ mod tests {
             // the pairs below are the ones a collision would be invisible
             // in: the same part of two different pickers, and the same
             // cell of two different pickers.
-            Act::PickerField(PickerId::Tone),
-            Act::PickerField(PickerId::Accent),
-            Act::PickerField(PickerId::BarTrack),
-            Act::PickerValue(PickerId::Tone),
-            Act::PickerValue(PickerId::Accent),
+            Act::PickerSlider(PickerId::Tone, 0),
+            Act::PickerSlider(PickerId::Accent, 0),
+            Act::PickerSlider(PickerId::BarTrack, 0),
+            Act::PickerSlider(PickerId::Tone, 1),
+            Act::PickerSlider(PickerId::Accent, 1),
             Act::PickerFormat(PickerId::Tone),
             Act::PickerFormat(PickerId::MenuFill),
             Act::PickerText(PickerId::Tone),
@@ -9780,7 +9902,7 @@ mod tests {
         s.dropdown = Some(Dropdown::List(ListId::Looks));
         let before = s.current_look.clone();
         assert!(
-            !s.perform(Act::ThemesEditor, 0.0, 0.0),
+            !s.perform(Act::ThemesEditor, 0.0),
             "the door reported a configuration change"
         );
         assert_eq!(s.current_look, before, "the door moved the selection");
@@ -10029,7 +10151,7 @@ mod tests {
         s.dropdown = Some(Dropdown::List(ListId::Sounds));
         let before = s.current_sounds.clone();
         assert!(
-            !s.perform(Act::OpenSoundLevels, 0.0, 0.0),
+            !s.perform(Act::OpenSoundLevels, 0.0),
             "the door reported a configuration change"
         );
         assert!(s.view == View::SoundLevels, "the door opened the wrong page");
@@ -10360,7 +10482,7 @@ mod tests {
         let mut s = furnished();
         s.view = View::LookFeel;
         assert!(
-            !s.perform(Act::LookFeelReset, 0.0, 0.0),
+            !s.perform(Act::LookFeelReset, 0.0),
             "the footer reported a configuration change"
         );
         assert!(s.view == View::LookFeelReset, "the footer opened nothing");
@@ -10535,7 +10657,7 @@ mod tests {
     #[test]
     fn the_addons_page_reads_the_toolkit_on_the_way_in() {
         let mut s = furnished();
-        assert!(!s.perform(Act::OpenAddons, 0.0, 0.0), "a report changed the configuration");
+        assert!(!s.perform(Act::OpenAddons, 0.0), "a report changed the configuration");
         assert!(s.view == View::Addons, "the door opened nothing");
         assert_eq!(
             s.addon_report,
@@ -10886,7 +11008,7 @@ mod tests {
         let _t = crate::widgets::Themed::new(tag, body);
         let mut s = furnished();
         s.now = 1.0;
-        s.perform(Act::OpenFont, 0.0, 0.0);
+        s.perform(Act::OpenFont, 0.0);
         // The next frame, a millisecond later: well inside the master's
         // 150 ms and outside a decay of no length at all.
         s.now = 1.001;
@@ -10988,11 +11110,11 @@ mod tests {
         // `EDITOR_ROWS` in 2026-08-23's picker-only simplification, so
         // `is_track` correctly answers false for all six now — there is
         // no live witness left to assert true on, per [`Knob`]'s note.
-        // A PICKER IS NOT A TRACK, and its two dragged areas least of
-        // all: arrows must not move a field, whose two axes have no
-        // "next" between them.
-        assert!(!is_track(Act::PickerField(PickerId::Accent)));
-        assert!(!is_track(Act::PickerValue(PickerId::Accent)));
+        // A PICKER IS NOT A TRACK, and its sliders least of all: a
+        // synthetic Enter/Space press must not set one to a midpoint
+        // nobody chose (`Settings::key`'s own guard).
+        assert!(!is_track(Act::PickerSlider(PickerId::Accent, 0)));
+        assert!(!is_track(Act::PickerSlider(PickerId::Accent, 1)));
         assert!(!is_track(Act::EditGrid));
         assert!(!is_track(Act::ToggleSnap));
         assert!(!is_track(Act::FamilyBtn(Sect::Ui)));
@@ -11642,7 +11764,7 @@ mod tests {
         // the page arrives rather than right by the time it is drawn.
         s.sound_set.clear();
         s.view = View::LookFeel;
-        assert!(!s.perform(Act::OpenSoundLevels, 0.0, 0.0));
+        assert!(!s.perform(Act::OpenSoundLevels, 0.0));
         assert!(
             !s.sound_set.is_empty(),
             "the page opened with nothing to say about its own sound set"
@@ -12382,7 +12504,7 @@ mod tests {
         for (step, token) in
             [("SMALL", "corner.sm"), ("MEDIUM", "corner.md"), ("LARGE", "corner.lg")]
         {
-            s.perform(Act::EditorCornerStep, 0.0, 0.0);
+            s.perform(Act::EditorCornerStep, 0.0);
             assert_eq!(corner_step_word(&s), step, "the control did not step to {step}");
             let edits = s.editor_edits();
             let want = theme_u(token);
@@ -12406,7 +12528,7 @@ mod tests {
         }
         // And the round is closed: one more press is back on the theme's
         // own ladder, so a press can always be undone.
-        s.perform(Act::EditorCornerStep, 0.0, 0.0);
+        s.perform(Act::EditorCornerStep, 0.0);
         assert_eq!(corner_step_word(&s), "AS WRITTEN");
         assert_eq!([s.corner_sm, s.corner_md, s.corner_lg], s.corner_seed);
         nacelle::theme::clear_preview();
@@ -12677,7 +12799,7 @@ mod tests {
                 .iter()
                 .position(|c| hsv_track_of(*c) != s.picker_track(id).unwrap())
                 .expect("every ready-made colour is the one this picker already holds");
-            s.perform(Act::PickerBase(id, k), 0.0, 0.0);
+            s.perform(Act::PickerBase(id, k), 0.0);
             let after: Vec<Option<[u32; 3]>> =
                 PickerId::ALL.iter().map(|o| s.picker_track(*o)).collect();
             for (i, other) in PickerId::ALL.iter().enumerate() {
@@ -12697,6 +12819,12 @@ mod tests {
         nacelle::theme::clear_preview();
     }
 
+    // `active_gamut_space_reads_the_pages_own_state_and_nothing_else` left
+    // with `active_gamut_space` itself (the slider-bank rewrite,
+    // 2026-08-24) — there is no gamut-boundary curve left on the page for
+    // any state to feed. `color_on` stays: COLOR's own SDR/HDR tests below
+    // still use it.
+
     /// The SEVERITY picker writes THE ROLE THAT IS STANDING, and marks
     /// that one alone — the mark `editor_edits` gates the write on, so
     /// the six roles nobody pointed at keep the theme's own words.
@@ -12712,7 +12840,7 @@ mod tests {
         s.seed_pickers_from_tracks();
         assert_eq!(s.severity_touched, [false; 7], "the editor opened with roles pinned");
         let before = s.severity;
-        s.perform(Act::PickerBase(PickerId::Severity, swatches.len() - 1), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Severity, swatches.len() - 1), 0.0);
         for i in 0..7 {
             if i == role {
                 assert!(s.severity_touched[i], "the chosen role was not marked touched");
@@ -12807,7 +12935,7 @@ mod tests {
         // chroma, and the master's mint at C 0.153 doubled is well past
         // anything sRGB can show. If the slide is real it shows here.
         let mut wide = editor_open();
-        wide.perform(Act::EditorMode, 0.0, 0.0);
+        wide.perform(Act::EditorMode, 0.0);
         wide.tone[1] = TONE_SAT_MAX;
         wide.apply_editor_preview();
         let mut settled_c = None;
@@ -12882,8 +13010,8 @@ mod tests {
         // The picker and every part of it: the one control the three tone
         // sliders became on 2026-08-18.
         for part in [
-            Act::PickerField(PickerId::Tone),
-            Act::PickerValue(PickerId::Tone),
+            Act::PickerSlider(PickerId::Tone, 0),
+            Act::PickerSlider(PickerId::Tone, 1),
             Act::PickerFormat(PickerId::Tone),
             Act::PickerText(PickerId::Tone),
             Act::PickerBase(PickerId::Tone, 0),
@@ -12894,22 +13022,22 @@ mod tests {
         assert!(
             !basic.iter().any(|a| matches!(
                 a,
-                Act::PickerField(PickerId::Edge) | Act::EditorTrack(Knob::CornerSm)
+                Act::PickerSlider(PickerId::Edge, _) | Act::EditorTrack(Knob::CornerSm)
             )),
             "BASIC is showing ADVANCED's controls"
         );
 
         // The button opens the grid IN PLACE: the per-element pickers, with
         // BASIC's own picker gone and a back door of the grid's own.
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         assert!(!s.editor_basic, "ADVANCED COLOUR did not open the grid");
         let advanced = described_acts(&s, page);
         assert!(
-            advanced.contains(&Act::PickerField(PickerId::Edge)),
+            advanced.contains(&Act::PickerSlider(PickerId::Edge, 0)),
             "the grid is not showing the border picker"
         );
         assert!(
-            !advanced.contains(&Act::PickerField(PickerId::Tone)),
+            !advanced.contains(&Act::PickerSlider(PickerId::Tone, 0)),
             "the grid is showing BASIC's picker"
         );
         assert!(advanced.contains(&Act::EditorMode), "the grid has no back button");
@@ -12920,7 +13048,7 @@ mod tests {
             assert!(advanced.contains(&verb), "the grid lost one of the editor's verbs");
         }
         // Back returns to BASIC, on the same one control.
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         assert!(s.editor_basic, "the back button did not return to BASIC");
         // The preview these presses pushed is this test's, and it does
         // not leave the room in it: another test reading the theme
@@ -13112,13 +13240,13 @@ mod tests {
         use nacelle::sound::Event as Sfx;
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         s.picker_custom = vec![nacelle::theme::Color::WHITE, nacelle::theme::Color::BLACK];
         // Named by hand because `Act` carries no `Debug` and this window
         // has never wanted one; the names are what a failure has to say.
         for (name, act) in [
-            ("the field", Act::PickerField(PickerId::Tone)),
-            ("the value bar", Act::PickerValue(PickerId::Tone)),
+            ("the first slider", Act::PickerSlider(PickerId::Tone, 0)),
+            ("the second slider", Act::PickerSlider(PickerId::Tone, 1)),
             ("the notation plate", Act::PickerFormat(PickerId::Tone)),
             ("the value plate", Act::PickerText(PickerId::Tone)),
             ("a ready-made colour", Act::PickerBase(PickerId::Tone, 0)),
@@ -13128,7 +13256,7 @@ mod tests {
             // the row does not grow — and the press is still a press.
             ("the bank cell again", Act::PickerAdd(PickerId::Tone)),
         ] {
-            s.perform(act, 0.5, 0.5);
+            s.perform(act, 0.5);
             assert_eq!(
                 s.heard.len(),
                 1,
@@ -13146,9 +13274,181 @@ mod tests {
             ("the notation plate", Act::PickerFormat(PickerId::Tone), Sfx::Click),
             ("the value plate", Act::PickerText(PickerId::Tone), Sfx::Click),
         ] {
-            s.perform(act, 0.5, 0.5);
+            s.perform(act, 0.5);
             assert_eq!(s.heard, vec![want], "{name} said the wrong thing");
         }
+        nacelle::theme::clear_preview();
+    }
+
+    fn escape_key() -> KeyEv {
+        KeyEv { key: FKey::Escape, mods: Mods::NONE, repeat: false, text: None }
+    }
+
+    fn enter_key() -> KeyEv {
+        KeyEv { key: FKey::Enter, mods: Mods::NONE, repeat: false, text: None }
+    }
+
+    /// Opening the value plate seeds the inline editor from what it
+    /// already shows, exactly `Picker::begin_edit`'s own contract, and
+    /// puts EXACTLY that picker in `editing_picker` — the "one at a time"
+    /// bookkeeping the field's own doc names.
+    #[test]
+    fn pressing_the_value_plate_opens_the_inline_editor_seeded_from_it() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        let seeded = s.pickers[PickerId::Edge.idx()].text();
+        assert!(s.editing_picker.is_none(), "nothing is open before the press");
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        assert_eq!(s.editing_picker, Some(PickerId::Edge));
+        assert!(s.pickers[PickerId::Edge.idx()].is_editing());
+        assert_eq!(
+            s.pickers[PickerId::Edge.idx()].editing_mut().unwrap().value(),
+            seeded
+        );
+        nacelle::theme::clear_preview();
+    }
+
+    /// Enter, on a value the picker's own parser reads, commits and
+    /// closes — and the colour reaches the FIELD this picker writes
+    /// (`Settings::commit_picker`), not merely the picker's own model, so
+    /// typing a colour behaves exactly like dragging one.
+    #[test]
+    fn enter_commits_a_good_value_reaches_the_field_and_closes_the_editor() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        let mut fc = FocusCtl::new();
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        s.pickers[PickerId::Edge.idx()]
+            .editing_mut()
+            .unwrap()
+            .set_value("#FF00FF00");
+        assert!(matches!(s.key(&enter_key(), &mut fc), KeyOut::Changed));
+        assert!(s.editing_picker.is_none(), "Enter on a good value closes the editor");
+        assert!(!s.pickers[PickerId::Edge.idx()].is_editing());
+        let c = s.pickers[PickerId::Edge.idx()].colour();
+        assert_eq!((q8(c.r), q8(c.g), q8(c.b)), (0x00, 0xFF, 0x00), "the picker took the typed colour");
+        assert_eq!(
+            s.edge,
+            hsv_track_of(c),
+            "the typed colour reached `edge`, the field this picker writes"
+        );
+        nacelle::theme::clear_preview();
+    }
+
+    fn q8(v: f32) -> u8 {
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// A bad parse on Enter STAYS OPEN, text untouched — the SAVE AS
+    /// prompt's own `if name.is_empty()` guard, read the other way round
+    /// (`Settings::key`'s own note on its editing-picker block).
+    #[test]
+    fn enter_on_a_bad_parse_stays_open_and_keeps_the_colour() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        let mut fc = FocusCtl::new();
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        let before = s.pickers[PickerId::Edge.idx()].colour();
+        s.pickers[PickerId::Edge.idx()]
+            .editing_mut()
+            .unwrap()
+            .set_value("not a colour");
+        assert!(matches!(s.key(&enter_key(), &mut fc), KeyOut::Consumed));
+        assert_eq!(s.editing_picker, Some(PickerId::Edge), "a bad parse leaves the editor OPEN");
+        assert_eq!(
+            s.pickers[PickerId::Edge.idx()].editing_mut().unwrap().value(),
+            "not a colour",
+            "the typed text is untouched"
+        );
+        assert_eq!(s.pickers[PickerId::Edge.idx()].colour(), before, "a bad parse never destroys the good value");
+        nacelle::theme::clear_preview();
+    }
+
+    /// Escape discards the typed text and reverts — nothing here ever
+    /// touched the colour, so "revert" is simply "never changed it".
+    #[test]
+    fn escape_cancels_the_inline_editor_without_touching_the_colour() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        let mut fc = FocusCtl::new();
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        let before = s.pickers[PickerId::Edge.idx()].colour();
+        s.pickers[PickerId::Edge.idx()]
+            .editing_mut()
+            .unwrap()
+            .set_value("#00000000");
+        assert!(matches!(s.key(&escape_key(), &mut fc), KeyOut::Consumed));
+        assert!(s.editing_picker.is_none());
+        assert!(!s.pickers[PickerId::Edge.idx()].is_editing());
+        assert_eq!(s.pickers[PickerId::Edge.idx()].colour(), before);
+        nacelle::theme::clear_preview();
+    }
+
+    /// A PRESS ELSEWHERE BLURS AND COMMITS — including a press on a
+    /// DIFFERENT picker entirely, which is the one place this design
+    /// deliberately diverges from the SAVE AS prompt's playbook (that
+    /// prompt covers the whole window, so a blur is structurally
+    /// impossible there; this editor does not, so it is a real event).
+    #[test]
+    fn a_press_on_a_different_picker_blurs_and_commits_the_open_editor() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        s.pickers[PickerId::Edge.idx()]
+            .editing_mut()
+            .unwrap()
+            .set_value("#FF112233");
+        // A slider on ACCENT — a different picker altogether.
+        s.perform(Act::PickerSlider(PickerId::Accent, 0), 0.5);
+        assert!(s.editing_picker.is_none(), "the other picker's press blurred the open editor");
+        assert!(!s.pickers[PickerId::Edge.idx()].is_editing());
+        let c = s.pickers[PickerId::Edge.idx()].colour();
+        assert_eq!((q8(c.r), q8(c.g), q8(c.b)), (0x11, 0x22, 0x33), "the blur committed the typed value");
+        assert_eq!(s.edge, hsv_track_of(c), "and it reached the field, the same as Enter does");
+        nacelle::theme::clear_preview();
+    }
+
+    /// A click that hits NOTHING is "elsewhere" too, and
+    /// `Settings::click`'s own "hit nothing" branch is the one path that
+    /// never reaches `Settings::perform`'s head guard — the gap that
+    /// branch exists to close.
+    #[test]
+    fn a_click_on_blank_space_blurs_the_open_editor() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        assert!(s.editing_picker.is_some());
+        s.hits.clear(); // nothing under the point below
+        assert!(!s.click(-1.0, -1.0, 1920.0, 1080.0, None));
+        assert!(s.editing_picker.is_none(), "a click that hits nothing still blurs");
+        nacelle::theme::clear_preview();
+    }
+
+    /// Pressing the SAME picker's own plate again, while it is already
+    /// open, is a no-op — it must not restart the typed text.
+    #[test]
+    fn pressing_the_same_plate_again_does_not_reset_the_typed_text() {
+        let _g = crate::widgets::theme_test_lock();
+        let mut s = editor_open();
+        s.pickers[PickerId::Edge.idx()].format = nacelle::object::color_picker::Format::Argb;
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        s.pickers[PickerId::Edge.idx()]
+            .editing_mut()
+            .unwrap()
+            .set_value("#8899AA");
+        s.perform(Act::PickerText(PickerId::Edge), 0.0);
+        assert_eq!(s.editing_picker, Some(PickerId::Edge), "still the same picker, still open");
+        assert_eq!(
+            s.pickers[PickerId::Edge.idx()].editing_mut().unwrap().value(),
+            "#8899AA",
+            "a second press on its own plate did not restart the typed text"
+        );
         nacelle::theme::clear_preview();
     }
 
@@ -13363,11 +13663,11 @@ mod tests {
     fn the_pickers_grids_choose_a_colour_and_bank_it_once() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         let base = nacelle::object::color_picker::base_colours();
         assert!(base.len() > 2, "the master ships a grid to press");
 
-        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0);
         assert_ne!(
             s.tone, TONE_REST,
             "pressing the accent, now far from the background, asked for no move"
@@ -13375,7 +13675,7 @@ mod tests {
 
         // A cell that is NOT the accent moves the theme, and the picker
         // shows exactly what was pressed.
-        s.perform(Act::PickerBase(PickerId::Tone, 2), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Tone, 2), 0.0);
         // Compared as the eight-bit colour a screen can show and a file
         // can spell: the control holds its colour in the field's own
         // coordinates, so a channel may come back a single float ulp
@@ -13393,13 +13693,13 @@ mod tests {
 
         // The bank: one cell per colour, however many times it is asked
         // for, and the colour banked is the one on screen.
-        s.perform(Act::PickerAdd(PickerId::Tone), 0.0, 0.0);
-        s.perform(Act::PickerAdd(PickerId::Tone), 0.0, 0.0);
+        s.perform(Act::PickerAdd(PickerId::Tone), 0.0);
+        s.perform(Act::PickerAdd(PickerId::Tone), 0.0);
         assert_eq!(s.picker_custom.len(), 1, "the bank kept the same colour twice");
         assert_eq!(hex(s.picker_custom[0]), hex(base[2]), "the bank kept another colour");
         // And a banked colour can be pressed back.
-        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0, 0.0);
-        s.perform(Act::PickerCustom(PickerId::Tone, 0), 0.0, 0.0);
+        s.perform(Act::PickerBase(PickerId::Tone, 0), 0.0);
+        s.perform(Act::PickerCustom(PickerId::Tone, 0), 0.0);
         assert_eq!(hex(s.pickers[PickerId::Tone.idx()].colour()), hex(base[2]), "the banked colour did not come back");
         nacelle::theme::clear_preview();
     }
@@ -13418,7 +13718,7 @@ mod tests {
         s.ring_on = true;
         s.current_ring_style = Some("DASHED".to_string());
 
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         // ADVANCED -> BASIC keeps the advanced page untouched: those
         // controls hold work that is in no file yet.
         assert_eq!(s.current_corner.as_deref(), Some("CHAMFER"), "the cut was lost");
@@ -13439,7 +13739,7 @@ mod tests {
             .iter()
             .find(|e| e.token == "palette.accent")
             .map(|e| e.value.clone());
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         assert!(!s.editor_basic);
         // THE FOLD. The sliders are back at rest — the move has become
         // part of what they are now relative to — and the advanced page
@@ -13519,10 +13819,10 @@ mod tests {
         // three — the loss above is the destination page's gamut and
         // nothing else. A small turn at the theme's own lightness.
         let mut inside = editor_open();
-        inside.perform(Act::EditorMode, 0.0, 0.0);
+        inside.perform(Act::EditorMode, 0.0);
         inside.tone[0] = 20;
         let basic_small = oklch_of(&inside.editor_edits()).expect("no accent");
-        inside.perform(Act::EditorMode, 0.0, 0.0);
+        inside.perform(Act::EditorMode, 0.0);
         let folded_small = oklch_of(&inside.editor_edits()).expect("no accent");
         assert!(
             (basic_small.0 - folded_small.0).abs() < 0.02
@@ -13539,8 +13839,8 @@ mod tests {
         // untouched role must keep the theme's own words, references
         // included.
         let mut quiet = editor_open();
-        quiet.perform(Act::EditorMode, 0.0, 0.0);
-        quiet.perform(Act::EditorMode, 0.0, 0.0);
+        quiet.perform(Act::EditorMode, 0.0);
+        quiet.perform(Act::EditorMode, 0.0);
         assert_eq!(
             quiet.severity_touched,
             [false; 7],
@@ -13619,7 +13919,7 @@ mod tests {
             // back. Out: the fold hands the move to ADVANCED, which
             // previews the same ten authors through its own tracks. Both
             // directions are on this path, and both used to move it.
-            s.perform(Act::EditorMode, 0.0, 0.0);
+            s.perform(Act::EditorMode, 0.0);
             let inside = lch(live("palette.accent"));
             assert!(
                 (inside.l - start.l).abs() < 0.004,
@@ -13638,7 +13938,7 @@ mod tests {
                 "visit {trip} moved `ok` and `critical` apart: {start_gap} -> {}",
                 sev_gap()
             );
-            s.perform(Act::EditorMode, 0.0, 0.0);
+            s.perform(Act::EditorMode, 0.0);
             let outside = lch(live("palette.accent"));
             // Four thousandths of L is what the ADVANCED page's
             // whole-number HSV tracks cost a colour on the way through
@@ -13673,9 +13973,9 @@ mod tests {
         turned.editor_basic = false;
         let base = lch(live("palette.accent"));
         for step in 1..=6u32 {
-            turned.perform(Act::EditorMode, 0.0, 0.0);
+            turned.perform(Act::EditorMode, 0.0);
             turned.tone[0] = 20;
-            turned.perform(Act::EditorMode, 0.0, 0.0);
+            turned.perform(Act::EditorMode, 0.0);
             let now = lch(live("palette.accent"));
             // Two hundredths, and the number is the ADVANCED page's own
             // rounding: the fold lands on whole-number HSV tracks, so a
@@ -13786,7 +14086,7 @@ mod tests {
         // authors are a move measured from seeds taken off the live bake,
         // so a set that moved by its own last move would climb instead of
         // blinking — the same fault wearing another face.
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         assert!(s.editor_basic, "the switch did not reach BASIC");
         s.tone[0] = 40;
         let first = pulse(&s);
@@ -14656,7 +14956,7 @@ mod tests {
     fn the_basic_notch_comes_from_the_colour_depth() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
-        s.perform(Act::EditorMode, 0.0, 0.0);
+        s.perform(Act::EditorMode, 0.0);
         let seeds = s.tone_seeds.expect("no seeds");
         assert!(seeds.accent.c > 0.0, "the master's accent is grey — the test is blind");
         // The seed's chroma is what the two derived notches divide by, so
@@ -16149,7 +16449,7 @@ mod tests {
             let mut s = furnished();
             s.view = View::LookFeel;
             s.dropdown = Some(Dropdown::List(ListId::Looks));
-            s.perform(act, 0.0, 0.0);
+            s.perform(act, 0.0);
             assert!(
                 s.dropdown.is_none(),
                 "a list stayed open behind the page a navigation entry opened"
@@ -16528,7 +16828,7 @@ mod tests {
 
         // THE PRESS. It turns the fold over and leaves the page alone.
         let was = s.view;
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(s.view == was, "pressing a section walked off the page as well");
         let (hits, chain) = frame(&mut s, &mut fonts);
         for act in &pages {
@@ -16546,7 +16846,7 @@ mod tests {
 
         // AND A SECOND PRESS SHUTS IT AGAIN, which is what makes it a
         // toggle rather than a one-way door.
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(s.view == was, "shutting the section walked off the page");
         let (hits, chain) = frame(&mut s, &mut fonts);
         for act in &pages {
@@ -16580,12 +16880,12 @@ mod tests {
         let mut fonts = nacelle::font::FontSystem::new();
         let mut s = furnished();
         s.show();
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(s.rail_open(Act::OpenLookFeel), "the section did not open");
 
         // Away to a section of its own — GRID is a section that IS its
         // page, so nothing about it has an opinion on this fold.
-        s.perform(Act::OpenGrid, 0.0, 0.0);
+        s.perform(Act::OpenGrid, 0.0);
         assert!(s.view == View::Grid, "the rail's other entry stopped being a door");
         assert!(
             s.rail_open(Act::OpenLookFeel),
@@ -16605,9 +16905,9 @@ mod tests {
 
         // AND ARRIVING SOMEWHERE OPENS NOTHING. Back into the section by
         // its own page, with the fold put away first.
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(!s.rail_open(Act::OpenLookFeel), "the fold would not shut");
-        s.perform(Act::OpenSets, 0.0, 0.0);
+        s.perform(Act::OpenSets, 0.0);
         assert!(s.view == View::LookFeel, "the section's own page stopped opening");
         assert!(
             !s.rail_open(Act::OpenLookFeel),
@@ -16739,7 +17039,7 @@ mod tests {
         nacelle::theme::clear_preview();
         let mut s = furnished();
         s.show();
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(s.rail_open(Act::OpenLookFeel), "the section did not open");
         s.close();
         s.show();
@@ -16748,7 +17048,7 @@ mod tests {
             "the settings window came back with yesterday's folds"
         );
 
-        s.perform(Act::OpenLookFeel, 0.0, 0.0);
+        s.perform(Act::OpenLookFeel, 0.0);
         assert!(s.rail_open(Act::OpenLookFeel), "the section did not open again");
         s.close();
         s.show_grid();
@@ -19315,7 +19615,11 @@ mod tests {
             // and the two are checked against each other by the sweep
             // that calls both.
             Ctrl::Picker(id) => nacelle::object::color_picker::parts(
-                &nacelle::object::color_picker::layout(Rect::new(0.0, 0.0, 0.0, 0.0), s.picker_custom.len()),
+                &nacelle::object::color_picker::layout(
+                    Rect::new(0.0, 0.0, 0.0, 0.0),
+                    s.pickers[id.idx()].slider_count(),
+                    s.picker_custom.len(),
+                ),
             )
             .into_iter()
             .map(|(part, _)| picker_act(*id, part))
