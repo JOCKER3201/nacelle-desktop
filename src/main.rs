@@ -3907,7 +3907,16 @@ fn run_resolution_dialog(
         .with_resizable(false)
         .build(&event_loop)
         .expect("cannot create window");
-    let mut gfx = nacelle_renderer::Gfx::new(&window, window.inner_size().width, window.inner_size().height);
+    // Fallible since the renderer's resilience work — and THIS window is
+    // the one place a failure has nowhere softer to land: the dialog is
+    // the whole program on a too-small monitor, so no renderer here
+    // means saying so and exiting, which `expect` does.
+    let mut gfx = nacelle_renderer::Gfx::new(
+        &window,
+        window.inner_size().width,
+        window.inner_size().height,
+    )
+    .expect("nacelle-desktop: no renderer for the resolution dialog");
     // The dialog is drawn with the toolkit and hands `shapes()` to the
     // same renderer, so it reads `render.vector` like every other list.
     // A window that told the user the resolution was refused, and drew

@@ -209,12 +209,14 @@ fn chrome_of(v: View) -> Chrome {
 /// is merely wrong instead of a compile error.
 ///
 /// Most of these variants lost their row in 2026-08-23's picker-only
-/// simplification of `EDITOR_ROWS` (the ADVANCED page), the same change
-/// [`EdgeWidth`](Knob::EdgeWidth) already explains: `editor_edits` still
-/// answers every one of them correctly for the `Settings` fields that
-/// feed it, and the tests pinning that answer are the reason the variant
-/// stays a working, tested read on the model rather than a stub waiting
-/// to be reinvented if a control for it returns.
+/// simplification of `EDITOR_ROWS` (the ADVANCED page): `editor_edits`
+/// still answers every one of them correctly for the `Settings` fields
+/// that feed it, and the tests pinning that answer are the reason each
+/// variant stayed a working, tested read on the model rather than a stub
+/// waiting to be reinvented if a control for it returns — which is
+/// exactly what happened to [`EdgeWidth`](Knob::EdgeWidth) on
+/// 2026-08-25, BORDER SIZE's own row reusing it whole. The rest are
+/// still waiting, which is what the blanket allow below is for.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Knob {
@@ -223,14 +225,13 @@ enum Knob {
     /// the global kerf 72 derivations share and which this page already
     /// offers under HAIRLINE.
     ///
-    /// No row constructs this any more (BORDER WIDTH left BASIC
-    /// 2026-08-23, at the owner's word, and never stood on ADVANCED) —
-    /// kept, and allowed, rather than torn out: `border_width_edit` and
-    /// the two tests pinning it (`the_borders_thickness_and_its_lights_
-    /// reach_are_two_answers...`, `a_light_that_is_not_drawn_is_not_
-    /// asked_how_far_it_reaches`) are a real, working answer to ZGŁOSZENIE
-    /// 6 that a future row can reuse without re-deriving it.
-    #[allow(dead_code)]
+    /// BORDER SIZE reads and writes this (BASIC, 2026-08-25) — back
+    /// after standing rowless from 2026-08-23, when it left unconditionally
+    /// and never stood on ADVANCED in between. `border_width_edit` and the
+    /// two tests pinning it (`the_borders_thickness_and_its_lights_reach_
+    /// are_two_answers...`, `a_light_that_is_not_drawn_is_not_asked_how_
+    /// far_it_reaches`) were the working, tested answer the new row
+    /// reused rather than re-derived.
     EdgeWidth,
     /// How far a lit border's light reaches — `glow.panel_edge.radius`,
     /// the second reading. Only on screen with a kind that lights
@@ -1358,7 +1359,11 @@ impl ListId {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
             ListId::Sounds => "SOUNDS",
-            ListId::Borders => "BORDER",
+            // NOT "border". The border itself is constant since the
+            // 2026-08-25 split — colour, BORDER SIZE, corners, always
+            // drawn — and this list chooses only the light laid on it
+            // (NONE, GLOW, NEON), so the word the eye reads says so.
+            ListId::Borders => "BORDER EFFECT",
             ListId::Backgrounds => "BACKGROUND",
             ListId::Severities => "SEVERITY ROLE",
             // NOT "corner cut". The set it offers is SQUARE, ROUND and
@@ -1384,7 +1389,7 @@ impl ListId {
             // Unreachable while the kinds are built in, and stated
             // anyway: an empty list is a state this type has to have a
             // word for, not a case to leave to whatever draws it.
-            ListId::Borders => "NO BORDER KINDS",
+            ListId::Borders => "NO BORDER EFFECTS",
             ListId::Backgrounds => "NO BACKGROUND KINDS",
             ListId::Severities => "NO SEVERITY ROLES",
             ListId::Corners => "NO CORNER SHAPES",
@@ -1743,7 +1748,7 @@ fn bg_chosen(s: &Settings) -> bool {
 }
 
 /// Whether the border kind standing is one that LIGHTS. The condition on
-/// BASIC's GLOW REACH row: LINE draws no light, so how far its light goes
+/// BASIC's EFFECT SIZE row: NONE draws no light, so how far its light goes
 /// is a question about nothing (`Row::when`, and not a greyed-out row —
 /// the owner asked for absent).
 fn border_lit(s: &Settings) -> bool {
@@ -2382,7 +2387,8 @@ fn editor_advanced(s: &Settings) -> bool {
 /// — `Row::when` and not a greyed-out row, which is what the owner asked
 /// for in as many words ("nie wyszarzonej, tylko nieobecnej"):
 ///
-/// * GLOW REACH — with GLOW and NEON ([`border_lit`]).
+/// * EFFECT SIZE (GLOW REACH until 2026-08-25) — with GLOW and NEON
+///   ([`border_lit`]).
 /// * OPACITY — with a background kind chosen ([`bg_chosen`]). The SAME
 ///   control ADVANCED wears, writing the same field, exactly as the three
 ///   lists are the same control on both pages. What differs is HOW FAR IT
@@ -2390,24 +2396,29 @@ fn editor_advanced(s: &Settings) -> bool {
 ///   [`Settings::editor_edits`], not here.
 /// * CORNER SIZE — with a cut that has a size ([`corner_sized`]).
 ///
-/// BORDER WIDTH stood here until 2026-08-23, unconditionally (every kind
-/// draws a line) — removed at the owner's word. `Knob::EdgeWidth`,
-/// `edge_width` and `edge_width_touched` stay: `border_width_edit` still
-/// answers `editor_edits` when `edge_width_touched` is set, which nothing
-/// in BASIC does any more, so a save leaves the token exactly as the
-/// theme already had it. Nothing else in this window sets that flag.
-static EDITOR_BASIC_ROWS: [Row; 11] = [
+/// BORDER SIZE is the one row here NOT under a `Row::when`: every kind
+/// draws a line, lit or not, so its condition is always true and it
+/// stands unconditionally, the way it did before it left on 2026-08-23
+/// and the way it stands again since 2026-08-25 — under EFFECT SIZE now
+/// rather than above every kind-specific row, `Knob::EdgeWidth` reusing
+/// the `edge_width`/`edge_width_touched` fields and the `border_width_
+/// edit` answer in [`Settings::editor_edits`] that never left with it.
+static EDITOR_BASIC_ROWS: [Row; 12] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Borders }),
     row_shown(
         Ctrl::Slider {
-            label: "GLOW REACH",
+            label: "EFFECT SIZE",
             act: Act::EditorTrack(Knob::GlowReach),
             unit: Unit::None,
-            // 0..100 over the master's OWN declared range for
-            // `glow.panel_edge.radius`: `u, 0u .. 4u`.
+            // 0..100 over 0u..8.76u, the token's own declared range.
+            // The top first landed on 2.19u — 4mm on the AORUS FO32U2P
+            // (3840x2160, 699.48x394.73mm viewable, pixel pitch
+            // back-solved from that) at the reference bake's 10.0 px/u
+            // — and the owner raised it by 300% the same day
+            // (2026-08-25, "po jednej i drugiej stronie"): 2.19u * 4.
             range: (0, 100),
             step: step_1,
             get: |s| s.glow_reach,
@@ -2419,6 +2430,29 @@ static EDITOR_BASIC_ROWS: [Row; 11] = [
         },
         border_lit,
     ),
+    // BORDER SIZE, back on this page (2026-08-25, the owner's word — it
+    // stood here unconditionally until 2026-08-23, when it left; see
+    // `Knob::EdgeWidth`'s own doc for the plumbing that never left with
+    // it). Unconditional again, under EFFECT SIZE rather than above it:
+    // every kind draws a line, lit or not, so there is no `Row::when` to
+    // gate it on. `border.edge.width`, NOT the global `stroke.hair` kerf
+    // 72 other derivations share.
+    row(Ctrl::Slider {
+        label: "BORDER SIZE",
+        act: Act::EditorTrack(Knob::EdgeWidth),
+        unit: Unit::None,
+        // 0..100 over 0u..1u — the wall `the_borders_thickness_and_
+        // its_lights_reach_are_two_answers...` already pins: past the
+        // master's own heaviest stroke, `[stroke] bold = 0.7u`.
+        range: (0, 100),
+        step: step_1,
+        get: |s| s.edge_width,
+        set: |s, v| {
+            s.edge_width = v;
+            s.edge_width_touched = true;
+        },
+        save: |s| s.apply_editor_preview(),
+    }),
     row_after(Ctrl::Section { title: "BACKGROUND" }, Gap::None),
     row(Ctrl::Drop { list: ListId::Backgrounds }),
     // OPACITY is BACK on this page (2026-08-19, owner's second word: the
@@ -3893,7 +3927,8 @@ pub struct Settings {
     edge_width: u32,
     edge_width_touched: bool,
     /// `glow.panel_edge.radius` — how far a lit border's light reaches,
-    /// 0..100 over the master's declared 0u..4u, and whether a hand has
+    /// 0..100 over 0u..8.76u (EFFECT SIZE's own wall, the token's whole
+    /// declared range — see its row's doc), and whether a hand has
     /// moved it.
     ///
     /// The mark is doubly load-bearing here: an unmarked write would also
@@ -4187,8 +4222,14 @@ impl Settings {
             cur_weight: [None, None],
             cur_size: [100, 100],
             editor_pulse: None,
+            // NONE was LINE until 2026-08-25, when the owner split the
+            // border from its effect: the border itself is constant —
+            // colour, BORDER SIZE, corners, always drawn — and this
+            // list picks only the LIGHT laid on it. The first entry is
+            // the absence of an effect, and its old name claimed it was
+            // a kind of border instead.
             border_kinds: vec![
-                "LINE".to_string(),
+                "NONE".to_string(),
                 "GLOW".to_string(),
                 "NEON".to_string(),
             ],
@@ -5165,7 +5206,9 @@ impl Settings {
         // 1.6u floor on this very token: a number a person moved outranks
         // a floor the model put under a switch.
         if self.glow_reach_touched && border_lit(self) {
-            set_edit(&mut edits, glow_reach_edit(Scope::Theme, scale_of(self.glow_reach, 4.0)));
+            // 8.76u — the token's whole declared range, see EFFECT
+            // SIZE's row doc for the derivation.
+            set_edit(&mut edits, glow_reach_edit(Scope::Theme, scale_of(self.glow_reach, 8.76)));
         }
         // The background joins the same set. `None` means the list was
         // never touched and the theme's own background stands — the same
@@ -5475,7 +5518,9 @@ impl Settings {
         // which one is in force.
         self.current_border = Some(
             if !flag("glow.panel_edge.enabled") {
-                "LINE"
+                // NONE, the effect's own absence — LINE until the
+                // 2026-08-25 border/effect split renamed it.
+                "NONE"
             } else if word("glow.panel_edge.falloff").as_deref() == Some("tube") {
                 "NEON"
             } else {
@@ -5498,12 +5543,13 @@ impl Settings {
             px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
         // ZGŁOSZENIE 6's two numbers, seeded like every other control on
         // this page: off the theme, and MARKED UNTOUCHED, so a visit that
-        // moves neither leaves neither in the saved file. Both walls are
-        // the master's own (`[stroke] bold = 0.7u`; `panel_edge.radius`
-        // declares `0u .. 4u`), stated once here and once in the row.
+        // moves neither leaves neither in the saved file. The width's wall
+        // is the master's own (`[stroke] bold = 0.7u`), stated once here
+        // and once in the row. EFFECT SIZE's is the token's whole
+        // declared `0u..8.76u` — see that row's own doc.
         self.edge_width = scale_back(px("border.edge.width") / unit, 1.0);
         self.edge_width_touched = false;
-        self.glow_reach = scale_back(px("glow.panel_edge.radius") / unit, 4.0);
+        self.glow_reach = scale_back(px("glow.panel_edge.radius") / unit, 8.76);
         self.glow_reach_touched = false;
         self.ring_halo_dressed =
             px("glow.focus_ring.radius") > 0.0 && px("glow.focus_ring.alpha") > 0.0;
@@ -12037,7 +12083,7 @@ mod tests {
     /// the bar fading over a drawn groove. What the reachability sweep
     /// and the group test both mean by "everything on screen".
     fn editor_ajar(s: &mut Settings) {
-        // A kind that LIGHTS, so BASIC's GLOW REACH row is one of the
+        // A kind that LIGHTS, so BASIC's EFFECT SIZE row is one of the
         // rows a sweep walks (ZGŁOSZENIE 6b, `border_lit`).
         s.current_border = Some("NEON".to_string());
         s.current_background = Some("FROSTED GLASS".to_string());
@@ -12460,12 +12506,12 @@ mod tests {
         theme::resolved();
         let mut s = furnished();
         s.editor_basic = true;
-        for (kind, lit) in [("LINE", false), ("GLOW", true), ("NEON", true)] {
+        for (kind, lit) in [("NONE", false), ("GLOW", true), ("NEON", true)] {
             s.current_border = Some(kind.to_string());
             assert_eq!(
                 basic_shows(&s, Act::EditorTrack(Knob::GlowReach)),
                 lit,
-                "on {kind} the GLOW REACH row should {} the page",
+                "on {kind} the EFFECT SIZE row should {} the page",
                 if lit { "stand on" } else { "be absent from" }
             );
             // BORDER WIDTH stood here, unconditionally, until 2026-08-23 —
@@ -12604,7 +12650,11 @@ mod tests {
             "the reach a person set did not beat the floor the kind lays — a number \
              somebody moved must outrank a default put under a switch"
         );
-        assert!((u_of(&reach) - 1.0).abs() < 1e-6, "25 of 100 over 4u is 1u, not {reach}");
+        // 2.19u exactly: a quarter of the 8.76u wall.
+        assert!(
+            (u_of(&reach) - 2.19).abs() < 1e-6,
+            "25 of 100 over EFFECT SIZE's 8.76u wall is 2.19u, not {reach}"
+        );
         // And ONE assignment for it, or a saved file carries the key twice
         // in one section.
         assert_eq!(
@@ -12615,10 +12665,10 @@ mod tests {
         // A reach set on a kind that draws no light is not written at all:
         // the row is not on screen there, and a value left behind by an
         // off-screen row would reach the file all the same.
-        s.current_border = Some("LINE".to_string());
+        s.current_border = Some("NONE".to_string());
         assert!(
             wrote(&s.editor_edits(), "glow.panel_edge.radius").is_none(),
-            "LINE wrote a reach for a light it does not draw"
+            "NONE wrote a reach for a light it does not draw"
         );
         nacelle::theme::clear_preview();
     }
@@ -14305,7 +14355,7 @@ mod tests {
             nacelle::theme::clear_preview();
             assert_eq!(
                 s.current_border.as_deref(),
-                Some("LINE"),
+                Some("NONE"),
                 "an unlit border wearing a leftover `{word}` opened lit"
             );
         }

@@ -407,7 +407,13 @@ impl Screen {
         // Minimum window size in landscape orientation.
         window.set_min_inner_size(Some(winit::dpi::PhysicalSize::new(1280u32, 720u32)));
         let size = window.inner_size();
-        let gfx = nacelle_renderer::Gfx::new(&window, size.width, size.height);
+        // Fallible since the renderer's resilience work (c12378c's main):
+        // a screen whose surface cannot be built is SKIPPED with its
+        // reason on stderr, not a desktop that never comes up — the same
+        // shape as every other `.ok()?` on this road.
+        let gfx = nacelle_renderer::Gfx::new(&window, size.width, size.height)
+            .map_err(|e| eprintln!("nacelle-desktop: no renderer for this screen: {e:?}"))
+            .ok()?;
         let key = screen_key(&window);
         // The band around this screen's panels, asked once and handed to
         // both the boards and the editor drawn over them. The editor may
@@ -926,7 +932,20 @@ fn install_plate(
                 if let Some((old, _, _)) = tex.take() {
                     gfx.destroy_texture(old);
                 }
-                *tex = Some((gfx.create_texture(p.w, p.h), p.w, p.h));
+                // Fallible since the renderer's resilience work: a plate
+                // that cannot get a texture is a decoration skipped this
+                // frame, with its reason said — never a dead desktop.
+                match gfx.create_texture(p.w, p.h) {
+                    Some(id) => *tex = Some((id, p.w, p.h)),
+                    None => {
+                        eprintln!(
+                            "nacelle-desktop: no texture for the {which} plate \
+                             ({}x{}), skipping it",
+                            p.w, p.h
+                        );
+                        return;
+                    }
+                }
             }
             if let Some((id, _, _)) = *tex {
                 gfx.update_texture(id, &p.rgba);
