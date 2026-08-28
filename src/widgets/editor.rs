@@ -1795,10 +1795,6 @@ mod tests {
             }
             let roots = nacelle::assets::AssetRoots::new(vec![stage.clone()], stage);
             let factory = [
-                nacelle_widget_aichat::WIDGET,
-                nacelle_widget_ailoop::WIDGET,
-                nacelle_widget_aiphoto::WIDGET,
-                nacelle_widget_aisort::WIDGET,
                 nacelle_widget_appcats::WIDGET,
                 nacelle_widget_appgrid::WIDGET,
                 nacelle_widget_control::WIDGET,

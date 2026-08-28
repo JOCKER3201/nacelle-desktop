@@ -29,15 +29,6 @@ nacelle-widget-keyboard = { git = "https://github.com/JOCKER3201/nacelle-addons"
 nacelle-widget-filesystem = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 nacelle-widget-search = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
 
-# The four AI panels of the search_and_ai board — thin clients of the
-# nacelle-ai daemon, linked in exactly like the core widgets above. The
-# old single nacelle-widget-ai they replace is gone from the addons
-# repository altogether.
-nacelle-widget-aichat = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
-nacelle-widget-ailoop = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
-nacelle-widget-aiphoto = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
-nacelle-widget-aisort = { git = "https://github.com/JOCKER3201/nacelle-addons", default-features = false }
-
 # The configuration file (src/config/model.rs). Rusty Object Notation
 # carries Rust's own types — enum variants, tuples, named structs — so
 # the parser is DERIVED from the shape of the settings instead of being
