@@ -103,12 +103,21 @@ pub const REAP: &str = "nacelle-reap";
 /// [`CONF`] is here for — an audit will meet this one running too.
 pub const A11Y_PORTAL: &str = "nacelle-a11y";
 
+/// A video wallpaper's decoder (`wallpaper_video.rs`): opens `ffmpeg`
+/// and stays alive for as long as that wallpaper is chosen, pulling one
+/// frame at a time and sleeping between them by the clip's own frame
+/// rate — the [`A11Y_PORTAL`]/[`CONF`] shape again, a thread an audit
+/// will find running, this time for as long as a video wallpaper is
+/// the theme's own choice rather than for the life of the process.
+pub const WALLPAPER_VIDEO: &str = "nacelle-wpvid";
+
 /// The roll call: every name above, gathered so the tests can check them
 /// all at once. It carries no run-time duty — a thread is started by
 /// naming its own constant — so it is built only for the test binary,
 /// and a test below makes sure it never falls behind the table.
 #[cfg(test)]
-pub const ALL: [&str; 8] = [AUDIO, TELEMETRY, PTY, PLATE, CONF, AUDIO_JOIN, REAP, A11Y_PORTAL];
+pub const ALL: [&str; 9] =
+    [AUDIO, TELEMETRY, PTY, PLATE, CONF, AUDIO_JOIN, REAP, A11Y_PORTAL, WALLPAPER_VIDEO];
 
 /// Starts a named thread. The only way this program makes one.
 ///

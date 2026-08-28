@@ -322,6 +322,22 @@ pub struct Screen {
     /// THIRD, independent layer `deco::board_ground` composites, not a
     /// replacement for either.
     wallpaper: Option<(ImageId, u32, u32)>,
+    /// The VIDEO half of the same slot — `wallpaper_video.rs`'s own
+    /// decoder streams into this texture instead of `wallpaper` above
+    /// when `[backdrop] image` names an `.mp4`/`.webm`/`.mkv` file;
+    /// [`wallpaper_id`](Self::wallpaper_id) prefers it when both could
+    /// answer, though only one ever really holds a picture at once — a
+    /// path is either a video or it is the still-image bake's business.
+    wallpaper_video: Option<(ImageId, u32, u32)>,
+    /// Which file the running decoder (if any) is playing, so a theme
+    /// edit that leaves `backdrop.image` untouched does not restart the
+    /// clip from its first frame every time something else changes.
+    wallpaper_video_path: Option<std::path::PathBuf>,
+    /// The live decoder's mailbox — see `wallpaper_video`'s own module
+    /// docs for why a mailbox and not a channel, and for how dropping
+    /// this is the one thing that stops the thread on the other end of
+    /// it.
+    wallpaper_video_mailbox: Option<std::sync::Arc<std::sync::Mutex<Option<crate::wallpaper_video::VideoFrame>>>>,
     /// (theme epoch, w, h) the bake was last kicked for.
     plate_key: Option<(u32, u32, u32)>,
     plate_rx: Option<Receiver<PlatePair>>,
@@ -466,6 +482,9 @@ impl Screen {
             backdrop: None,
             overlay: None,
             wallpaper: None,
+            wallpaper_video: None,
+            wallpaper_video_path: None,
+            wallpaper_video_mailbox: None,
             plate_key: None,
             plate_rx: None,
             atlas_behind: None,
@@ -796,6 +815,12 @@ impl Screen {
     /// it is milliseconds of CPU at a screen-sized image, and a frame
     /// may not wait for it.
     pub fn poll_plates(&mut self) {
+        // Every frame, not gated on the theme/size key below: a video
+        // wallpaper has a new picture to show on most of them, where
+        // the still-image plates only do on a change. Ahead of the
+        // early return just under it, or a steady frame — the common
+        // case — would never reach it.
+        self.poll_wallpaper_video();
         let size = self.window.inner_size();
         // `content_epoch`, not `epoch`, and this is the SECOND place that
         // distinction has cost us. `epoch` names WHICH BAKE IS PUBLISHED,
@@ -859,9 +884,48 @@ impl Screen {
     /// — `deco::board_ground`'s own WALLPAPER slot, `None` while
     /// `[backdrop] source` is not `image` (`bake_wallpaper` itself
     /// answers `None` then, the same "no plate, no quad" `install_plate`
-    /// already reads for `backdrop`/`overlay`).
+    /// already reads for `backdrop`/`overlay`). The VIDEO texture wins
+    /// when both could answer — in practice only one ever really holds
+    /// a picture, since a path is either a video or the still bake's.
     pub fn wallpaper_id(&self) -> Option<ImageId> {
-        self.wallpaper.map(|(id, _, _)| id)
+        self.wallpaper_video
+            .map(|(id, _, _)| id)
+            .or_else(|| self.wallpaper.map(|(id, _, _)| id))
+    }
+
+    /// Detects whether the theme's own `backdrop.image` now names a
+    /// video file, (re)starts the decoder when the path changed, and
+    /// streams whatever frame is waiting in its mailbox to a texture.
+    /// Called every frame from [`poll_plates`](Self::poll_plates), not
+    /// gated on a theme/size epoch the way the still-image bake is: a
+    /// clip has a new picture to show on most of them.
+    fn poll_wallpaper_video(&mut self) {
+        let want = current_wallpaper_video_path();
+        if want != self.wallpaper_video_path {
+            // Dropping the old mailbox is what stops that decoder's
+            // thread — see `wallpaper_video`'s own module docs for why
+            // a dropped `Arc` is the whole of the shutdown signal.
+            self.wallpaper_video_mailbox = None;
+            if let Some((old, _, _)) = self.wallpaper_video.take() {
+                self.gfx.destroy_texture(old);
+            }
+            self.wallpaper_video_path = want.clone();
+            if let Some(path) = want {
+                match crate::wallpaper_video::spawn_decoder(path.clone()) {
+                    Ok(mailbox) => {
+                        eprintln!("nacelle-desktop: wallpaper video {} started", path.display());
+                        self.wallpaper_video_mailbox = Some(mailbox);
+                    }
+                    Err(e) => eprintln!(
+                        "nacelle-desktop: wallpaper video {} could not start ({e})",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        let Some(mailbox) = &self.wallpaper_video_mailbox else { return };
+        let Some(frame) = mailbox.lock().unwrap().take() else { return };
+        update_video_texture(&mut self.gfx, &mut self.wallpaper_video, &frame);
     }
 
     // ---- what the renderer is told, screen by screen ----------------
@@ -934,6 +998,61 @@ impl Screen {
             atlas,
             [clear.r, clear.g, clear.b, 1.0],
         );
+    }
+}
+
+/// The theme's own `backdrop.image`, read directly off the live theme —
+/// not through the settings window's editor session, which may not even
+/// be open. `None` unless `backdrop.source` is `image` AND the path
+/// names one of the three video containers `wallpaper_video` plays; a
+/// still-image path (or an empty one, or `source = solid`) answers
+/// `None` here on purpose — `theme::backdrop::bake_wallpaper` is that
+/// case's own reader, in `poll_plates`' worker.
+fn current_wallpaper_video_path() -> Option<std::path::PathBuf> {
+    let source = nacelle::theme::id("backdrop.source").and_then(nacelle::theme::enum_word_of);
+    if source.as_deref() != Some("image") {
+        return None;
+    }
+    let raw = nacelle::theme::diagnostics().text("backdrop.image")?.to_string();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(raw);
+    crate::wallpaper_video::is_video_path(&path).then_some(path)
+}
+
+/// [`install_plate`]'s own create/update shape, without its per-call
+/// log line — a video wallpaper calls this up to sixty times a second,
+/// where a still-image plate calls `install_plate` once per theme or
+/// size change, and `install_plate`'s "{which} plate baked in {ms} ms"
+/// line is written for the second case, not the first (`poll_wallpaper_
+/// video` logs once, when the decoder itself starts, instead).
+fn update_video_texture(
+    gfx: &mut nacelle_renderer::Gfx,
+    tex: &mut Option<(ImageId, u32, u32)>,
+    frame: &crate::wallpaper_video::VideoFrame,
+) {
+    let stale = match *tex {
+        Some((_, tw, th)) => (tw, th) != (frame.w, frame.h),
+        None => true,
+    };
+    if stale {
+        if let Some((old, _, _)) = tex.take() {
+            gfx.destroy_texture(old);
+        }
+        match gfx.create_texture(frame.w, frame.h) {
+            Some(id) => *tex = Some((id, frame.w, frame.h)),
+            None => {
+                eprintln!(
+                    "nacelle-desktop: no texture for the wallpaper video ({}x{}), skipping it",
+                    frame.w, frame.h
+                );
+                return;
+            }
+        }
+    }
+    if let Some((id, _, _)) = *tex {
+        gfx.update_texture(id, &frame.rgba);
     }
 }
 
