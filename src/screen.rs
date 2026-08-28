@@ -315,6 +315,13 @@ pub struct Screen {
     // ---- the theme's baked decoration, for THIS surface size --------
     backdrop: Option<(ImageId, u32, u32)>,
     overlay: Option<(ImageId, u32, u32)>,
+    /// `[backdrop] source = image`'s own plate — the picture BEHIND the
+    /// board, baked and uploaded on the same worker and the same
+    /// `plate_key` as `backdrop`/`overlay` (it reads the same theme, at
+    /// the same surface size), kept in its own field because it is a
+    /// THIRD, independent layer `deco::board_ground` composites, not a
+    /// replacement for either.
+    wallpaper: Option<(ImageId, u32, u32)>,
     /// (theme epoch, w, h) the bake was last kicked for.
     plate_key: Option<(u32, u32, u32)>,
     plate_rx: Option<Receiver<PlatePair>>,
@@ -328,7 +335,11 @@ pub struct Screen {
     atlas_synced: bool,
 }
 
-type PlatePair = (Option<nacelle::theme::Plate>, Option<nacelle::theme::Plate>);
+type PlatePair = (
+    Option<nacelle::theme::Plate>,
+    Option<nacelle::theme::Plate>,
+    Option<nacelle::theme::Plate>,
+);
 
 /// The gutter of ONE screen, in the only form the layout editor takes.
 ///
@@ -454,6 +465,7 @@ impl Screen {
             pad,
             backdrop: None,
             overlay: None,
+            wallpaper: None,
             plate_key: None,
             plate_rx: None,
             atlas_behind: None,
@@ -808,6 +820,7 @@ impl Screen {
                 let _ = tx.send((
                     nacelle::theme::plate::bake_backdrop(pw, ph),
                     nacelle::theme::plate::bake_overlay(pw, ph),
+                    nacelle::theme::backdrop::bake_wallpaper(pw, ph),
                 ));
             });
             if baker.is_err() {
@@ -827,18 +840,28 @@ impl Screen {
                 self.plate_rx = None;
             }
         }
-        let Some((back, over)) = self.plate_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+        let Some((back, over, wall)) = self.plate_rx.as_ref().and_then(|rx| rx.try_recv().ok())
         else {
             return;
         };
         self.plate_rx = None;
         install_plate(&mut self.gfx, &mut self.backdrop, back, "backdrop");
         install_plate(&mut self.gfx, &mut self.overlay, over, "overlay");
+        install_plate(&mut self.gfx, &mut self.wallpaper, wall, "wallpaper");
     }
 
     /// The overlay plate — the LAST themed thing in a frame's list.
     pub fn overlay_id(&self) -> Option<ImageId> {
         self.overlay.map(|(id, _, _)| id)
+    }
+
+    /// The wallpaper plate, for the board ground under everything else
+    /// — `deco::board_ground`'s own WALLPAPER slot, `None` while
+    /// `[backdrop] source` is not `image` (`bake_wallpaper` itself
+    /// answers `None` then, the same "no plate, no quad" `install_plate`
+    /// already reads for `backdrop`/`overlay`).
+    pub fn wallpaper_id(&self) -> Option<ImageId> {
+        self.wallpaper.map(|(id, _, _)| id)
     }
 
     // ---- what the renderer is told, screen by screen ----------------
