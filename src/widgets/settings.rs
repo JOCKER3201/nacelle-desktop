@@ -233,11 +233,6 @@ enum Knob {
     /// far_it_reaches`) were the working, tested answer the new row
     /// reused rather than re-derived.
     EdgeWidth,
-    /// How far a lit border's light reaches — `glow.panel_edge.radius`,
-    /// the second reading. Only on screen with a kind that lights
-    /// (`Row::when`), because a reach for a light nobody draws is a
-    /// question about nothing.
-    GlowReach,
     /// The whole effect's opacity, every kind — and the editor's ONE
     /// transparency, standing on BOTH pages since 2026-08-18.
     ///
@@ -539,7 +534,6 @@ fn focus_id(act: Act) -> FocusId {
         EditorCornerStep => FocusId::of("settings.editor.corner.step"),
         EditorTrack(k) => FocusId::of(match k {
             Knob::EdgeWidth => "settings.editor.border.width",
-            Knob::GlowReach => "settings.editor.border.glow_reach",
             Knob::BgOpacity => "settings.editor.bg.opacity",
             Knob::BgDepth => "settings.editor.bg.depth",
             Knob::BgCoverage => "settings.editor.bg.coverage",
@@ -576,7 +570,6 @@ fn focus_id(act: Act) -> FocusId {
             ListId::Looks => "settings.lookfeel.themes",
             ListId::Layauts => "settings.lookfeel.layauts",
             ListId::Sounds => "settings.lookfeel.sounds",
-            ListId::Borders => "settings.editor.border",
             ListId::Backgrounds => "settings.editor.background",
             ListId::Severities => "settings.editor.severity",
             ListId::Corners => "settings.editor.corner",
@@ -665,7 +658,6 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::Looks) => "settings.lookfeel.themes.list",
         Dropdown::List(ListId::Layauts) => "settings.lookfeel.layauts.list",
         Dropdown::List(ListId::Sounds) => "settings.lookfeel.sounds.list",
-        Dropdown::List(ListId::Borders) => "settings.editor.border.list",
         Dropdown::List(ListId::Backgrounds) => "settings.editor.background.list",
         Dropdown::List(ListId::Severities) => "settings.editor.severity.list",
         Dropdown::List(ListId::Corners) => "settings.editor.corner.list",
@@ -1287,12 +1279,10 @@ enum ListId {
     Looks,
     Layauts,
     Sounds,
-    /// The theme editor's border kind. Unlike the three above it names no
-    /// file: its members are the two shapes a border can take, and choosing
-    /// one lays a value over the theme instead of writing a config line.
-    Borders,
-    /// The editor's background kind — the same arrangement as `Borders`,
-    /// over the three shapes a surface's back can take.
+    /// The editor's background kind. Unlike the three above it names no
+    /// file: its members are the shapes a surface's back can take, and
+    /// choosing one lays a value over the theme instead of writing a
+    /// config line.
     Backgrounds,
     /// The severity role the picker under it pins — §5.10's closed
     /// set, offered whole because each role is its own author token.
@@ -1359,11 +1349,6 @@ impl ListId {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
             ListId::Sounds => "SOUNDS",
-            // NOT "border". The border itself is constant since the
-            // 2026-08-25 split — colour, BORDER SIZE, corners, always
-            // drawn — and this list chooses only the light laid on it
-            // (NONE, GLOW, NEON), so the word the eye reads says so.
-            ListId::Borders => "BORDER EFFECT",
             ListId::Backgrounds => "BACKGROUND",
             ListId::Severities => "SEVERITY ROLE",
             // NOT "corner cut". The set it offers is SQUARE, ROUND and
@@ -1389,7 +1374,6 @@ impl ListId {
             // Unreachable while the kinds are built in, and stated
             // anyway: an empty list is a state this type has to have a
             // word for, not a case to leave to whatever draws it.
-            ListId::Borders => "NO BORDER EFFECTS",
             ListId::Backgrounds => "NO BACKGROUND KINDS",
             ListId::Severities => "NO SEVERITY ROLES",
             ListId::Corners => "NO CORNER SHAPES",
@@ -1745,14 +1729,6 @@ const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
 
 fn bg_chosen(s: &Settings) -> bool {
     s.current_background.is_some()
-}
-
-/// Whether the border kind standing is one that LIGHTS. The condition on
-/// BASIC's EFFECT SIZE row: NONE draws no light, so how far its light goes
-/// is a question about nothing (`Row::when`, and not a greyed-out row —
-/// the owner asked for absent).
-fn border_lit(s: &Settings) -> bool {
-    matches!(s.current_border.as_deref(), Some("GLOW") | Some("NEON"))
 }
 
 /// Whether the corner cut standing is one that has a SIZE. The condition
@@ -2403,33 +2379,10 @@ fn editor_advanced(s: &Settings) -> bool {
 /// rather than above every kind-specific row, `Knob::EdgeWidth` reusing
 /// the `edge_width`/`edge_width_touched` fields and the `border_width_
 /// edit` answer in [`Settings::editor_edits`] that never left with it.
-static EDITOR_BASIC_ROWS: [Row; 12] = [
+static EDITOR_BASIC_ROWS: [Row; 10] = [
     row_after(Ctrl::Section { title: "THEME COLOUR" }, Gap::None),
     row(Ctrl::Picker(PickerId::Tone)),
     row_after(Ctrl::Section { title: "BORDER" }, Gap::None),
-    row(Ctrl::Drop { list: ListId::Borders }),
-    row_shown(
-        Ctrl::Slider {
-            label: "EFFECT SIZE",
-            act: Act::EditorTrack(Knob::GlowReach),
-            unit: Unit::None,
-            // 0..100 over 0u..8.76u, the token's own declared range.
-            // The top first landed on 2.19u — 4mm on the AORUS FO32U2P
-            // (3840x2160, 699.48x394.73mm viewable, pixel pitch
-            // back-solved from that) at the reference bake's 10.0 px/u
-            // — and the owner raised it by 300% the same day
-            // (2026-08-25, "po jednej i drugiej stronie"): 2.19u * 4.
-            range: (0, 100),
-            step: step_1,
-            get: |s| s.glow_reach,
-            set: |s, v| {
-                s.glow_reach = v;
-                s.glow_reach_touched = true;
-            },
-            save: |s| s.apply_editor_preview(),
-        },
-        border_lit,
-    ),
     // BORDER SIZE, back on this page (2026-08-25, the owner's word — it
     // stood here unconditionally until 2026-08-23, when it left; see
     // `Knob::EdgeWidth`'s own doc for the plumbing that never left with
@@ -3732,15 +3685,6 @@ pub struct Settings {
     /// Font sizes in percent (50-200).
     cur_size: [u32; 2],
     /// The three shapes a border can take, as the list offers them. Built
-    /// in rather than read from anywhere: they are not files, they are the
-    /// only three things the renderer can draw for a border.
-    ///
-    /// GLOW was called NEON until 2026-08-18 — the owner asked for that
-    /// word back for the thing it actually names, a lit glass tube, and
-    /// the soft halo it used to name took the plainer one. The ORDER is
-    /// the order of the light: none, spilled, lit.
-    border_kinds: Vec<String>,
-    current_border: Option<String>,
     background_kinds: Vec<String>,
     current_background: Option<String>,
     /// Glass tint colour, HSV in whole slider units, like `edge`.
@@ -3842,9 +3786,9 @@ pub struct Settings {
     /// cascade the rest of BASIC's move rides.
     tone_bed: nacelle::theme::color::Oklch,
     /// WHAT THE THEME ITSELF DRESSES, read ONCE off the file's own state
-    /// and never off the screen: the two `halo_dressed` answers
-    /// `theme::edit` asks its caller for (the panel edge's glow, and the
-    /// focus ring's).
+    /// and never off the screen: the `halo_dressed` answer `theme::edit`
+    /// asks its caller for (the focus ring's — the panel edge's went
+    /// with the whole effect, 2026-08-27, the owner's order).
     ///
     /// A flag and not a reading, because the reading was a LOOP. The edit
     /// set is rebuilt ten times a second while a track is dragged, and
@@ -3863,7 +3807,6 @@ pub struct Settings {
     /// which runs on the way in and on CANCEL, with no preview standing in
     /// either case. The intent `halo_dressed` was written for is untouched:
     /// a theme that dressed its own halo still keeps its own numbers.
-    edge_halo_dressed: bool,
     ring_halo_dressed: bool,
     /// The border colour the editor is showing, as OKLCh in whole units:
     /// lightness 0..100, chroma 0..40, hue 0..359. A slider moves whole
@@ -3926,16 +3869,6 @@ pub struct Settings {
     /// and the one BASIC was caught committing on 2026-08-18.
     edge_width: u32,
     edge_width_touched: bool,
-    /// `glow.panel_edge.radius` — how far a lit border's light reaches,
-    /// 0..100 over 0u..8.76u (EFFECT SIZE's own wall, the token's whole
-    /// declared range — see its row's doc), and whether a hand has
-    /// moved it.
-    ///
-    /// The mark is doubly load-bearing here: an unmarked write would also
-    /// undo `edge_halo_dressed`, which exists so that a theme carrying
-    /// its own halo keeps its own numbers.
-    glow_reach: u32,
-    glow_reach_touched: bool,
     ring_style_kinds: Vec<String>,
     current_ring_style: Option<String>,
     ring_on: bool,
@@ -4222,18 +4155,6 @@ impl Settings {
             cur_weight: [None, None],
             cur_size: [100, 100],
             editor_pulse: None,
-            // NONE was LINE until 2026-08-25, when the owner split the
-            // border from its effect: the border itself is constant —
-            // colour, BORDER SIZE, corners, always drawn — and this
-            // list picks only the LIGHT laid on it. The first entry is
-            // the absence of an effect, and its old name claimed it was
-            // a kind of border instead.
-            border_kinds: vec![
-                "NONE".to_string(),
-                "GLOW".to_string(),
-                "NEON".to_string(),
-            ],
-            current_border: None,
             // BLUR and FROSTED GLASS are pulled for now: both sampled a
             // static magenta behind the settings modal (the blur base read
             // uninitialised) while SOLID stayed correct, so the two glass
@@ -4304,7 +4225,6 @@ impl Settings {
             // Nothing dressed until the seeding says so — the same
             // opening neutrality the seeds themselves keep, and the
             // answer the master's own zeroes give.
-            edge_halo_dressed: false,
             ring_halo_dressed: false,
             edge: [70, 12, 200],
             // The whole-theme sections. OPENING VALUES ONLY, and never a
@@ -4339,8 +4259,6 @@ impl Settings {
             corner_seed: [20, 30, 55],
             edge_width: 20,
             edge_width_touched: false,
-            glow_reach: 40,
-            glow_reach_touched: false,
             ring_style_kinds: ["SOLID", "DASHED"].iter().map(|k| k.to_string()).collect(),
             current_ring_style: None,
             ring_on: false,
@@ -5134,10 +5052,10 @@ impl Settings {
     /// the page the user cannot see is still in the edit.
     fn editor_edits(&self) -> Vec<nacelle::theme::edit::Edit> {
         use nacelle::theme::edit::{
-            accent_edit, border_colour_edit, border_edits, border_width_edit,
-            focus_ring_edits, glass_edits, glow_reach_edit, menu_edits, panel_fill_edit,
+            accent_edit, border_colour_edit, border_width_edit,
+            focus_ring_edits, glass_edits, menu_edits, panel_fill_edit,
             scrollbar_edits, severity_role_edit, shape_edits, surface_edits, text_edits,
-            tooltip_edits, unfocused_dim_edit, Border, CornerCut, FocusRing, Glass,
+            tooltip_edits, unfocused_dim_edit, CornerCut, FocusRing, Glass,
             GlassReach, RingStyle, Scope, ScrollbarEdge, ScrollbarMode, SurfaceHue,
         };
         /// ONE ASSIGNMENT PER TOKEN. A list carrying a token twice would
@@ -5164,51 +5082,16 @@ impl Settings {
         // hue's own full brightness, never white.
         let of = oklch_of_track;
         let colour = of(&self.edge, 1.0);
-        let mut edits = match self.current_border.as_deref() {
-            // No kind chosen: the colour moves ALONE. Mapping "no choice"
-            // to LINE was a verified bug — a colour drag before the list
-            // was touched switched the halo off as a side effect.
-            None => vec![border_colour_edit(Scope::Theme, colour)],
-            other => {
-                // The three names the list offers, and the fall-through
-                // is LINE because a name this build does not know draws
-                // the least: a kind nobody can spell must not light
-                // anything.
-                let kind = match other {
-                    Some("NEON") => Border::Neon,
-                    Some("GLOW") => Border::Glow,
-                    _ => Border::Line,
-                };
-                // Whether the THEME already dresses a visible halo — if it
-                // does, NEON keeps the theme's radius and alpha instead of
-                // flattening five themes' dress to one theme's numbers.
-                // The answer is the SEEDING's ([`Settings::edge_halo_dressed`]):
-                // asked of the live bake it would be asking about the
-                // preview this set is about to become.
-                border_edits(Scope::Theme, kind, colour, self.edge_halo_dressed)
-            }
-        };
-        // ZGŁOSZENIE 6, BOTH READINGS OF "PROMIEŃ BORDERU", and each only
-        // once a hand has moved it (the marks are the fields', and why
-        // they exist is written there).
-        //
-        // The THICKNESS is unconditional in the kind: every border draws a
-        // line, NEON included — its colour lives in the band outside a
-        // core the line still cuts.
+        // The border: one colour on the shared root, and — once a hand
+        // has moved it — one thickness. (The border EFFECT and its whole
+        // edit set left with the effect itself, 2026-08-27, the owner's
+        // order.)
+        let mut edits = vec![border_colour_edit(Scope::Theme, colour)];
+        // ZGŁOSZENIE 6: the THICKNESS, only once a hand has moved it (the
+        // mark is the field's, and why it exists is written there). It is
+        // unconditional in everything else: every border draws a line.
         if self.edge_width_touched {
             set_edit(&mut edits, border_width_edit(Scope::Theme, scale_of(self.edge_width, 1.0)));
-        }
-        // The REACH is a question about light, so it is only asked of a
-        // kind that lights — the same condition its row stands on, stated
-        // here too because `editor_edits` is read by SAVE and a row that
-        // is off screen must not leave a value behind. And it goes in
-        // through `set_edit`, because `border_edits` may have laid its own
-        // 1.6u floor on this very token: a number a person moved outranks
-        // a floor the model put under a switch.
-        if self.glow_reach_touched && border_lit(self) {
-            // 8.76u — the token's whole declared range, see EFFECT
-            // SIZE's row doc for the derivation.
-            set_edit(&mut edits, glow_reach_edit(Scope::Theme, scale_of(self.glow_reach, 8.76)));
         }
         // The background joins the same set. `None` means the list was
         // never touched and the theme's own background stands — the same
@@ -5501,56 +5384,25 @@ impl Settings {
         if let Some(c) = col_of("elev.panel.edge.color") {
             seed(&mut self.edge, c);
         }
-        // THE COMPATIBILITY SEAM, and it is one line wide.
+        // THE DRESS QUESTION, ASKED HERE AND NOWHERE ELSE. The road onto
+        // this line runs with no preview standing: CANCEL clears it a
+        // statement earlier, and the door is reached from another page,
+        // which means [`Settings::go`] has already dropped whatever the
+        // last visit laid. So the bake being read is the THEME's, which
+        // is the only state the question means anything about.
+        // `editor_edits` reads this field, which is what keeps it a pure
+        // function of the controls: build a set, lay it over the theme,
+        // build it again, and the two sets agree. Asked of the live bake
+        // instead, the second answer was the first set's own output and
+        // the halo blinked at ~5 Hz.
         //
-        // Until 2026-08-18 the lit kind was called NEON and there was
-        // only one of it. Themes saved under that name — the owner's
-        // among them — say `glow.panel_edge.enabled = true` and NOT ONE
-        // WORD about a falloff, so they inherit the master's `gauss`,
-        // which is the soft halo they have always drawn. They must open
-        // on GLOW: opening them on NEON would tell the user their theme
-        // is something it is not, and the first slider drag would then
-        // SAVE that lie into the file.
-        //
-        // So the word decides, and only the word `tube` means the tube.
-        // Everything else about a lit border — its reach, its amount, its
-        // colour — is shared by the two kinds and says nothing about
-        // which one is in force.
-        self.current_border = Some(
-            if !flag("glow.panel_edge.enabled") {
-                // NONE, the effect's own absence — LINE until the
-                // 2026-08-25 border/effect split renamed it.
-                "NONE"
-            } else if word("glow.panel_edge.falloff").as_deref() == Some("tube") {
-                "NEON"
-            } else {
-                "GLOW"
-            }
-            .to_string(),
-        );
-        // THE TWO DRESS QUESTIONS, ASKED HERE AND NOWHERE ELSE. Both
-        // roads onto this line run with no preview standing: CANCEL
-        // clears it a statement earlier, and the door is reached from
-        // another page, which means [`Settings::go`] has already dropped
-        // whatever the last visit laid. So the bake being read is the
-        // THEME's, which is the only state the question means anything
-        // about. `editor_edits` reads these two fields, which is what
-        // keeps it a pure function of the controls: build a set, lay it
-        // over the theme, build it again, and the two sets agree. Asked
-        // of the live bake instead, the second answer was the first
-        // set's own output and the halo blinked at ~5 Hz.
-        self.edge_halo_dressed =
-            px("glow.panel_edge.radius") > 0.0 && px("glow.panel_edge.alpha") > 0.0;
-        // ZGŁOSZENIE 6's two numbers, seeded like every other control on
-        // this page: off the theme, and MARKED UNTOUCHED, so a visit that
-        // moves neither leaves neither in the saved file. The width's wall
-        // is the master's own (`[stroke] bold = 0.7u`), stated once here
-        // and once in the row. EFFECT SIZE's is the token's whole
-        // declared `0u..8.76u` — see that row's own doc.
+        // ZGŁOSZENIE 6's number, seeded like every other control on this
+        // page: off the theme, and MARKED UNTOUCHED, so a visit that
+        // does not move it leaves nothing in the saved file. The width's
+        // wall is the master's own (`[stroke] bold = 0.7u`), stated once
+        // here and once in the row.
         self.edge_width = scale_back(px("border.edge.width") / unit, 1.0);
         self.edge_width_touched = false;
-        self.glow_reach = scale_back(px("glow.panel_edge.radius") / unit, 8.76);
-        self.glow_reach_touched = false;
         self.ring_halo_dressed =
             px("glow.focus_ring.radius") > 0.0 && px("glow.focus_ring.alpha") > 0.0;
 
@@ -6417,18 +6269,6 @@ impl Settings {
                         // true, and main takes true as "the configuration
                         // changed, re-resolve it": a theme reload, which
                         // builds a fresh engine with an EMPTY preview. So a
-                        // click on LINE erased its own preview in the same
-                        // breath, and looked dead until the first slider
-                        // pulse re-sent it; NEON only appeared to work
-                        // because the post-reload state (Cockpit's glow on)
-                        // matched what NEON asks for. Measured in the trace
-                        // of 2026-08-16, clicks 2313/2528.
-                        ListId::Borders => {
-                            self.current_border = Some(name.clone());
-                            self.apply_editor_preview();
-                            self.say(Sfx::Theme);
-                            return false;
-                        }
                         ListId::Backgrounds => {
                             self.current_background = Some(name.clone());
                             self.apply_editor_preview();
@@ -8856,7 +8696,6 @@ impl Settings {
             ListId::Looks => &self.themes,
             ListId::Layauts => &self.layauts,
             ListId::Sounds => &self.sounds,
-            ListId::Borders => &self.border_kinds,
             ListId::Backgrounds => &self.background_kinds,
             ListId::Severities => &self.severity_kinds,
             ListId::Corners => &self.corner_kinds,
@@ -8873,7 +8712,6 @@ impl Settings {
             ListId::Looks => self.current_look.as_ref(),
             ListId::Layauts => self.current_layaut.as_ref(),
             ListId::Sounds => self.current_sounds.as_ref(),
-            ListId::Borders => self.current_border.as_ref(),
             ListId::Backgrounds => self.current_background.as_ref(),
             ListId::Severities => self.current_severity.as_ref(),
             ListId::Corners => self.current_corner.as_ref(),
@@ -9868,7 +9706,6 @@ mod tests {
             Act::EditorFlip(Flip::Halo),
             Act::EditorFlip(Flip::BarAutoHide),
             Act::EditorFlip(Flip::BarTrack),
-            Act::ListBtn(ListId::Borders),
             Act::ListBtn(ListId::Backgrounds),
             Act::ListBtn(ListId::Severities),
             Act::ListBtn(ListId::Corners),
@@ -10241,7 +10078,7 @@ mod tests {
     #[test]
     fn the_marked_row_is_the_row_a_click_applies() {
         let mut s = furnished();
-        // BORDER is in the loop with the three file-backed lists on
+        // BACKGROUND is in the loop with the three file-backed lists on
         // purpose: its members are built in rather than found on disk, and
         // that is exactly the kind of difference that makes a list behave
         // subtly unlike its neighbours unless something checks.
@@ -10249,7 +10086,6 @@ mod tests {
             ListId::Looks,
             ListId::Layauts,
             ListId::Sounds,
-            ListId::Borders,
             ListId::Backgrounds,
             ListId::Severities,
             ListId::Corners,
@@ -10269,7 +10105,6 @@ mod tests {
                     ListId::Looks => s.current_look = Some(name),
                     ListId::Layauts => s.current_layaut = Some(name),
                     ListId::Sounds => s.current_sounds = Some(name),
-                    ListId::Borders => s.current_border = Some(name),
                     ListId::Backgrounds => s.current_background = Some(name),
                     ListId::Severities => s.current_severity = Some(name),
                     ListId::Corners => s.current_corner = Some(name),
@@ -10292,7 +10127,6 @@ mod tests {
                 ListId::Looks => s.current_look = Some("not installed".into()),
                 ListId::Layauts => s.current_layaut = Some("not installed".into()),
                 ListId::Sounds => s.current_sounds = Some("not installed".into()),
-                ListId::Borders => s.current_border = Some("not installed".into()),
                 ListId::Backgrounds => s.current_background = Some("not installed".into()),
                 ListId::Severities => s.current_severity = Some("not installed".into()),
                 ListId::Corners => s.current_corner = Some("not installed".into()),
@@ -12083,9 +11917,6 @@ mod tests {
     /// the bar fading over a drawn groove. What the reachability sweep
     /// and the group test both mean by "everything on screen".
     fn editor_ajar(s: &mut Settings) {
-        // A kind that LIGHTS, so BASIC's EFFECT SIZE row is one of the
-        // rows a sweep walks (ZGŁOSZENIE 6b, `border_lit`).
-        s.current_border = Some("NEON".to_string());
         s.current_background = Some("FROSTED GLASS".to_string());
         s.current_severity = Some("OK".to_string());
         s.surface_own_hue = true;
@@ -12213,7 +12044,7 @@ mod tests {
         s.seed_editor_from_theme();
         s.view = View::ThemeEditor;
         let targets = targets_over_the_whole_page(&mut s, &mut fonts, 1080.0);
-        for list in [ListId::Borders, ListId::Backgrounds, ListId::Corners] {
+        for list in [ListId::Backgrounds, ListId::Corners] {
             assert!(
                 targets.iter().any(|&(_, a)| a == Act::ListBtn(list)),
                 "the BASIC page drew no {} anchor",
@@ -12254,7 +12085,7 @@ mod tests {
         viewport_home();
         let mut fonts = nacelle::font::FontSystem::new();
         let (w, h) = (1080.0 * 16.0 / 9.0, 1080.0);
-        for list in [ListId::Borders, ListId::Backgrounds, ListId::Corners] {
+        for list in [ListId::Backgrounds, ListId::Corners] {
             let mut s = furnished();
             s.editor_basic = true;
             s.seed_editor_from_theme();
@@ -12494,32 +12325,6 @@ mod tests {
         }
     }
 
-    /// ZGŁOSZENIE 6(b), first half of the conditional pair: how far a lit
-    /// border's light reaches is only asked of a kind that lights.
-    ///
-    /// The border's WIDTH is unconditional beside it, and that asymmetry
-    /// is the point of measuring both here: every kind draws a line, only
-    /// two of them draw a light.
-    #[test]
-    fn a_light_that_is_not_drawn_is_not_asked_how_far_it_reaches() {
-        let _g = crate::widgets::theme_test_lock();
-        theme::resolved();
-        let mut s = furnished();
-        s.editor_basic = true;
-        for (kind, lit) in [("NONE", false), ("GLOW", true), ("NEON", true)] {
-            s.current_border = Some(kind.to_string());
-            assert_eq!(
-                basic_shows(&s, Act::EditorTrack(Knob::GlowReach)),
-                lit,
-                "on {kind} the EFFECT SIZE row should {} the page",
-                if lit { "stand on" } else { "be absent from" }
-            );
-            // BORDER WIDTH stood here, unconditionally, until 2026-08-23 —
-            // removed at the owner's word, so there is no row left to
-            // assert present on any kind.
-        }
-    }
-
     /// ZGŁOSZENIE 6(a) again, and this is the decision the owner asked to
     /// see reasoned: the control names a STEP OF THE MASTER'S OWN SCALE
     /// and never a free number.
@@ -12580,33 +12385,19 @@ mod tests {
         nacelle::theme::clear_preview();
     }
 
-    /// ZGŁOSZENIE 6(b), both readings at once, and the marks that keep
-    /// them out of a file nobody asked to change.
+    /// ZGŁOSZENIE 6(b): the border's thickness waits to be asked.
     ///
-    /// A WIDTH AND A REACH ARE TWO DIFFERENT ANSWERS to one ambiguous
-    /// word, and this pins that they land on two different tokens. It also
-    /// pins the thing that makes the reach worth having: it OUTRANKS the
-    /// 1.6u floor a lit kind lays on an undressed theme, which until now
-    /// was the only number that key could ever hold.
+    /// (Its sibling — the REACH of a lit border's light — left with the
+    /// whole panel-edge effect on 2026-08-27, the owner's order; the
+    /// thickness's own marks and wall still need their witness.)
     #[test]
-    fn the_borders_thickness_and_its_lights_reach_are_two_answers_and_both_wait_to_be_asked() {
+    fn the_borders_thickness_waits_to_be_asked() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         nacelle::theme::clear_preview();
         let mut s = editor_open();
         s.editor_basic = true;
-        s.current_border = Some("NEON".to_string());
-        // Forced undressed (2026-08-23: the master itself now ships a
-        // NEON dress, `glow.panel_edge.{enabled,radius,alpha,falloff}`
-        // no longer 0/0/0/gauss, so `editor_open` would seed
-        // `edge_halo_dressed = true` off the bare master and the floor
-        // this test contests would never be written at all). This test
-        // is about the editor's OWN floor-injection mechanism for a
-        // theme that has not dressed its halo, which still exists and
-        // still needs a witness — it no longer falls out of the master's
-        // bare state for free.
-        s.edge_halo_dressed = false;
-        // Untouched: neither key is in the set. The master writes
+        // Untouched: the key is not in the set. The master writes
         // `border.edge.width = @stroke.hair`, a REFERENCE, and a page
         // that pinned it to a literal on every visit would cost every
         // saved theme that reference — §5.5's fault, wearing a new face.
@@ -12616,16 +12407,9 @@ mod tests {
             "an untouched BORDER WIDTH pinned the master's `@stroke.hair` reference \
              into the file"
         );
-        // The kind's own floor IS there, though — which is what makes the
-        // override below a real contest and not a write into an empty
-        // slot.
-        let floor = wrote(&quiet, "glow.panel_edge.radius")
-            .expect("a lit kind must give an undressed theme a reach");
-        // Now a hand moves both.
+        // Now a hand moves it.
         s.edge_width = 100;
         s.edge_width_touched = true;
-        s.glow_reach = 25;
-        s.glow_reach_touched = true;
         let moved = s.editor_edits();
         let width = wrote(&moved, "border.edge.width").expect("the width was not written");
         // The master's heaviest stroke is `[stroke] bold = 0.7u`; the top
@@ -12643,32 +12427,6 @@ mod tests {
                 || wrote(&moved, "stroke.hair") != Some(width.clone()),
             "the border's thickness landed on the GLOBAL kerf; `stroke.hair` is worn by \
              72 derivations and the editor already offers it under HAIRLINE"
-        );
-        let reach = wrote(&moved, "glow.panel_edge.radius").expect("the reach was not written");
-        assert_ne!(
-            reach, floor,
-            "the reach a person set did not beat the floor the kind lays — a number \
-             somebody moved must outrank a default put under a switch"
-        );
-        // 2.19u exactly: a quarter of the 8.76u wall.
-        assert!(
-            (u_of(&reach) - 2.19).abs() < 1e-6,
-            "25 of 100 over EFFECT SIZE's 8.76u wall is 2.19u, not {reach}"
-        );
-        // And ONE assignment for it, or a saved file carries the key twice
-        // in one section.
-        assert_eq!(
-            moved.iter().filter(|e| e.token == "glow.panel_edge.radius").count(),
-            1,
-            "the reach was written twice"
-        );
-        // A reach set on a kind that draws no light is not written at all:
-        // the row is not on screen there, and a value left behind by an
-        // off-screen row would reach the file all the same.
-        s.current_border = Some("NONE".to_string());
-        assert!(
-            wrote(&s.editor_edits(), "glow.panel_edge.radius").is_none(),
-            "NONE wrote a reach for a light it does not draw"
         );
         nacelle::theme::clear_preview();
     }
@@ -12785,7 +12543,7 @@ mod tests {
     /// shape of an `oklch(L, C, H)` value spread over three controls.
     #[test]
     fn every_colour_the_editor_offers_is_pointed_at_and_none_is_hunted_for() {
-        let s = furnished();
+        let _s = furnished();
         let mut offered: Vec<PickerId> = Vec::new();
         let mut labels: Vec<&'static str> = Vec::new();
         for rows in [&EDITOR_BASIC_ROWS[..], &EDITOR_ROWS[..]] {
@@ -14079,14 +13837,9 @@ mod tests {
         // The ADVANCED pulse comes first, so start on ADVANCED (the editor
         // opens on BASIC now); the later EditorMode press crosses to BASIC.
         s.editor_basic = false;
-        // The two sets that carry a dress question, both switched on:
-        // NEON for the panel edge, and a haloed focus ring.
-        s.current_border = Some("NEON".to_string());
-        // Forced undressed — see the same note in
-        // `the_borders_thickness_and_its_lights_reach_are_two_answers_
-        // and_both_wait_to_be_asked` (2026-08-23: the bare master no
-        // longer seeds `edge_halo_dressed = false` on its own).
-        s.edge_halo_dressed = false;
+        // The set that carries a dress question, switched on: a haloed
+        // focus ring. (The panel edge's own dress question left with the
+        // whole effect, 2026-08-27, the owner's order.)
         s.ring_on = true;
         s.current_ring_style = Some("SOLID".to_string());
         s.ring_halo = true;
@@ -14108,9 +13861,9 @@ mod tests {
         }
 
         let first = pulse(&s);
-        // The set really does dress both halos on the master, or the
+        // The set really does dress the ring's halo on the master, or the
         // repetition below would be agreeing about nothing.
-        for token in ["glow.panel_edge.radius", "glow.focus_ring.radius"] {
+        for token in ["glow.focus_ring.radius"] {
             assert!(
                 first.iter().any(|(t, _)| *t == token),
                 "the master's own halo is undressed and the editor did not write {token}"
@@ -14188,21 +13941,18 @@ mod tests {
         theme::resolved();
         nacelle::theme::clear_preview();
         let dress = [
-            ("glow.panel_edge.radius", "2.40u"),
-            ("glow.panel_edge.alpha", "0.500"),
             ("glow.focus_ring.radius", "2.40u"),
             ("glow.focus_ring.alpha", "0.500"),
         ];
         assert!(nacelle::theme::set_preview(&dress).is_empty(), "the dress was refused");
         let mut s = editor_open();
         nacelle::theme::clear_preview();
-        s.current_border = Some("NEON".to_string());
         s.ring_on = true;
         s.current_ring_style = Some("SOLID".to_string());
         s.ring_halo = true;
         s.ring_halo_alpha = 30;
         let edits = s.editor_edits();
-        for token in ["glow.panel_edge.radius", "glow.focus_ring.radius"] {
+        for token in ["glow.focus_ring.radius"] {
             assert!(
                 !edits.iter().any(|e| e.token == token),
                 "the editor wrote its own {token} over a theme that had dressed one"
@@ -14211,8 +13961,8 @@ mod tests {
         // The switch itself still lands — keeping a dress is not the same
         // as leaving the theme alone.
         assert!(
-            edits.iter().any(|e| e.token == "glow.panel_edge.enabled" && e.value == "true"),
-            "NEON did not switch the halo on"
+            edits.iter().any(|e| e.token == "glow.focus_ring.enabled" && e.value == "true"),
+            "the haloed ring did not switch its glow on"
         );
     }
 
@@ -14245,120 +13995,6 @@ mod tests {
         // back to the master, so the master is what is on screen, and
         // pointing a save at the missing name would resurrect it.
         assert_eq!(Settings::editor_source_of(Some("skasowany"), &known), None);
-    }
-
-    /// THE OWNER'S SAVED THEME NOW OPENS ON NEON.
-    ///
-    /// `~/.local/share/nacelle-desktop/themes/` carries a theme whose
-    /// whole `[glow]` section is `panel_edge.enabled = true`. It was
-    /// saved when the lit kind was called NEON and there was one of them;
-    /// on 2026-08-18 that kind became GLOW and NEON became a lit tube,
-    /// and a file that said nothing about a falloff inherited the
-    /// master's `gauss` — so until 2026-08-23 the list opened on GLOW.
-    /// The master's own falloff moved to `tube` that day (the
-    /// neon-by-default change), so the SAME file now inherits NEON
-    /// instead: the picture the owner's file draws changed, on purpose,
-    /// and this proves the list follows it rather than a word cached
-    /// from before. The edit set the list then builds has to keep saying
-    /// `tube`, because the first slider drag SAVES whatever the set
-    /// says, and `tube` is what the file now draws whether or not a
-    /// drag ever writes the word down.
-    ///
-    /// Both halves are here on purpose. Opening on the right row and then
-    /// writing a DIFFERENT word on the first drag would be the bug this
-    /// file exists to catch, arriving one gesture later than the row
-    /// itself does.
-    #[test]
-    fn a_theme_saved_before_the_tube_existed_opens_on_neon() {
-        let _g = crate::widgets::theme_test_lock();
-        theme::resolved();
-        nacelle::theme::clear_preview();
-        // The owner's file, in the only two things it says that matter
-        // here: the light is on, and no word about its shape.
-        assert!(
-            nacelle::theme::set_preview(&[("glow.panel_edge.enabled", "true")]).is_empty(),
-            "the old theme's own line was refused"
-        );
-        let s = editor_open();
-        nacelle::theme::clear_preview();
-        assert_eq!(
-            s.current_border.as_deref(),
-            Some("NEON"),
-            "a theme silent about its falloff did not follow the master's own to NEON"
-        );
-        let edits = s.editor_edits();
-        let falloff = edits
-            .iter()
-            .find(|e| e.token == "glow.panel_edge.falloff")
-            .expect("the lit kind named no falloff at all");
-        assert_eq!(
-            falloff.value, "tube",
-            "the first drag would have written a shape the file does not currently draw"
-        );
-    }
-
-    /// AND A THEME THAT SAYS `tube` OPENS ON NEON.
-    ///
-    /// The other side of the same seam, without which the one above
-    /// passes on a build where the word never resolves and every theme in
-    /// the world is a GLOW.
-    #[test]
-    fn a_theme_that_names_the_tube_opens_on_neon() {
-        let _g = crate::widgets::theme_test_lock();
-        theme::resolved();
-        nacelle::theme::clear_preview();
-        assert!(
-            nacelle::theme::set_preview(&[
-                ("glow.panel_edge.enabled", "true"),
-                ("glow.panel_edge.falloff", "tube"),
-            ])
-            .is_empty(),
-            "the master does not know the word `tube`"
-        );
-        let s = editor_open();
-        nacelle::theme::clear_preview();
-        assert_eq!(
-            s.current_border.as_deref(),
-            Some("NEON"),
-            "a theme wearing the tube opened on the halo"
-        );
-        assert_eq!(
-            s.editor_edits()
-                .iter()
-                .find(|e| e.token == "glow.panel_edge.falloff")
-                .map(|e| e.value.as_str()),
-            Some("tube"),
-            "reopening a tube theme would have written the halo's word back"
-        );
-    }
-
-    /// AN UNLIT THEME OPENS ON LINE, whatever it says about a falloff.
-    ///
-    /// The falloff of a border that draws no light is not a kind, and a
-    /// file that carries a leftover `tube` from a kind the user switched
-    /// away from must not be read as wearing one.
-    #[test]
-    fn an_unlit_theme_opens_on_line_however_it_spells_its_falloff() {
-        let _g = crate::widgets::theme_test_lock();
-        for word in ["gauss", "tube"] {
-            theme::resolved();
-            nacelle::theme::clear_preview();
-            assert!(
-                nacelle::theme::set_preview(&[
-                    ("glow.panel_edge.enabled", "false"),
-                    ("glow.panel_edge.falloff", word),
-                ])
-                .is_empty(),
-                "the unlit theme was refused"
-            );
-            let s = editor_open();
-            nacelle::theme::clear_preview();
-            assert_eq!(
-                s.current_border.as_deref(),
-                Some("NONE"),
-                "an unlit border wearing a leftover `{word}` opened lit"
-            );
-        }
     }
 
     /// The two crossings between the editor's sRGB tracks and the file's
