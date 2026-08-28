@@ -554,15 +554,6 @@ impl Editor {
         self.list.all()
     }
 
-    /// The board's placements as the store writes them.
-    pub fn rects(&self) -> Vec<(InstanceId, PanelSpec)> {
-        self.list
-            .all()
-            .iter()
-            .map(|i| (i.id, i.rect.unwrap_or(OFF_SPEC)))
-            .collect()
-    }
-
     /// The identity counter to carry back into the layout, so that an
     /// id this editor handed out is never handed out again.
     pub fn next_free(&self) -> u32 {

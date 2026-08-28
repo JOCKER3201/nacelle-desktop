@@ -162,6 +162,7 @@
 
 pub mod model;
 
+#[cfg(test)]
 use crate::widgets::PanelSpec;
 use model::{Choice, DesktopConf, Layered};
 use std::collections::{BTreeMap, HashMap};
@@ -189,7 +190,7 @@ pub use model::{
 
 
 
-pub use nacelle::layout::{BoardId, InstanceId, LayoutDef};
+pub use nacelle::layout::{BoardId, Instance, LayoutDef};
 use nacelle::assets::AssetRoots;
 use nacelle::layout::LayautStore;
 
@@ -2107,13 +2108,16 @@ pub fn set_grid_snap(on: bool) {
 /// entry per instance standing on the board, and the store drops the
 /// instances it no longer names. By identity and not by widget, because
 /// a board may hold the same widget twice and only the id says which
-/// of the two rectangles moved.
+/// of the two rectangles moved. The WHOLE instance, not just its id and
+/// rectangle (2026-08-28's fix) — one dragged out of ADD WIDGET this
+/// same editing session has no entry in the file yet, and the store
+/// needs its widget kind to add it rather than silently drop it.
 pub fn set_board_in_layaut(
     name: &str,
     k: BoardId,
-    rects: &[(InstanceId, PanelSpec)],
+    placements: &[Instance],
 ) -> std::io::Result<()> {
-    store().set_board(name, k, rects)
+    store().set_board(name, k, placements)
 }
 
 pub fn add_board_in_layaut(name: &str, side: i8) -> std::io::Result<()> {

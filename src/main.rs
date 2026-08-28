@@ -1418,9 +1418,12 @@ fn main() {
             let board = screens[si].editor.board();
             // The store takes the board's placements by identity and
             // drops whatever is no longer among them: a widget dragged
-            // off the board leaves the file with it.
-            let rects = screens[si].editor.rects();
-            match config::set_board_in_layaut(&name, board, &rects) {
+            // off the board leaves the file with it. The WHOLE instance
+            // and not merely its rectangle (2026-08-28's fix): one
+            // dragged out of ADD WIDGET this same session has no file
+            // entry yet, and the store needs its widget kind to add it.
+            let placements = screens[si].editor.instances().to_vec();
+            match config::set_board_in_layaut(&name, board, &placements) {
                 Ok(()) => {
                     nacelle::sound::emit(nacelle::sound::Event::Save);
                     apply_config!();
