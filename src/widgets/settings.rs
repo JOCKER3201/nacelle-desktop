@@ -154,6 +154,14 @@ enum View {
     /// files the user writes by hand, and every one the program could
     /// not use.
     Addons,
+    /// A shortcut into the theme editor's own WALLPAPER row (BASIC),
+    /// for a person who wants only that and not the other forty
+    /// controls beside it. The same session state either door opens on
+    /// — `backdrop_image`, `backdrop_touched`, `Act::EditorWallpaper*`,
+    /// SAVE/SAVE AS/CANCEL — so choosing a file here and choosing it
+    /// from BASIC write the identical edit; this page just does not
+    /// make a hand scroll past BORDER and SHAPE to reach it.
+    Wallpaper,
 }
 
 /// The view one layer out, or `None` at the outermost one.
@@ -176,7 +184,7 @@ fn parent_view(v: View) -> Option<View> {
     match v {
         // A destructive control the user changed their mind about must
         // be left the same way as anything else, by BACK or by Escape.
-        View::ThemeEditor | View::LookFeelReset => Some(View::LookFeel),
+        View::ThemeEditor | View::LookFeelReset | View::Wallpaper => Some(View::LookFeel),
         _ => None,
     }
 }
@@ -359,6 +367,10 @@ enum Act {
     /// for the LEVELS and not for "sound", which on this page already
     /// means the SOUNDS list's set of clips.
     OpenSoundLevels,
+    /// LOOK AND FEEL's own shortcut into the theme editor's WALLPAPER
+    /// row — [`View::Wallpaper`]'s own door, seeded from the theme
+    /// exactly as [`Act::ThemesEditor`] seeds BASIC.
+    OpenWallpaper,
     OpenBoards,
     OpenColor,
     OpenBlur,
@@ -536,6 +548,7 @@ fn focus_id(act: Act) -> FocusId {
         OpenSets => FocusId::of("settings.lookfeel.sets"),
         OpenFont => FocusId::of("settings.lookfeel.fonts"),
         OpenSoundLevels => FocusId::of("settings.lookfeel.sound_levels"),
+        OpenWallpaper => FocusId::of("settings.lookfeel.wallpaper"),
         EditorSave => FocusId::of("settings.editor.save"),
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
@@ -2170,7 +2183,13 @@ static RAIL_ROWS: [Row; 10] = [
 /// theme it edits is chosen, and the confirmation is what the pinned
 /// footer opens — a destructive control one press from every page of
 /// the window is exactly the friction decision §2a exists to keep.
-static LOOKFEEL_PAGES: [Row; 3] = [
+///
+/// WALLPAPER (2026-08-28) is the one exception to "the editor is not
+/// here": it is a door onto the editor's own BASIC row and not a page
+/// of its own, seeded and saved exactly as that row is — see
+/// [`View::Wallpaper`]'s own doc for why a whole theme's worth of other
+/// controls should not stand between a person and this one file.
+static LOOKFEEL_PAGES: [Row; 4] = [
     row(Ctrl::Button {
         label: Text::Fixed("SETS"),
         kind: BtnKind::Wide,
@@ -2185,6 +2204,14 @@ static LOOKFEEL_PAGES: [Row; 3] = [
         label: Text::Fixed("SOUND LEVELS"),
         kind: BtnKind::Wide,
         act: Act::OpenSoundLevels,
+    }),
+    // A shortcut into the theme editor's own WALLPAPER row — see
+    // `View::Wallpaper`'s own doc for why this is a door onto the SAME
+    // state BASIC's row writes, and not a second control.
+    row(Ctrl::Button {
+        label: Text::Fixed("WALLPAPER"),
+        kind: BtnKind::Wide,
+        act: Act::OpenWallpaper,
     }),
 ];
 
@@ -2207,7 +2234,8 @@ fn rail_act(view: View) -> Act {
         | View::Font
         | View::SoundLevels
         | View::ThemeEditor
-        | View::LookFeelReset => Act::OpenLookFeel,
+        | View::LookFeelReset
+        | View::Wallpaper => Act::OpenLookFeel,
         View::Grid => Act::OpenGrid,
         View::Boards => Act::OpenBoards,
         View::Color => Act::OpenColor,
@@ -2226,6 +2254,7 @@ fn kid_act(view: View) -> Option<Act> {
         View::LookFeel => Some(Act::OpenSets),
         View::Font => Some(Act::OpenFont),
         View::SoundLevels => Some(Act::OpenSoundLevels),
+        View::Wallpaper => Some(Act::OpenWallpaper),
         _ => None,
     }
 }
@@ -2584,6 +2613,36 @@ static EDITOR_BAR_ITEMS: [(Text, Act); 3] = [
 ];
 
 static EDITOR_BAR: [Row; 1] = [row(Ctrl::Bar { items: &EDITOR_BAR_ITEMS })];
+
+/// [`View::Wallpaper`]'s own rows — the SAME three [`EDITOR_BASIC_ROWS`]
+/// carries under its own WALLPAPER heading, standing alone so a person
+/// who wants only this does not scroll past BORDER, BACKGROUND and
+/// SHAPE to reach it. `Act::EditorWallpaperEdit`/`Clear` and the fields
+/// they write (`backdrop_image`, `backdrop_touched`) are the window's,
+/// not this page's — choosing a file here and choosing it from BASIC
+/// write the identical edit, which is what lets this page reuse
+/// [`EDITOR_BAR`] verbatim for SAVE, SAVE AS and CANCEL below.
+static WALLPAPER_ROWS: [Row; 3] = [
+    row_after(Ctrl::Section { title: "WALLPAPER" }, Gap::None),
+    row(Ctrl::Button {
+        label: Text::Of(wallpaper_label),
+        kind: BtnKind::Wide,
+        act: Act::EditorWallpaperEdit,
+    }),
+    row_shown(
+        Ctrl::Button {
+            label: Text::Fixed("CLEAR WALLPAPER"),
+            kind: BtnKind::Wide,
+            act: Act::EditorWallpaperClear,
+        },
+        wallpaper_chosen,
+    ),
+];
+
+static WALLPAPER_ZONES: [Zone; 2] = [
+    Zone::Flow { when: always, rows: &WALLPAPER_ROWS },
+    Zone::Pinned { rows: &EDITOR_BAR },
+];
 
 /// The FONT view's two sections, one per column (§3). They are the same
 /// three questions asked twice, so they are the case columns were made
@@ -3049,7 +3108,7 @@ static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &ADDONS_ROWS 
 /// wears CLOSE, because there is nowhere to go back to that the rail is
 /// not already showing, and the two pages the navigation does not list
 /// wear BACK.
-static PAGES: [Page; 10] = [
+static PAGES: [Page; 11] = [
     Page {
         view: View::LookFeel,
         title: "SETTINGS \u{2014} LOOK AND FEEL",
@@ -3112,6 +3171,12 @@ static PAGES: [Page; 10] = [
         title: "SETTINGS \u{2014} ADDONS",
         lead: Gap::Row,
         zones: &ADDONS_ZONES,
+    },
+    Page {
+        view: View::Wallpaper,
+        title: "SETTINGS \u{2014} WALLPAPER",
+        lead: Gap::Section,
+        zones: &WALLPAPER_ZONES,
     },
 ];
 
@@ -6628,6 +6693,15 @@ impl Settings {
                 self.seed_editor_from_theme();
                 self.go(View::ThemeEditor);
             }
+            // LOOK AND FEEL's own shortcut into the SAME seeded state,
+            // landing on [`View::Wallpaper`] instead of the whole
+            // editor — no `color_depth` read, since this page has no
+            // numeric track to notch. Answers `false` for the same
+            // reason `Act::ThemesEditor` does: a door, not a write.
+            Act::OpenWallpaper => {
+                self.seed_editor_from_theme();
+                self.go(View::Wallpaper);
+            }
             Act::OpenSoundLevels => {
                 let (vol, typing, ambient) = config::sound_prefs();
                 self.sound_volume = vol;
@@ -10115,6 +10189,41 @@ mod tests {
         assert!(parent_view(View::ThemeEditor) == Some(View::LookFeel));
     }
 
+    /// LOOK AND FEEL's WALLPAPER entry: a door onto the SAME seeded
+    /// state [`Act::ThemesEditor`] opens, landing on [`View::Wallpaper`]
+    /// instead of the whole editor — the shortcut [`LOOKFEEL_PAGES`]
+    /// carries so a person who wants only this does not scroll past
+    /// BORDER, BACKGROUND and SHAPE to reach it.
+    #[test]
+    fn the_wallpaper_entry_opens_the_same_seeded_state_on_its_own_page() {
+        let mut s = furnished();
+        s.view = View::LookFeel;
+        assert!(
+            !s.perform(Act::OpenWallpaper, 0.0),
+            "the door reported a configuration change"
+        );
+        assert!(s.view == View::Wallpaper, "the door opened nothing");
+        assert!(parent_view(View::Wallpaper) == Some(View::LookFeel));
+        assert!(chrome_of(View::Wallpaper) == Chrome::Back);
+
+        // The page it opened carries the exact WALLPAPER controls BASIC
+        // does, not a copy: same Acts, same fields.
+        let has_row = |act: Act| {
+            WALLPAPER_ROWS
+                .iter()
+                .any(|r| matches!(r.ctrl, Ctrl::Button { act: a, .. } if a == act))
+        };
+        assert!(has_row(Act::EditorWallpaperEdit), "the page lost the WALLPAPER button");
+        assert!(has_row(Act::EditorWallpaperClear), "the page lost CLEAR WALLPAPER");
+
+        // And LOOK AND FEEL actually carries the door.
+        let opens_wallpaper = |r: &Row| matches!(r.ctrl, Ctrl::Button { act: Act::OpenWallpaper, .. });
+        assert!(
+            LOOKFEEL_PAGES.iter().any(opens_wallpaper),
+            "LOOK AND FEEL lost its WALLPAPER entry"
+        );
+    }
+
     /// Decision §3 — Escape peels ONE layer per press.
     ///
     /// Open list, then editor, and only then the window itself: the
@@ -13519,29 +13628,6 @@ mod tests {
 
     fn q8(v: f32) -> u8 {
         (v.clamp(0.0, 1.0) * 255.0).round() as u8
-    }
-
-    /// `oklch(L, C, H)` or `oklch(L, C, H / A)` back to its three (or
-    /// four) numbers — the same plain split libnacelle's own
-    /// `theme::edit` tests read a written token with, now that the
-    /// picker's `Format::Oklch` is gone (HSL is the one notation the
-    /// control itself reads). Reading the numbers straight out of the
-    /// FILE'S OWN string, rather than round-tripping through the
-    /// picker's sRGB `Color`, is a closer check of what got written, not
-    /// a looser one.
-    fn parse_oklch_token(s: &str) -> nacelle::theme::color::Oklch {
-        let inner = s.trim().trim_start_matches("oklch(").trim_end_matches(')');
-        let (head, alpha) = match inner.split_once('/') {
-            Some((h, a)) => (h, a.trim().parse::<f32>().unwrap()),
-            None => (inner, 1.0),
-        };
-        let mut n = head.split(',').map(|p| p.trim().parse::<f32>().unwrap());
-        nacelle::theme::color::Oklch {
-            l: n.next().unwrap(),
-            c: n.next().unwrap(),
-            h: n.next().unwrap(),
-            alpha,
-        }
     }
 
     /// A bad parse on Enter STAYS OPEN, text untouched — the SAVE AS
