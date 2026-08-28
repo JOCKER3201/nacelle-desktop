@@ -18,11 +18,8 @@ nacelle-renderer = { git = "https://github.com/JOCKER3201/nacelle-renderer" }
 
 # Video wallpaper decoding (src/wallpaper_video.rs): the ffmpeg-subprocess
 # backend only — never linked, exec'd (see that crate's own module docs
-# for the licensing reasoning). Path dependency: this repo has no GitHub
-# remote of its own yet (still on feat/bootstrap, only run locally) —
-# switch to `git = "https://github.com/JOCKER3201/nacelle-wallpapers"`
-# once it does, matching every sibling dependency above.
-nacelle-wallpapers = { path = "../nacelle-wallpapers" }
+# for the licensing reasoning).
+nacelle-wallpapers = { git = "https://github.com/JOCKER3201/nacelle-wallpapers" }
 
 # The four core widgets — the control panel, the terminal, the file
 # browser and the keyboard — linked in statically, so the program works

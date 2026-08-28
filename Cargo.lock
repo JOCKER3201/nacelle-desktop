@@ -1541,6 +1541,7 @@ dependencies = [
 [[package]]
 name = "nacelle-wallpapers"
 version = "0.1.0"
+source = "git+https://github.com/JOCKER3201/nacelle-wallpapers#927f0dcc4414386e7cc6a5c4263a9ebc22b1cc37"
 dependencies = [
  "jxl-oxide",
 ]
