@@ -33,6 +33,34 @@ fn tok(cell: &'static OnceLock<TokenId>, name: &'static str) -> TokenId {
     *cell.get_or_init(|| theme::id(name).unwrap_or(TokenId::MISSING))
 }
 
+/// The ADD WIDGET grid's own placeholder icon, the same on every tile
+/// (2026-08-30, the owner's word: a live miniature per widget is the
+/// PLACED board's own job now — see [`Editor::draw`]'s placed-instance
+/// loop — the picker draws icons instead, one shared glyph until each
+/// widget kind ships one of its own).
+const WIDGET_GENERIC_ICON: &[u8] = include_bytes!("../../assets/widget-generic.svg");
+
+/// An arbitrary, deliberately far-from-zero icon id. `FontSystem::
+/// register_icon` has no collision check of its own, and this process's
+/// OTHER icon registrations (a statically-linked widget's own app
+/// icons, say) are far more likely to start counting up from a small
+/// number than to reach this one.
+const WIDGET_GENERIC_ICON_ID: u32 = 0xFFFF_0001;
+
+/// Registers [`WIDGET_GENERIC_ICON`] once for the life of the process —
+/// parsing the same handful of rectangles every frame would be paying
+/// real work for an answer that never changes.
+fn ensure_widget_generic_icon(fonts: &mut nacelle::font::FontSystem) {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        if let Err(e) = fonts.register_icon(WIDGET_GENERIC_ICON_ID, WIDGET_GENERIC_ICON) {
+            eprintln!(
+                "nacelle-desktop: the ADD WIDGET grid's own placeholder icon did not parse ({e}) — tiles draw no icon"
+            );
+        }
+    });
+}
+
 /// The engine's colour in the draw list's clothes.
 fn col(c: theme::ThemeColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: c.a }
@@ -704,8 +732,8 @@ impl Editor {
         static W_FRAC: OnceLock<TokenId> = OnceLock::new();
         static W_MIN: OnceLock<TokenId> = OnceLock::new();
         static HEAD_H: OnceLock<TokenId> = OnceLock::new();
-        static ITEM_H: OnceLock<TokenId> = OnceLock::new();
-        static ITEM_MIN: OnceLock<TokenId> = OnceLock::new();
+        static TILE_W: OnceLock<TokenId> = OnceLock::new();
+        static TILE_W_MIN: OnceLock<TokenId> = OnceLock::new();
         static MAX_H: OnceLock<TokenId> = OnceLock::new();
         let t = theme::resolved();
         let items = self.offer().len().max(1);
@@ -713,20 +741,45 @@ impl Editor {
             .max(t.px(tok(&W_MIN, "editor.list.w_min_px")));
         let pad = list_pad();
         let title_h = t.px(tok(&HEAD_H, "editor.list.head_h"));
-        // Miniature height: 16:9-ish, shrunk so everything fits on screen.
-        let ih = (t.px(tok(&ITEM_H, "editor.list.item_h")))
-            .max(t.px(tok(&ITEM_MIN, "editor.list.item_h_min_px")))
-            .min((h * t.px(tok(&MAX_H, "editor.list.max_h_frac")) - title_h - pad) / items as f32 - pad);
-        let bh = title_h + items as f32 * (ih + pad) + pad * 2.0;
+
+        // Tiles are SQUARE, as many columns as the window's own width
+        // holds at the theme's target width — filled edge to edge
+        // across those columns rather than left short of `bw` on the
+        // last one's own gap. Never more columns than there are widgets
+        // to show: two widgets in a window wide enough for five columns
+        // stretch to fill it, the same as the old single column always
+        // did, rather than sitting in a mostly-empty row.
+        let want_w = t
+            .px(tok(&TILE_W, "editor.list.tile_w"))
+            .max(t.px(tok(&TILE_W_MIN, "editor.list.tile_w_min_px")));
+        let cols = (((bw - pad) / (want_w + pad)).floor() as usize).clamp(1, items);
+        let mut tile_w = (bw - pad * (cols as f32 + 1.0)) / cols as f32;
+        let rows = items.div_ceil(cols);
+
+        // The whole grid still respects the screen fraction the list may
+        // fill (`list.max_h_frac`) — shrinking every tile by the SAME
+        // factor keeps it square rather than clipping the last row, the
+        // same shape of clamp the old single column's height carried
+        // before this.
+        let max_h = h * t.px(tok(&MAX_H, "editor.list.max_h_frac"));
+        let avail_tile_h = (max_h - title_h - 2.0 * pad) / rows as f32 - pad;
+        if avail_tile_h > 0.0 && avail_tile_h < tile_w {
+            tile_w = avail_tile_h;
+        }
+        tile_w = tile_w.max(t.px(tok(&TILE_W_MIN, "editor.list.tile_w_min_px")));
+        let tile_h = tile_w;
+
+        let bh = title_h + rows as f32 * (tile_h + pad) + pad * 2.0;
         let bx = (w - bw) / 2.0;
         let by = (h - bh) / 2.0;
         let list = (0..items)
             .map(|i| {
+                let (col, row) = (i % cols, i / cols);
                 Rect::new(
-                    bx + pad,
-                    by + title_h + pad + i as f32 * (ih + pad),
-                    bw - 2.0 * pad,
-                    ih,
+                    bx + pad + col as f32 * (tile_w + pad),
+                    by + title_h + pad + row as f32 * (tile_h + pad),
+                    tile_w,
+                    tile_h,
                 )
             })
             .collect();
@@ -1265,6 +1318,15 @@ impl Editor {
                 ctx.dl
                     .rect(r.x, r.y, r.w, r.h, col(t.color(tok(&PROXY_FILL, "component.editor.proxy_fill"))));
             }
+            // A live miniature, exactly as `draw_panel` will draw this
+            // SAME instance once it is part of the running set — the
+            // one difference between this board and the ADD WIDGET
+            // list's own miniatures being WHOSE rect stands here (2026-
+            // 08-28's fix): a placement dropped on the board used to
+            // show its outline and nothing inside it until a save gave
+            // it a real slot in `sc.widgets`, which read as the widget
+            // having silently failed to place at all.
+            mini(ctx, inst.widget, r);
             ctx.dl
                 .rect_outline(r.x, r.y, r.w, r.h, proxy_border(hot), col(st.edge));
             // Corner resize handles on the hot panel.
@@ -1342,7 +1404,7 @@ impl Editor {
             static EMPTY_C: OnceLock<TokenId> = OnceLock::new();
             static TILE_CLASS: OnceLock<Option<u16>> = OnceLock::new();
             static HOLD_FILL: OnceLock<TokenId> = OnceLock::new();
-            static HEAD: OnceLock<TokenId> = OnceLock::new();
+            static ICON_PAD: OnceLock<TokenId> = OnceLock::new();
             static RING_W: OnceLock<TokenId> = OnceLock::new();
             let (win, items) = self.add_list_rects(w, h);
             nacelle::object::window::backdrop(ctx, t.px(tok(&SCRIM, "modal.scrim_alpha")));
@@ -1397,32 +1459,29 @@ impl Editor {
                 let hover = ir.contains(mx, my);
                 let st = tile(hover || held);
                 ctx.dl.rect(ir.x, ir.y, ir.w, ir.h, col(tile(false).fill));
-                // Live miniature of the widget (headers drawn above the
-                // rect by some widgets get a little headroom).
-                let head = t.px(tok(&HEAD, "editor.list.preview_head"));
-                // The window's own padding, through the one function that
-                // knows it: `editor.list.pad` held above
-                // `editor.list.pad_min_px`. Reading the FLOOR here read a
-                // device-px companion (§3.2) as though it were the length
-                // — a theme that opened the list up left its miniatures
-                // pressed against the entry at 6 px, and every other
-                // inset in this window moved without them.
-                let m = list_pad();
-                mini(
-                    ctx,
-                    widget,
-                    Rect::new(
-                        ir.x + m,
-                        ir.y + m + head,
-                        ir.w - 2.0 * m,
-                        // Only the degenerate case is caught here. The
-                        // 10 px this used to stand on was a floor with
-                        // nobody's name on it: a theme that squeezed the
-                        // entry got a miniature this file had decided
-                        // on. `editor.list.item_h_min_px` is where an
-                        // entry's own floor is declared.
-                        (ir.h - 2.0 * m - head).max(0.0),
-                    ),
+                // The tile's own icon — a placeholder, the same on
+                // every kind, until each ships one of its own (2026-08-
+                // 30, the owner's word: a live miniature is what a
+                // PLACED instance shows now, not what the picker offers
+                // to add). Centred and square regardless of the tile's
+                // own shape, inset from its shorter side so a very wide
+                // or very tall tile never stretches the glyph.
+                ensure_widget_generic_icon(ctx.fonts);
+                let icon_pad = t.px(tok(&ICON_PAD, "editor.list.icon_pad"));
+                let icon_size = (ir.w.min(ir.h) - 2.0 * icon_pad).max(1.0);
+                let (icx, icy) = (ir.x + ir.w / 2.0, ir.y + ir.h / 2.0);
+                let half = icon_size / 2.0;
+                ctx.dl.icon_quad(
+                    ctx.fonts,
+                    WIDGET_GENERIC_ICON_ID,
+                    icon_size.round() as u32,
+                    [
+                        [icx - half, icy - half],
+                        [icx + half, icy - half],
+                        [icx + half, icy + half],
+                        [icx - half, icy + half],
+                    ],
+                    col(st.text),
                 );
                 // Hold progress fills the entry from the left.
                 if held {
@@ -1676,23 +1735,21 @@ mod tests {
         );
     }
 
-    /// The ADD WIDGET miniatures are inset by the LIST's padding.
-    ///
-    /// `editor.list.pad_min_px` is a §3.2 companion — the device-px floor
-    /// under `editor.list.pad`, never a length in its own right — and the
-    /// miniature read it directly. A theme that opened the list up moved
-    /// every other inset in that window and left the previews pressed
-    /// against their entries at six pixels.
+    /// The ADD WIDGET grid's own placeholder icon (2026-08-30) stands
+    /// centred and square in each tile, inset from its shorter side by
+    /// `editor.list.icon_pad` — the picker no longer draws a live
+    /// miniature of the widget at all (that is the PLACED board's own
+    /// job now: see `a_placed_instance_gets_its_own_live_miniature`).
     #[test]
-    fn a_miniature_is_inset_by_the_lists_own_padding() {
+    fn each_tiles_icon_is_centred_square_and_inset_by_the_lists_own_padding() {
         // Selects a theme in a process-wide engine (see `theme_test_lock`).
         let _theme = crate::widgets::theme_test_lock();
         fixture_registry();
         // Far above the floor, so the two answers cannot be mistaken for
         // each other: 6u is 32.4 px against a 6 px floor.
-        let _open = Themed::new("editor-list-pad", "[editor]\nlist.pad = 6u\n");
+        let _open = Themed::new("editor-list-icon-pad", "[editor]\nlist.icon_pad = 6u\n");
         nacelle::theme::set_viewport(H, 1.0);
-        let pad = list_pad();
+        let pad = crate::widgets::token_px("editor.list.icon_pad");
         assert!(
             pad > 20.0,
             "the fixture must part the padding from its floor, or this test guards \
@@ -1721,23 +1778,83 @@ mod tests {
         let (_, items) = ed.add_list_rects(W, H);
         assert!(!items.is_empty(), "the fixture registry offers no widget to list");
 
-        let mut shown: Vec<Rect> = Vec::new();
-        recorded(|ctx| ed.draw(ctx, |_, _, r| shown.push(r)));
-        assert!(!shown.is_empty(), "the open ADD WIDGET window drew no miniature");
-        for (m, entry) in shown.iter().zip(items.iter()) {
+        let cmds = recorded(|ctx| ed.draw(ctx, |_, _, _| {}));
+        let icons: Vec<[[f32; 2]; 4]> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                nacelle::draw::DrawCmd::IconQuad { p, icon, .. }
+                    if *icon == WIDGET_GENERIC_ICON_ID =>
+                {
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(icons.len(), items.len(), "not every tile drew the placeholder icon");
+        for (p, entry) in icons.iter().zip(items.iter()) {
+            let (x0, y0, x1, y1) = (p[0][0], p[0][1], p[2][0], p[2][1]);
+            let (iw, ih) = (x1 - x0, y1 - y0);
+            assert!((iw - ih).abs() < 0.01, "the icon is {iw}x{ih}, not square");
+            let want = entry.w.min(entry.h) - 2.0 * pad;
             assert!(
-                (m.x - (entry.x + pad)).abs() < 0.01,
-                "a miniature is {} px in from its entry, not the list's own {pad} px",
-                m.x - entry.x
+                (iw - want).abs() < 0.01,
+                "the icon is {iw} px across; the tile's shorter side inset by the \
+                 list's own padding on both sides is {want}"
+            );
+            let (cx, cy) = (entry.x + entry.w / 2.0, entry.y + entry.h / 2.0);
+            assert!(
+                ((x0 + x1) / 2.0 - cx).abs() < 0.01,
+                "the icon is not centred on its tile horizontally"
             );
             assert!(
-                (m.w - (entry.w - 2.0 * pad)).abs() < 0.01,
-                "a miniature is {} px wide inside a {} px entry, which is not that \
-                 padding on both sides",
-                m.w,
-                entry.w
+                ((y0 + y1) / 2.0 - cy).abs() < 0.01,
+                "the icon is not centred on its tile vertically"
             );
         }
+    }
+
+    /// A widget PLACED on the board — not merely offered in the ADD
+    /// WIDGET list — gets its own live miniature too (2026-08-28's
+    /// fix): before this, a fresh placement showed its outline and
+    /// nothing inside it until a save gave it a real slot in the
+    /// running set, which read as the widget having silently failed to
+    /// place at all. The miniature stands at the instance's OWN
+    /// on-screen rectangle — the same one `draw_panel` will use once
+    /// this instance is part of the running layout — not the list's
+    /// padded tile geometry the test above checks.
+    #[test]
+    fn a_placed_instance_gets_its_own_live_miniature() {
+        let mut ed = Editor::new(screen_gutter(0.0));
+        ed.start(
+            &Layout::empty(W, H),
+            W,
+            H,
+            false,
+            20,
+            20,
+            screen_gutter(0.0),
+            (0, 0),
+            WidgetCategory::Board,
+            1,
+        );
+        let widget = board_widgets().first().copied().expect("the fixture registry offers no widget");
+        let id = place(&mut ed, widget, 300.0, 200.0);
+        let want = ed.px_rect(id, W, H).expect("the placed instance has no rectangle");
+
+        let mut shown: Vec<(Panel, Rect)> = Vec::new();
+        recorded(|ctx| ed.draw(ctx, |_, p, r| shown.push((p, r))));
+
+        let (_, got) = shown
+            .iter()
+            .find(|(p, _)| *p == widget)
+            .expect("the placed instance drew no miniature of its own");
+        assert!(
+            (got.x - want.x).abs() < 0.01
+                && (got.y - want.y).abs() < 0.01
+                && (got.w - want.w).abs() < 0.01
+                && (got.h - want.h).abs() < 0.01,
+            "the miniature's rect {got:?} does not match the instance's own {want:?}"
+        );
     }
 
     /// A gutter as a SCREEN would hand it over.
