@@ -30,6 +30,7 @@
 //! is instant and forgotten on the next reload, the file is permanent
 //! and takes a moment.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 // `Path` is wanted only by the test-only helper further down. Imported
 // unconditionally it warns on every ordinary build; deleted to silence
@@ -116,12 +117,87 @@ pub fn running_under_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
-/// Where the file lives: beside the config nacelle-session wrote.
-pub fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+/// The variable nacelle-session hands the settings path down in
+/// (`hyprconf::CONF_ENV`). Repeated here for the same reason [`FILE`]
+/// is: the two crates do not depend on one another.
+pub const CONF_ENV: &str = "NACELLE_COMPOSITOR_CONF";
+
+/// The marker nacelle-session sets on everything it starts.
+pub const SESSION_MARKER: &str = "NACELLE_SESSION";
+
+/// Why there is no path to write to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NoPath {
+    /// Inside a nacelle session, but the session never said where.
+    ///
+    /// This is not "no config home" and must not be reported as one: it
+    /// means the session and the desktop are BUILD-SKEWED — an older
+    /// launcher that does not export [`CONF_ENV`] running a newer
+    /// desktop that expects it. The old behaviour here was to fall back
+    /// to a directory of our own and say nothing, which writes a real
+    /// file that the running compositor will never read. Refusing is
+    /// the honest answer, and the message has to name the reason,
+    /// because "cannot save" sends whoever reads it looking at
+    /// permissions.
+    VersionSkew,
+    /// Not in a session and no config home either — nowhere to put it.
+    NoConfigHome,
+}
+
+impl NoPath {
+    pub fn why(&self) -> &'static str {
+        match self {
+            Self::VersionSkew => {
+                "nacelle-session did not say where the compositor settings go \
+                 — the session and the desktop are different versions"
+            }
+            Self::NoConfigHome => "no config home to write the compositor settings into",
+        }
+    }
+}
+
+/// Where the file goes, as a rule rather than as a lookup.
+///
+/// Split from the environment so it can be tested over every combination
+/// of inputs without touching the process's own — a test that sets
+/// variables races every other test in the binary.
+///
+/// The rule, in order:
+///   1. The session said where. Take it literally, whatever it says.
+///   2. In a session that said nothing → refuse; see [`NoPath::VersionSkew`].
+///   3. Otherwise nacelle's OWN config root — never `<config home>/hypr`,
+///      which belongs to the user and which nacelle does not write into.
+fn resolve(conf: Option<&OsStr>, in_session: bool, config_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf, NoPath> {
+    if let Some(c) = conf.filter(|c| !c.is_empty()) {
+        return Ok(PathBuf::from(c));
+    }
+    if in_session {
+        return Err(NoPath::VersionSkew);
+    }
+    // Empty is not a path. `var_os` hands back an empty OsString for a
+    // variable that is set to nothing, and joining onto it yields a
+    // RELATIVE path — a file written next to wherever the process
+    // happens to be standing. config.rs guards this same case; this is
+    // the second place that has to.
+    let base = config_home
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("hypr").join(FILE))
+        .or_else(|| home.filter(|v| !v.is_empty()).map(|h| PathBuf::from(h).join(".config")))
+        .ok_or(NoPath::NoConfigHome)?;
+    Ok(base.join("nacelle").join("config").join("hypr").join(FILE))
+}
+
+/// [`resolve`] against this process's environment.
+pub fn path() -> Result<PathBuf, NoPath> {
+    let conf = std::env::var_os(CONF_ENV);
+    let ch = std::env::var_os("XDG_CONFIG_HOME");
+    let home = std::env::var_os("HOME");
+    resolve(
+        conf.as_deref(),
+        std::env::var_os(SESSION_MARKER).is_some(),
+        ch.as_deref(),
+        home.as_deref(),
+    )
 }
 
 /// The Lua literal for one value.
@@ -190,6 +266,7 @@ pub fn parse(text: &str) -> Vec<u32> {
 /// The values on disk, or the defaults where there is no file yet.
 pub fn read() -> Vec<u32> {
     path()
+        .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| parse(&t))
         .unwrap_or_else(|| OPTS.iter().map(|o| o.default).collect())
@@ -199,12 +276,7 @@ pub fn read() -> Vec<u32> {
 /// whenever a session started — but not when the desktop is run by
 /// hand outside one, hence the create.
 pub fn write(values: &[u32]) -> std::io::Result<()> {
-    let Some(p) = path() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no config home to write the compositor settings into",
-        ));
-    };
+    let p = path().map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.why()))?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -367,6 +439,120 @@ mod tests {
             .find(|l| l.contains(key))
             .unwrap_or_else(|| panic!("{key} is not in the file: {t}"));
         assert!(line.contains("1.00"), "a full percentage is not a float: {line}");
+    }
+
+
+    /// The name of the file may be spelled ONCE in this crate, outside
+    /// the tests and outside comments.
+    ///
+    /// A second spelling is not a compile error, is not a type error,
+    /// and is exactly how the two halves of this seam came apart: one
+    /// side derived a path, the other derived it again, and nothing
+    /// compared them. Anyone adding a script, an addon or a doc that
+    /// hardcodes the name gets this failure instead of a silent
+    /// disagreement discovered months later.
+    #[test]
+    fn the_file_name_is_spelled_once_in_this_crate() {
+        let src = include_str!("hyprsettings.rs");
+        let body = src.split("mod tests").next().unwrap_or(src);
+        let hits = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("nacelle-compositor.lua"))
+            .count();
+        assert_eq!(hits, 1, "the file name is spelled {hits} times, not once");
+    }
+
+    /// And `<config home>/hypr` — the user's OWN Hyprland directory —
+    /// is spelled nowhere outside comments. Nothing here writes there.
+    #[test]
+    fn the_users_own_hypr_directory_is_never_named_in_code() {
+        let src = include_str!("hyprsettings.rs");
+        let body = src.split("mod tests").next().unwrap_or(src);
+        for (i, l) in body.lines().enumerate() {
+            let t = l.trim_start();
+            // Rust comments, and Lua comments this crate EMITS: the
+            // generated config explains in prose that it leaves the
+            // user's directory alone, which is the opposite of writing
+            // there. What is being looked for is the path being USED.
+            if t.starts_with("//") || t.contains("\"--") {
+                continue;
+            }
+            assert!(
+                !l.contains(".config/hypr"),
+                "line {} names the user's own hypr directory: {l}",
+                i + 1
+            );
+        }
+    }
+
+    /// The rule, over every combination of inputs, stated as a
+    /// property rather than as a list of expected strings: whatever
+    /// comes back, it is NEVER `<config home>/hypr`.
+    ///
+    /// That directory is the user's own Hyprland config, and nacelle
+    /// does not write into it — the launcher's own module header says
+    /// so. This test survives [`resolve`] being rewritten, and fails
+    /// the moment anyone reintroduces the fallback that used to be
+    /// here.
+    #[test]
+    fn no_input_whatsoever_makes_us_write_into_the_users_own_hypr_dir() {
+        let ch = OsStr::new("/home/a/.config");
+        let home = OsStr::new("/home/a");
+        let confs = [None, Some(OsStr::new("")), Some(OsStr::new("/s/hypr/nacelle-compositor.lua"))];
+        let homes = [None, Some(OsStr::new("")), Some(ch)];
+        let mut seen = 0;
+        for c in confs {
+            for in_session in [false, true] {
+                for h in homes {
+                    seen += 1;
+                    let Ok(p) = resolve(c, in_session, h, Some(home)) else { continue };
+                    assert_ne!(
+                        p,
+                        PathBuf::from("/home/a/.config/hypr").join(FILE),
+                        "conf={c:?} in_session={in_session} config_home={h:?} landed in the user's own dir"
+                    );
+                    assert!(
+                        p.is_absolute(),
+                        "conf={c:?} in_session={in_session} config_home={h:?} gave a relative path {}",
+                        p.display()
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, 18, "the table of cases changed shape");
+    }
+
+    /// A session that says nothing is a VERSION SKEW, not a missing
+    /// config home, and must be refused rather than papered over. The
+    /// papering-over is what wrote a real file nothing would read.
+    #[test]
+    fn a_silent_session_is_refused_and_says_why() {
+        let home = OsStr::new("/home/a");
+        assert_eq!(resolve(None, true, None, Some(home)), Err(NoPath::VersionSkew));
+        assert_eq!(resolve(Some(OsStr::new("")), true, None, Some(home)), Err(NoPath::VersionSkew));
+        assert!(
+            NoPath::VersionSkew.why().contains("different versions"),
+            "the message does not name the reason: {}",
+            NoPath::VersionSkew.why()
+        );
+        // Outside a session the same absence is ordinary: we pick our own.
+        assert!(resolve(None, false, None, Some(home)).is_ok());
+    }
+
+    /// What the session says is taken LITERALLY. It computed the path
+    /// from its own notion of where nacelle's config root is; second
+    ///-guessing it here is how two derivations of one path appear.
+    #[test]
+    fn what_the_session_says_is_taken_as_given() {
+        let told = OsStr::new("/run/somewhere/odd/nacelle-compositor.lua");
+        for in_session in [false, true] {
+            assert_eq!(
+                resolve(Some(told), in_session, Some(OsStr::new("/home/a/.config")), Some(OsStr::new("/home/a"))),
+                Ok(PathBuf::from(told)),
+                "the session was told something and we went elsewhere"
+            );
+        }
     }
 
     /// The live fragment and the file must not drift apart: whatever

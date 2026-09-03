@@ -51,7 +51,7 @@ HOMEDIR    := $(if $(HOME),$(HOME),/nonexistent)
 HOMEPREFIX := $(patsubst $(HOMEDIR)/%,inside,$(PREFIX)/)
 XDGCONFDIR := $(if $(filter inside,$(HOMEPREFIX)),,$(DESTDIR)/etc/xdg/nacelle)
 
-.PHONY: all build install uninstall clean
+.PHONY: all build install uninstall clean check
 
 all: build
 
@@ -127,3 +127,33 @@ uninstall:
 
 clean:
 	rm -rf target
+
+# The seam check. Two things the ordinary `cargo test` cannot do:
+#
+#   1. Refuse to pass when there is no Lua interpreter. The test that
+#      actually proves the compositor settings file gets loaded runs a
+#      real interpreter from a foreign working directory, and the local
+#      pattern for such tests is to print a note and go green when the
+#      interpreter is missing. Green-because-unmeasured is the failure
+#      mode this whole seam was built out of, so here it is an error.
+#
+#   2. Compare the two BUILT binaries. nacelle-session --dry-run prints
+#      the settings path it will hand down; nacelle-desktop
+#      --print-compositor-path prints the one it will write to. Nothing
+#      in either crate's tests can see both.
+.PHONY: check
+check:
+	@command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || \
+	  { echo "check: no Lua interpreter — the loadfile test cannot run, refusing to report success"; exit 1; }
+	cargo test
+	@if [ -d "../nacelle-session" ]; then \
+	  cargo build -q --manifest-path ../nacelle-session/Cargo.toml; \
+	  mine=$$(cargo run -q -- --print-compositor-path); \
+	  theirs=$$(cd ../nacelle-session && cargo run -q -- --print-compositor-path); \
+	  [ "$$mine" = "$$theirs" ] || \
+	    { echo "check: the two binaries disagree about the settings path"; \
+	      echo "  nacelle-desktop: $$mine"; echo "  nacelle-session: $$theirs"; exit 1; }; \
+	  echo "check: both binaries agree on $$mine"; \
+	else \
+	  echo "check: nacelle-session is not beside this repo — the two-binary comparison DID NOT RUN"; \
+	fi

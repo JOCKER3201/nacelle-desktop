@@ -375,6 +375,22 @@ fn main() {
         print!("{}", config::print_layaut(&cfg.layout));
         return;
     }
+    if args.iter().any(|a| a == "--print-compositor-path") {
+        // Where the COMPOSITOR tab would write, as this BUILD resolves
+        // it. The counterpart is `nacelle-session --dry-run`, which
+        // prints the same path as NACELLE_COMPOSITOR_CONF. Two binaries
+        // that disagree here are two binaries that will disagree in a
+        // running session, silently — this is how that is caught before
+        // it ships rather than after.
+        match widgets::hyprsettings::path() {
+            Ok(p) => println!("{}", p.display()),
+            Err(e) => {
+                eprintln!("{}", e.why());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--reset-screen-layaut") {
         // Deletes the pinned [WxH@D] section of the selected layout for
         // one screen: the one named after the flag ("1920x1080@27"), or
