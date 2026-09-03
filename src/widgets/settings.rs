@@ -148,7 +148,6 @@ enum View {
     /// is, which is LOOK AND FEEL's `SOUNDS` list.
     SoundLevels,
     Boards,
-    Color,
     Blur,
     /// What the addons on this machine were told to do — the settings
     /// files the user writes by hand, and every one the program could
@@ -168,6 +167,26 @@ enum View {
     /// from BASIC write the identical edit; this page just does not
     /// make a hand scroll past BORDER and SHAPE to reach it.
     Wallpaper,
+    /// COMPOSITOR's own pages, one per section of Hyprland's config.
+    ///
+    /// The page above them carries no control at all any more: it is a
+    /// list of doors. Fourteen sliders under four headings was a page a
+    /// person scrolled through to reach the one row they came for, and
+    /// the `render:` options that joined them are a different subject
+    /// again — a wrong `cm_sdr_eotf` is a washed-out screen, which does
+    /// not belong two rows under how wide a window's gap is.
+    ///
+    /// Named for the SECTION each one holds, because that is what makes
+    /// the split checkable: every row of `CompositorWindows` is a
+    /// `general.*` key and nothing else, and a test says so.
+    CompositorWindows,
+    CompositorDecoration,
+    CompositorInput,
+    CompositorRender,
+    /// The displays themselves — READ-ONLY, and see
+    /// [`hyprsettings::Monitor`] for why: a display's bit depth is not a
+    /// global option but a field of the `monitor=` rule for that output.
+    CompositorMonitors,
 }
 
 /// The view one layer out, or `None` at the outermost one.
@@ -193,6 +212,15 @@ fn parent_view(v: View) -> Option<View> {
         View::ThemeEditor | View::LookFeelReset | View::Wallpaper | View::Compositor => {
             Some(View::LookFeel)
         }
+        // COMPOSITOR's own pages are the second layer this window has
+        // ever had, and the ladder is what makes them cheap: they wear
+        // BACK and Escape lands on the list of doors that opened them,
+        // both by [`chrome_of`] reading this one answer.
+        View::CompositorWindows
+        | View::CompositorDecoration
+        | View::CompositorInput
+        | View::CompositorRender
+        | View::CompositorMonitors => Some(View::Compositor),
         _ => None,
     }
 }
@@ -383,15 +411,30 @@ enum Act {
     /// Hyprland.
     OpenCompositor,
     /// One COMPOSITOR slider, by its index in [`hyprsettings::OPTS`].
-    /// Indexed rather than named because the rows ARE that table —
-    /// naming each one here would be a second list to keep in step,
-    /// and `the_compositor_rows_are_the_option_table` is what proves
-    /// the one list is enough.
+    /// An index and not a key because this is what the running page
+    /// carries — `Settings::comp` is a `Vec` in that table's order, and
+    /// a lookup per event would be a string search to reach a slot the
+    /// compiler already knew. The rows themselves name the KEY; only
+    /// [`hyprsettings::idx`] turns it into this, once, while compiling.
     CompTrack(usize),
     /// One COMPOSITOR toggle, by the same index.
     CompFlip(usize),
+    /// One COMPOSITOR enumeration, stepped to its next member by the
+    /// same index ([`hyprsettings::next_choice`]).
+    CompCycle(usize),
+    /// The doors COMPOSITOR is made of, one per section of Hyprland's
+    /// own config. The page they stand on has nothing else on it.
+    OpenCompWindows,
+    OpenCompDecoration,
+    OpenCompInput,
+    OpenCompRender,
+    /// …and the one page that reads the compositor instead of writing
+    /// it. Asks `hyprctl` on the way in, exactly as
+    /// [`Act::OpenCompositor`] reads the settings file on the way in,
+    /// and for the same reason: a list that re-asked every frame would
+    /// change under the eye.
+    OpenCompMonitors,
     OpenBoards,
-    OpenColor,
     OpenBlur,
     /// Reads the toolkit's report on the addon settings files, then
     /// shows it. Read on the way in rather than every frame: the list
@@ -408,13 +451,6 @@ enum Act {
     LookFeelResetConfirm,
     BlurRadiusTrack,
     BlurOpacityTrack,
-    ColorDepth(u32),
-    /// COLOR's HDR switch. It persists NOTHING of its own: what it
-    /// writes is a colour space, and "HDR is on" is read back off that
-    /// space. See [`Settings::flip_hdr`] for the whole of it.
-    ColorHdr,
-    ColorLutNext,
-    ColorIccNext,
     BoardGo((i32, i32)),
     BoardAdd(i8),
     BoardDel((i32, i32)),
@@ -560,7 +596,6 @@ fn focus_id(act: Act) -> FocusId {
         OpenLookFeel => FocusId::of("settings.rail.lookfeel"),
         OpenGrid => FocusId::of("settings.rail.grid"),
         OpenBoards => FocusId::of("settings.rail.boards"),
-        OpenColor => FocusId::of("settings.rail.color"),
         OpenBlur => FocusId::of("settings.rail.blur"),
         OpenAddons => FocusId::of("settings.rail.addons"),
         // The pages a section unfolds under itself on the rail.
@@ -571,6 +606,12 @@ fn focus_id(act: Act) -> FocusId {
         OpenCompositor => FocusId::of("settings.lookfeel.compositor"),
         CompTrack(i) => FocusId::of("settings.compositor.track").item(i),
         CompFlip(i) => FocusId::of("settings.compositor.flip").item(i),
+        CompCycle(i) => FocusId::of("settings.compositor.cycle").item(i),
+        OpenCompWindows => FocusId::of("settings.compositor.windows"),
+        OpenCompDecoration => FocusId::of("settings.compositor.decoration"),
+        OpenCompInput => FocusId::of("settings.compositor.input"),
+        OpenCompRender => FocusId::of("settings.compositor.render"),
+        OpenCompMonitors => FocusId::of("settings.compositor.monitors"),
         EditorSave => FocusId::of("settings.editor.save"),
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
@@ -622,10 +663,6 @@ fn focus_id(act: Act) -> FocusId {
             ListId::RingStyles => "settings.editor.ring.style",
             ListId::ScrollModes => "settings.editor.scrollbar.mode",
             ListId::ScrollEdges => "settings.editor.scrollbar.edge",
-            // ONE id across the switch, deliberately: the anchor keeps
-            // its place in the Tab round when HDR turns, because it is
-            // the same control wearing a different word.
-            ListId::Spaces => "settings.color.space",
         }),
         // A name's row is its index, with nothing added: the list
         // object is handed the names alone, so `base.item(i)` is what
@@ -658,10 +695,6 @@ fn focus_id(act: Act) -> FocusId {
         LookFeelResetConfirm => FocusId::of("settings.lookfeel.reset.confirm"),
         BlurRadiusTrack => FocusId::of("settings.blur.radius"),
         BlurOpacityTrack => FocusId::of("settings.blur.opacity"),
-        ColorDepth(bits) => FocusId::of("settings.color.depth").item(bits as usize),
-        ColorHdr => FocusId::of("settings.color.hdr"),
-        ColorLutNext => FocusId::of("settings.color.lut"),
-        ColorIccNext => FocusId::of("settings.color.icc"),
         BoardGo(k) => board_id("settings.boards.go", k),
         BoardAdd(side) => FocusId::of(if side < 0 {
             "settings.boards.add_left"
@@ -710,7 +743,6 @@ fn dropdown_base(d: Dropdown) -> FocusId {
         Dropdown::List(ListId::RingStyles) => "settings.editor.ring.style.list",
         Dropdown::List(ListId::ScrollModes) => "settings.editor.scrollbar.mode.list",
         Dropdown::List(ListId::ScrollEdges) => "settings.editor.scrollbar.edge.list",
-        Dropdown::List(ListId::Spaces) => "settings.color.space.list",
     })
 }
 
@@ -737,29 +769,6 @@ fn track_rect(rc: RowCtx) -> Rect {
 /// it writes its value INSIDE the plate, so it keeps the value gutter.
 fn cycle_rect(rc: RowCtx) -> Rect {
     Rect::new(rc.content.x + rc.label_w, rc.band.y, rc.content.w - rc.label_w, rc.band.h)
-}
-
-/// Where each of `n` segments stands: the row after its label, split
-/// equally, `segmented.gap` between.
-///
-/// These three and [`Settings::button_rect`]/[`Settings::bar_plates`] are
-/// the only statements of where a control's targets are. The drawing
-/// places its ink through them and [`Settings::targets`] reads them back,
-/// so a rect the eye sees and a rect the chain registers cannot be two
-/// different rects.
-fn chip_rects(n: usize, rc: RowCtx) -> Vec<Rect> {
-    let count = n.max(1) as f32;
-    let cw = (rc.content.w - rc.label_w - rc.m.seg_gap * (count - 1.0)) / count;
-    (0..n)
-        .map(|i| {
-            Rect::new(
-                rc.content.x + rc.label_w + (cw + rc.m.seg_gap) * i as f32,
-                rc.band.y,
-                cw,
-                rc.band.h,
-            )
-        })
-        .collect()
 }
 
 /// [`Settings::hit`]'s working part, over the hit map alone so a loop
@@ -1059,9 +1068,8 @@ fn rung(st: nacelle::object::button::ButtonState) -> State {
     }
 }
 
-// The three ladders this window draws from.
+// The two ladders this window draws from.
 static BTN_CLASS: OnceLock<Option<u16>> = OnceLock::new();
-static CHIP_CLASS: OnceLock<Option<u16>> = OnceLock::new();
 static TILE_CLASS: OnceLock<Option<u16>> = OnceLock::new();
 
 // Cells for the row grammar every view repeats: label/value columns,
@@ -1350,14 +1358,6 @@ enum ListId {
     /// dropdown offers it any more (2026-08-23) — see [`Knob`]'s note.
     #[allow(dead_code)]
     ScrollEdges,
-    /// COLOR's colour space. The one list in the window whose NAME and
-    /// whose CONTENTS both move: the HDR switch under it turns SPACE
-    /// into SPACE HDR and swaps the half of `config::COLOR_SPACE_TABLE`
-    /// it offers. ONE list and not two rows — the owner's rule is that
-    /// SPACE and SPACE HDR may never stand on the screen together, and
-    /// a hidden row beside a shown one is exactly the arrangement where
-    /// they could.
-    Spaces,
 }
 
 /// §5.10's severity roles in declaration order: the name the list offers,
@@ -1383,14 +1383,7 @@ const EDITOR_ROW: &str = "THEMES EDITOR";
 
 impl ListId {
     /// The word its anchor wears — the whole of it (decision §2b).
-    ///
-    /// A QUESTION put to the window and no longer a property of the
-    /// identity alone, because one list's word is not one word: COLOR's
-    /// SPACE wears SPACE HDR while the switch under it is on. The list
-    /// is the SAME list either way — same `ListId`, same focus id, same
-    /// anchor rect — and that is the point of asking here rather than
-    /// describing a second row that would sometimes be hidden.
-    fn label(self, s: &Settings) -> &'static str {
+    fn label(self, _s: &Settings) -> &'static str {
         match self {
             ListId::Looks => "THEMES",
             ListId::Layauts => "LAYAUTS",
@@ -1407,8 +1400,6 @@ impl ListId {
             ListId::RingStyles => "RING STYLE",
             ListId::ScrollModes => "SCROLLBAR MODE",
             ListId::ScrollEdges => "SCROLLBAR EDGE",
-            ListId::Spaces if s.color_hdr => "SPACE HDR",
-            ListId::Spaces => "SPACE",
         }
     }
 
@@ -1426,11 +1417,6 @@ impl ListId {
             ListId::RingStyles => "NO RING STYLES",
             ListId::ScrollModes => "NO SCROLLBAR MODES",
             ListId::ScrollEdges => "NO SCROLLBAR EDGES",
-            // Reachable, unlike the built-in sets above: a compositor
-            // that offers none of the spaces this program can name
-            // leaves the list holding nothing. The switch is gone by
-            // then, so this is the standard-range side saying so.
-            ListId::Spaces => "NO COLOUR SPACES",
         }
     }
 
@@ -1549,9 +1535,7 @@ fn picker_act(id: PickerId, part: nacelle::object::color_picker::Part) -> Act {
 // (the slider-bank rewrite, 2026-08-24): a bank of 1-D tracks has no
 // honest place for a 2-D gamut-boundary shape, and
 // `nacelle::object::color_picker`'s own module header explains why at
-// length rather than silently dropping the question. `color_space` and
-// `color_enabled` stay on `Settings` regardless — the HDR/ICC switches on
-// the COLOR page still read them directly.
+// length rather than silently dropping the question.
 
 /// One control of a page, as a description. Everything a row needs to
 /// draw itself, register itself and answer a key lives here: nothing
@@ -1584,25 +1568,9 @@ enum Ctrl {
         /// Writes the value to nacelle-desktop.ron.
         save: fn(&Settings),
     },
-    /// A row of segments, one of them on: COLOR's DEPTH.
-    ///
-    /// `values` is a QUESTION and not a table, for the reason
-    /// [`Ctrl::Slider`]'s `step` is one: the set on offer is not the
-    /// same set in every state of the page. Eight bits is not among the
-    /// depths while HDR is on ([`Settings::flip_hdr`] says why), and a
-    /// segment that cannot give a good picture is not shown greyed —
-    /// what the machine cannot do is not on the screen.
-    Chips {
-        label: &'static str,
-        values: fn(&Settings) -> &'static [u32],
-        get: fn(&Settings) -> u32,
-        act: fn(u32) -> Act,
-    },
-    /// A value that steps to the next on every press: COLOR's LUT and
-    /// ICC, and the theme editor's BASIC/ADVANCED. SPACE was one of
-    /// these until it grew a second offer — a cycler cannot say which
-    /// of two sets it is stepping through, and the HDR switch needs a
-    /// control that can ([`Ctrl::Drop`]).
+    /// A value that steps to the next on every press: the theme
+    /// editor's BASIC/ADVANCED, and one of the COMPOSITOR -> RENDER
+    /// enumerations ([`hyprsettings::Kind::Choice`]).
     Cycle { label: &'static str, get: fn(&Settings) -> String, act: Act },
     /// One of LOOK AND FEEL's three lists: an anchor wearing the LIST'S
     /// OWN NAME (decision §2b), and the list itself unfolding from its
@@ -1699,9 +1667,7 @@ impl Ctrl {
     /// (`a_row_does_not_write_its_label_its_control_and_its_value_over_one_another`).
     fn column_label(&self) -> Option<&'static str> {
         match self {
-            Ctrl::Slider { label, .. }
-            | Ctrl::Chips { label, .. }
-            | Ctrl::Cycle { label, .. } => Some(label),
+            Ctrl::Slider { label, .. } | Ctrl::Cycle { label, .. } => Some(label),
             _ => None,
         }
     }
@@ -1769,48 +1735,90 @@ const fn row_after(ctrl: Ctrl, after: Gap) -> Row {
     Row { ctrl, after, enabled: always, when: always }
 }
 
+// Its last production caller left with the COLOR view (the greyed
+// COLOR SPACE entry); test code still reaches for `enabled` on its own,
+// without `when` beside it, to build a fixture row a section has turned
+// off. The `cfg_attr` and not a deletion, for the same reason
+// `hyprsettings::Opt::label` carries one: a row constructor is exactly
+// the kind of thing the next feature reaches for first, and a function
+// this small is not worth losing over a build that does not compile
+// tests.
+#[cfg_attr(not(test), allow(dead_code))]
 const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
     Row { ctrl, after: Gap::Row, enabled, when: always }
 }
 
-/// One COMPOSITOR row. A MACRO and not a `const fn`, and the reason is
-/// the one thing `Ctrl` insists on: `get` and `set` are `fn` pointers,
-/// so they can capture nothing — a `const fn` taking `i` could not put
-/// it inside them. Substituting the index as a literal leaves the
-/// closures capturing nothing at all, which is exactly what a `fn`
-/// pointer will accept.
+/// One COMPOSITOR row, named by Hyprland's own dotted KEY —
+/// `comp_slider!("decoration.blur.size")`.
 ///
-/// `$i` indexes [`hyprsettings::OPTS`], which stays the one statement
-/// of what each setting is called and ranges over.
-/// The label and the range are NOT repeated here. They live once, in
-/// hyprsettings::OPTS, beside the key they belong to and the clamp the
-/// parser applies — a row whose slider stopped at 20 while the parser
-/// accepted 100 would be a difference nothing in the program could see.
+/// A MACRO and not a `const fn`, and the reason is the one thing `Ctrl`
+/// insists on: `get` and `set` are `fn` pointers, so they can capture
+/// nothing — a `const fn` taking the key could not put the index inside
+/// them. Expanding to a block that names a `const` gives the closures
+/// something they can read without capturing, which is exactly what a
+/// `fn` pointer will accept.
+///
+/// The key, and not a number. These rows carried the bare index once,
+/// and it was a number that meant nothing by itself: adding an option in
+/// the middle of [`hyprsettings::OPTS`] renumbered every row below it,
+/// and each of those sliders went on working while it moved a different
+/// setting. [`hyprsettings::idx`] turns the key into that index while
+/// compiling, so a key no option answers to fails the BUILD.
+///
+/// The label and the range are still not repeated here. They live once,
+/// in hyprsettings::OPTS, beside the key they belong to and the clamp
+/// the parser applies — a row whose slider stopped at 20 while the
+/// parser accepted 100 would be a difference nothing in the program
+/// could see.
 macro_rules! comp_slider {
-    ($i:expr) => {
+    ($key:literal) => {{
+        const I: usize = super::hyprsettings::idx($key);
         Ctrl::Slider {
-            label: super::hyprsettings::OPTS[$i].label,
-            act: Act::CompTrack($i),
+            label: super::hyprsettings::OPTS[I].label,
+            act: Act::CompTrack(I),
             unit: Unit::None,
-            range: (super::hyprsettings::OPTS[$i].min, super::hyprsettings::OPTS[$i].max),
+            range: (super::hyprsettings::OPTS[I].min, super::hyprsettings::OPTS[I].max),
             step: step_1,
-            get: |s| s.comp[$i],
-            set: |s, v| s.comp[$i] = v,
+            get: |s| s.comp[I],
+            set: |s, v| s.comp[I] = v,
             // On release, like every other slider on a page with no
             // SAVE button — the file is the storage.
-            save: |s| s.save_comp($i),
+            save: |s| s.save_comp(I),
         }
-    };
+    }};
 }
 
 macro_rules! comp_toggle {
-    ($i:expr) => {
+    ($key:literal) => {{
+        const I: usize = super::hyprsettings::idx($key);
         Ctrl::Toggle {
-            label: super::hyprsettings::OPTS[$i].label,
-            get: |s| s.comp[$i] != 0,
-            act: Act::CompFlip($i),
+            label: super::hyprsettings::OPTS[I].label,
+            get: |s| s.comp[I] != 0,
+            act: Act::CompFlip(I),
         }
-    };
+    }};
+}
+
+/// One COMPOSITOR row whose option is an ENUMERATION and not a quantity
+/// — `render:use_fp16` is disable, enable or auto, and 2 is not twice 1.
+///
+/// [`Ctrl::Cycle`] and not a new kind of control: a value that steps to
+/// the next on every press and writes which one it is standing on is
+/// exactly what COLOR's LUT and ICC rows already are, and a fourth
+/// variant of `Ctrl` would have been the same control with a second
+/// walker, a second hit rect and a second measurement to keep in step.
+///
+/// The word is the compositor's own ([`hyprsettings::word_of`]), upper
+/// cased like every other word in this window.
+macro_rules! comp_cycle {
+    ($key:literal) => {{
+        const I: usize = super::hyprsettings::idx($key);
+        Ctrl::Cycle {
+            label: super::hyprsettings::OPTS[I].label,
+            get: |s| super::hyprsettings::word_of(&super::hyprsettings::OPTS[I], s.comp[I]),
+            act: Act::CompCycle(I),
+        }
+    }};
 }
 
 fn bg_chosen(s: &Settings) -> bool {
@@ -1928,9 +1936,9 @@ const fn row_shown(ctrl: Ctrl, when: fn(&Settings) -> bool) -> Row {
 }
 
 /// …and the same with a break under it. Both halves of a row's own
-/// description at once, for a conditional control that ends a group:
-/// the COLOR page's HDR switch closes the controls and opens the two
-/// lines that report on them.
+/// description at once, for a conditional row that ends a group: the
+/// MONITORS page's own listing closes with one before the empty-state
+/// notes that stand in its place ([`COMP_MONITORS_ROWS`]).
 const fn row_shown_after(ctrl: Ctrl, when: fn(&Settings) -> bool, after: Gap) -> Row {
     Row { ctrl, after, enabled: always, when }
 }
@@ -2164,7 +2172,7 @@ struct Page {
 /// The headings are `Ctrl::Section`, which takes its own gap under it
 /// (`panel.title.block_h`) — hence `Gap::None` after every one of them,
 /// exactly as the FONT page writes its two.
-static RAIL_ROWS: [Row; 10] = [
+static RAIL_ROWS: [Row; 8] = [
     row_after(Ctrl::Section { title: "APPEARANCE" }, Gap::None),
     // The one section with pages of its own, and therefore the one
     // entry that carries a triangle ([`Ctrl::Expander`]).
@@ -2174,26 +2182,6 @@ static RAIL_ROWS: [Row; 10] = [
         act: Act::OpenLookFeel,
         kids: &LOOKFEEL_PAGES,
     }),
-    // Colour is a conversation with a Wayland compositor; where there
-    // is none, the entry is painted shut — visible, not clickable.
-    row_when(
-        Ctrl::Button {
-            label: Text::Fixed("COLOR SPACE"),
-            kind: BtnKind::Wide,
-            act: Act::OpenColor,
-        },
-        |s| s.color_enabled,
-    ),
-    // …and WHY it is shut, on the machines where it is. R6 paints an
-    // unofferable section grey and takes it out of the focus chain, and
-    // that is right — but grey alone says "not now" and the truth is
-    // "not here, and nothing you press will change it". One short line
-    // under the inscription, and only there: a rail carrying it on every
-    // machine would be a permanent apology for a feature that works.
-    row_shown(
-        Ctrl::Note { text: Text::Fixed("NO COLOR MANAGER") },
-        |s| !s.color_enabled,
-    ),
     row_after(
         Ctrl::Button {
             label: Text::Fixed("BLUR"),
@@ -2277,8 +2265,8 @@ static LOOKFEEL_PAGES: [Row; 5] = [
     }),
     // Only under Hyprland: every row of that page writes Hyprland's
     // own config, so under any other compositor it is not a greyed-out
-    // entry but an absent one — the same "what the machine cannot do is
-    // not on the screen" rule COLOR SPACE follows on the rail above.
+    // entry but an absent one — "what the machine cannot do is not on
+    // the screen".
     row_shown(
         Ctrl::Button {
             label: Text::Fixed("COMPOSITOR"),
@@ -2310,10 +2298,16 @@ fn rail_act(view: View) -> Act {
         | View::ThemeEditor
         | View::LookFeelReset
         | View::Wallpaper
-        | View::Compositor => Act::OpenLookFeel,
+        | View::Compositor
+        // A page two layers down still stands in ONE section, and the
+        // rail shows that section on every page of the window.
+        | View::CompositorWindows
+        | View::CompositorDecoration
+        | View::CompositorInput
+        | View::CompositorRender
+        | View::CompositorMonitors => Act::OpenLookFeel,
         View::Grid => Act::OpenGrid,
         View::Boards => Act::OpenBoards,
-        View::Color => Act::OpenColor,
         View::Blur => Act::OpenBlur,
         View::Addons => Act::OpenAddons,
     }
@@ -2330,7 +2324,16 @@ fn kid_act(view: View) -> Option<Act> {
         View::Font => Some(Act::OpenFont),
         View::SoundLevels => Some(Act::OpenSoundLevels),
         View::Wallpaper => Some(Act::OpenWallpaper),
-        View::Compositor => Some(Act::OpenCompositor),
+        // COMPOSITOR's own pages mark COMPOSITOR, which is the entry
+        // the rail actually has: the rail lists a SECTION's pages, and
+        // these are a page's pages. Leaving them unmarked would put a
+        // person two layers deep with nothing on the rail lit at all.
+        View::Compositor
+        | View::CompositorWindows
+        | View::CompositorDecoration
+        | View::CompositorInput
+        | View::CompositorRender
+        | View::CompositorMonitors => Some(Act::OpenCompositor),
         _ => None,
     }
 }
@@ -2720,44 +2723,227 @@ static WALLPAPER_ZONES: [Zone; 2] = [
     Zone::Pinned { rows: &EDITOR_BAR },
 ];
 
-/// [`View::Compositor`] — Hyprland's own look and feel.
+/// [`View::Compositor`] — Hyprland's own look and feel, as a LIST OF
+/// DOORS and nothing else.
 ///
-/// Each row names an INDEX into [`hyprsettings::OPTS`], which is the
-/// one statement of what a setting is called, what it ranges over and
-/// what it defaults to. The label is repeated here because `Ctrl` wants
-/// a `&'static str` it can lay out without reaching for the table, and
-/// `the_compositor_rows_are_the_option_table` is what keeps the two
-/// from drifting: it checks every index, label, range and control kind
-/// against `OPTS` itself.
+/// It was one page of fourteen sliders under four headings, and it was
+/// already the longest scroll in this window when the `render:` options
+/// arrived. Those do not belong under the same title as the rest: a
+/// gap is a matter of taste and `render:cm_sdr_eotf` is the difference
+/// between a correct screen and a washed-out one, and a page that runs
+/// the two together invites a hand to change the second while looking
+/// for the first.
 ///
-/// There is no SAVE button. Every row writes on release, the way the
-/// GRID sliders do — the file IS the storage
-/// ([`hyprsettings`]'s own note), and a settings page whose values
-/// were only real after a second press would be lying about what the
-/// compositor is currently doing.
-static COMPOSITOR_ROWS: [Row; 18] = [
-    row_after(Ctrl::Section { title: "WINDOWS" }, Gap::None),
-    row(comp_slider!(0)),
-    row(comp_slider!(1)),
-    row(comp_slider!(2)),
-    row_after(comp_slider!(3), Gap::Section),
-    row_after(Ctrl::Section { title: "TRANSPARENCY" }, Gap::None),
-    row(comp_slider!(4)),
-    row_after(comp_slider!(5), Gap::Section),
-    row_after(Ctrl::Section { title: "EFFECTS" }, Gap::None),
-    row(comp_toggle!(6)),
-    row(comp_slider!(7)),
-    row(comp_slider!(8)),
-    row(comp_toggle!(9)),
-    row_after(comp_toggle!(10), Gap::Section),
-    row_after(Ctrl::Section { title: "INPUT" }, Gap::None),
-    row(comp_slider!(11)),
-    row(comp_slider!(12)),
-    row(comp_toggle!(13)),
+/// SO THE SECTIONS ARE THE PAGES, and they are Hyprland's sections and
+/// not headings of our own devising — `general`, `decoration`, `input`,
+/// `render`. That is what makes the split checkable rather than a
+/// matter of opinion: every row of a page carries a key with that
+/// page's own prefix, and
+/// `each_compositor_page_holds_its_own_section_and_no_other` says so.
+///
+/// No control stands here. A hub with one stray toggle on it is a hub
+/// people learn to scroll, and the entry that names a page would then
+/// be competing with a control beside it.
+static COMPOSITOR_ROWS: [Row; 5] = [
+    row(Ctrl::Button {
+        label: Text::Fixed("WINDOWS"),
+        kind: BtnKind::Wide,
+        act: Act::OpenCompWindows,
+    }),
+    row(Ctrl::Button {
+        label: Text::Fixed("DECORATION"),
+        kind: BtnKind::Wide,
+        act: Act::OpenCompDecoration,
+    }),
+    row(Ctrl::Button {
+        label: Text::Fixed("INPUT"),
+        kind: BtnKind::Wide,
+        act: Act::OpenCompInput,
+    }),
+    row(Ctrl::Button {
+        label: Text::Fixed("RENDER"),
+        kind: BtnKind::Wide,
+        act: Act::OpenCompRender,
+    }),
+    row(Ctrl::Button {
+        label: Text::Fixed("MONITORS"),
+        kind: BtnKind::Wide,
+        act: Act::OpenCompMonitors,
+    }),
 ];
 
 static COMPOSITOR_ZONES: [Zone; 1] =
     [Zone::Flow { when: always, rows: &COMPOSITOR_ROWS }];
+
+// Each page below names its options by their KEY in
+// [`hyprsettings::OPTS`], which is the one statement of what a setting
+// is called, what it ranges over and what it defaults to. Reading a page
+// is then reading what it changes, and — the reason the numbers went
+// away — [`hyprsettings::idx`] resolves the key while compiling, so
+// inserting an option in the middle of the table moves nothing here, and
+// a misspelt key stops the build instead of quietly pointing a slider at
+// its neighbour.
+//
+// `the_compositor_rows_are_the_option_table` still checks every row's
+// label, range and control kind against `OPTS`, because those are
+// carried in the expansion and could still be given by hand.
+//
+// There is no SAVE button on any of them. Every row writes on release,
+// the way the GRID sliders do — the file IS the storage
+// ([`hyprsettings`]'s own note), and a settings page whose values were
+// only real after a second press would be lying about what the
+// compositor is currently doing.
+
+/// `general:` — how much room a window is given and how it is edged.
+static COMP_WINDOWS_ROWS: [Row; 3] = [
+    row(comp_slider!("general.gaps_in")),
+    row(comp_slider!("general.gaps_out")),
+    row(comp_slider!("general.border_size")),
+];
+
+static COMP_WINDOWS_ZONES: [Zone; 1] =
+    [Zone::Flow { when: always, rows: &COMP_WINDOWS_ROWS }];
+
+/// `decoration:` — everything drawn ON a window rather than around it.
+///
+/// ANIMATIONS is the one row here whose key is not `decoration.*`: it is
+/// Hyprland's whole `animations` section, which nacelle offers exactly
+/// one switch of. A page of its own for one toggle would be a door on
+/// the hub that opens onto a single checkbox, so it stands here, under a
+/// heading that says which section it really belongs to. The test that
+/// holds each page to its own prefix knows about this one row by name,
+/// which is the point: the exception is written down in two places
+/// rather than being a rule quietly relaxed.
+static COMP_DECORATION_ROWS: [Row; 12] = [
+    row_after(Ctrl::Section { title: "SHAPE" }, Gap::None),
+    row_after(comp_slider!("decoration.rounding"), Gap::Section),
+    row_after(Ctrl::Section { title: "TRANSPARENCY" }, Gap::None),
+    row(comp_slider!("decoration.active_opacity")),
+    row_after(comp_slider!("decoration.inactive_opacity"), Gap::Section),
+    row_after(Ctrl::Section { title: "EFFECTS" }, Gap::None),
+    row(comp_toggle!("decoration.blur.enabled")),
+    row(comp_slider!("decoration.blur.size")),
+    row(comp_slider!("decoration.blur.passes")),
+    row_after(comp_toggle!("decoration.shadow.enabled"), Gap::Section),
+    row_after(Ctrl::Section { title: "MOTION" }, Gap::None),
+    row(comp_toggle!("animations.enabled")),
+];
+
+static COMP_DECORATION_ZONES: [Zone; 1] =
+    [Zone::Flow { when: always, rows: &COMP_DECORATION_ROWS }];
+
+/// `input:` — the keyboard and the pointer.
+static COMP_INPUT_ROWS: [Row; 3] = [
+    row(comp_slider!("input.repeat_rate")),
+    row(comp_slider!("input.repeat_delay")),
+    row(comp_toggle!("input.natural_scroll")),
+];
+
+static COMP_INPUT_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &COMP_INPUT_ROWS }];
+
+/// `render:` — how colour gets from the application to the panel.
+///
+/// The only page under COMPOSITOR where a wrong answer is not a matter
+/// of taste, which is why it has its own door and its own closing note.
+/// Four of its seven rows are [`Ctrl::Cycle`] and not sliders: the
+/// source types them `Int` with an `OptionMap` beside them, so their
+/// numbers name states rather than measuring anything, and a track that
+/// offered "one and a half" between `enable` and `auto` would be a
+/// control lying about what it can be asked for.
+static COMP_RENDER_ROWS: [Row; 11] = [
+    row_after(Ctrl::Section { title: "COLOR MANAGEMENT" }, Gap::None),
+    row(comp_toggle!("render.cm_enabled")),
+    row(comp_cycle!("render.cm_auto_hdr")),
+    row(comp_cycle!("render.cm_sdr_eotf")),
+    row_after(comp_cycle!("render.non_shader_cm"), Gap::Section),
+    row_after(Ctrl::Section { title: "BUFFERS" }, Gap::None),
+    row(comp_cycle!("render.use_fp16")),
+    row_after(comp_cycle!("render.fp16_sdr_tf"), Gap::Section),
+    row_after(Ctrl::Section { title: "PROFILES" }, Gap::None),
+    row_after(comp_toggle!("render.icc_vcgt_enabled"), Gap::Section),
+    // COLOR MANAGEMENT is the one row on this page the compositor does
+    // not pick up from a reload, and a person who turns it on and sees
+    // nothing change has no way to find that out from anywhere else —
+    // Hyprland's own source says so in the option's description and
+    // nothing in the running session repeats it.
+    row(Ctrl::Note {
+        text: Text::Fixed("COLOR MANAGEMENT takes full effect at the next session"),
+    }),
+];
+
+static COMP_RENDER_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &COMP_RENDER_ROWS }];
+
+/// The displays, as the running compositor describes them.
+///
+/// THE ONE PAGE IN THIS WINDOW THAT ONLY READS. Everything else under
+/// COMPOSITOR is a global option in one Lua file; a display's bit depth
+/// is not an option at all, but a field of the `monitor=` RULE for that
+/// output (`CMonitorRuleParser::parseBitdepth`, which reads the single
+/// string "10"). Writing one means writing a rule per output into the
+/// config the SESSION emits — a different file with a different owner —
+/// so this page shows what the rules produced and says what it cannot
+/// change, rather than offering a control that would write nowhere.
+///
+/// TWO NOTES AND NOT ONE LIST, because a list here would have to be
+/// rows and rows are static: how many displays there are is not known
+/// until `hyprctl` answers. One note builds the whole listing as its own
+/// text ([`monitor_lines`]), and the other stands in its place when
+/// there is nothing to list — which is the state on every machine
+/// without a running Hyprland, and must therefore be a sentence and not
+/// a blank page.
+static COMP_MONITORS_ROWS: [Row; 4] = [
+    row_shown_after(
+        Ctrl::Note { text: Text::Of(monitor_lines) },
+        |s| !s.comp_monitors.is_empty(),
+        Gap::Section,
+    ),
+    row_shown(
+        Ctrl::Note { text: Text::Fixed("THE COMPOSITOR LISTED NO DISPLAYS") },
+        |s| s.comp_monitors.is_empty(),
+    ),
+    row_shown_after(
+        Ctrl::Note { text: Text::Fixed("hyprctl answered nothing — is Hyprland running?") },
+        |s| s.comp_monitors.is_empty(),
+        Gap::Section,
+    ),
+    row(Ctrl::Note {
+        text: Text::Fixed("Bit depth and colour are per-display RULES, written by the session"),
+    }),
+];
+
+static COMP_MONITORS_ZONES: [Zone; 1] =
+    [Zone::Flow { when: always, rows: &COMP_MONITORS_ROWS }];
+
+/// The whole display listing as one block of text.
+///
+/// Built rather than rowed for the reason [`COMP_MONITORS_ROWS`] gives:
+/// the number of displays is the compositor's answer and not something
+/// the description can know. TEN BITS is spelled out where it is true
+/// and left unsaid where it is not, because "8 bit" on every ordinary
+/// screen is noise, while its absence where a rule asked for ten is the
+/// one thing somebody reading this page came to find out.
+fn monitor_lines(s: &Settings) -> String {
+    s.comp_monitors
+        .iter()
+        .map(|m| {
+            let mut line = format!(
+                "{}  {}x{} @ {:.0} Hz  x{:.2}",
+                m.name, m.width, m.height, m.refresh, m.scale
+            );
+            if m.ten_bit {
+                line.push_str("  10 BIT");
+            }
+            if !m.color.is_empty() {
+                line.push_str(&format!("  {}", m.color.to_uppercase()));
+            }
+            if !m.description.is_empty() {
+                line.push_str(&format!("\n    {}", m.description));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// The FONT view's two sections, one per column (§3). They are the same
 /// three questions asked twice, so they are the case columns were made
@@ -2911,139 +3097,6 @@ static BOARDS_ROWS: [Row; 1] =
 static BOARDS_HINT: [Row; 1] = [row(Ctrl::Hint {
     text: Text::Fixed("HOLD THE LEFT BUTTON AND DRAG TO SWITCH BOARDS"),
 })];
-
-/// What the swapchain is asked for: its depth, the space it is asked in
-/// and the range that space is of. The three are one question and stand
-/// together (§2 of the screen decision — DEPTH and SPACE are not to be
-/// separated), which is why they are one column and not three rows of a
-/// wider one. The range is last because it is a statement ABOUT the list
-/// above it, and because turning it changes both of the other two.
-static COLOR_SWAPCHAIN_ROWS: [Row; 5] = [
-    row(Ctrl::Chips {
-        label: "DEPTH",
-        values: depth_values,
-        get: |s| s.color_depth,
-        act: Act::ColorDepth,
-    }),
-    // ONE list, whatever the switch under it says. Its word and its
-    // members both come from the window's state, so SPACE and SPACE HDR
-    // are two readings of this row and never two rows.
-    row(Ctrl::Drop { list: ListId::Spaces }),
-    // And the switch itself, UNDER the list it turns, so the eye reads
-    // "these spaces, and the range they are for" in that order.
-    // `row_shown` and not `row_when`: a compositor that cannot be asked
-    // for a single high-range space is a machine with no HDR on it, and
-    // the screen decision forbids a grey ghost offered "just in case".
-    row_shown_after(
-        Ctrl::Toggle { label: "HDR", get: |s| s.color_hdr, act: Act::ColorHdr },
-        hdr_possible,
-        Gap::Section,
-    ),
-    // WHAT CAME OF IT. Every control above this pair can be turned
-    // without the picture moving — a compositor may refuse a space, or
-    // never answer for one, and a surface may have no format above eight
-    // bits — and until these two lines existed the program said so on
-    // stderr and the window said nothing at all. That is the difference
-    // between a setting and a control that pretends: these rows are the
-    // page's answer, not its question.
-    row_shown(Ctrl::Note { text: Text::Of(color_space_note) }, color_was_answered),
-    row_shown(Ctrl::Note { text: Text::Of(color_depth_note) }, color_depth_fell_short),
-];
-
-/// Whether the application has told this window anything about the last
-/// request. `Row::when` and not an empty string inside the note, because
-/// an empty note is still a row: it would reserve its height and open a
-/// hole under the switch on every page that has nothing to report.
-fn color_was_answered(s: &Settings) -> bool {
-    !s.color_status.is_empty()
-}
-
-/// What the compositor did with the space that was last asked for.
-fn color_space_note(s: &Settings) -> String {
-    format!("space: {}", s.color_status)
-}
-
-/// Whether the swapchain gave LESS than the page asked for. Zero is "not
-/// measured" — no legal depth is zero — so a window the application has
-/// not told yet says nothing rather than claiming a shortfall of eight
-/// bits it has not seen.
-///
-/// LESS AND NOT MERELY DIFFERENT, and the difference is a lie this line
-/// told until it was caught. Twelve has no swapchain format of its own
-/// and rides the sixteen-bit float one on purpose (`nacelle-renderer`,
-/// `pick_format`: `16 | 12` share a tier) — so asking for twelve and
-/// being given sixteen is the arrangement working, not failing, and a
-/// page that read "different" would tell a user picking the one depth in
-/// four that behaves this way that "the surface offers no more" than the
-/// MORE it just got. A number above the wish is never a shortfall: the
-/// wish is a floor on precision, and a floor cleared is nothing to
-/// report.
-fn color_depth_fell_short(s: &Settings) -> bool {
-    s.color_depth_now != 0 && s.color_depth_now < s.color_depth_asked
-}
-
-/// Asked against given. Only ever drawn where the swapchain came up
-/// short ([`color_depth_fell_short`]) — a line repeating the number
-/// already standing in the DEPTH chips would be noise, and a line about
-/// a swapchain that gave MORE than the wish would be a complaint about
-/// good news.
-fn color_depth_note(s: &Settings) -> String {
-    format!(
-        "depth: {} bits asked, {} in the swapchain — the surface offers no more",
-        s.color_depth_asked, s.color_depth_now
-    )
-}
-
-/// The depths the swapchain may be asked for, and the whole of that
-/// question ([`Ctrl::Chips`]).
-///
-/// Eight bits is missing from the HDR offer. PQ spends its code points
-/// on a range eight bits does not have, so eight-bit HDR bands visibly
-/// — and this page has no way to say so: it carries no warning control,
-/// only a fixed note about where the LUT and ICC files live. The owner's
-/// rule settles it (`decyzja-ustawienia-ekranu.md`): what cannot give a
-/// picture is not on the screen.
-///
-/// The floor itself is the MODEL's (`SpaceRange::depth_floor`), not this
-/// page's. The configuration is read through the same statement, so a
-/// depth the page will not offer is also a depth the swapchain will not
-/// be asked for, however the file arrived at it.
-fn depth_values(s: &Settings) -> &'static [u32] {
-    config::color_depths(s.color_hdr)
-}
-
-/// Whether this machine can be asked for high dynamic range at all: at
-/// least one space of the table's HDR half survived the compositor's
-/// report of what it offers. When none did, the switch IS NOT THERE.
-fn hdr_possible(s: &Settings) -> bool {
-    config::COLOR_SPACE_TABLE
-        .iter()
-        .any(|&(n, r)| r == config::SpaceRange::Hdr && s.space_offered(n))
-}
-
-/// The files that grade what the swapchain produced, and where they are
-/// read from. A different subject from the column beside it: those are
-/// numbers asked of the compositor, these are files on disk.
-static COLOR_FILE_ROWS: [Row; 3] = [
-    row(Ctrl::Cycle {
-        label: "LUT",
-        get: |s| s.color_lut.clone().unwrap_or_else(|| "none".into()),
-        act: Act::ColorLutNext,
-    }),
-    row_after(
-        Ctrl::Cycle {
-            label: "ICC",
-            get: |s| s.color_icc.clone().unwrap_or_else(|| "none".into()),
-            act: Act::ColorIccNext,
-        },
-        Gap::Section,
-    ),
-    // Where the files come from, for whoever wonders why the lists are
-    // empty (settings.note.role).
-    row(Ctrl::Note {
-        text: Text::Fixed("LUT: lut/*.cube    ICC: icc/*.icc — in the assets directories"),
-    }),
-];
 
 /// The frosted glass under APPGRID and SEARCH AND AI — its radius (how
 /// deep the renderer's pyramid goes, always fully applied) and the
@@ -3206,11 +3259,6 @@ static BOARDS_ZONES: [Zone; 2] = [
     Zone::Pinned { rows: &BOARDS_HINT },
 ];
 
-static COLOR_COLUMNS: [ZCol; 2] =
-    [ZCol { rows: &COLOR_SWAPCHAIN_ROWS }, ZCol { rows: &COLOR_FILE_ROWS }];
-
-static COLOR_ZONES: [Zone; 1] = [Zone::Cols { columns: &COLOR_COLUMNS }];
-
 static BLUR_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &BLUR_ROWS }];
 
 static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &ADDONS_ROWS }];
@@ -3223,7 +3271,7 @@ static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &ADDONS_ROWS 
 /// wears CLOSE, because there is nowhere to go back to that the rail is
 /// not already showing, and the two pages the navigation does not list
 /// wear BACK.
-static PAGES: [Page; 12] = [
+static PAGES: [Page; 16] = [
     Page {
         view: View::LookFeel,
         title: "SETTINGS \u{2014} LOOK AND FEEL",
@@ -3267,12 +3315,6 @@ static PAGES: [Page; 12] = [
         zones: &BOARDS_ZONES,
     },
     Page {
-        view: View::Color,
-        title: "SETTINGS \u{2014} COLOR",
-        lead: Gap::Section,
-        zones: &COLOR_ZONES,
-    },
-    Page {
         view: View::Blur,
         title: "SETTINGS \u{2014} BLUR",
         lead: Gap::Section,
@@ -3298,6 +3340,39 @@ static PAGES: [Page; 12] = [
         title: "SETTINGS \u{2014} WALLPAPER",
         lead: Gap::Section,
         zones: &WALLPAPER_ZONES,
+    },
+    // COMPOSITOR's own five. Each title names the SECTION it holds, so
+    // the title bar of the page and the button that opened it say the
+    // same word.
+    Page {
+        view: View::CompositorWindows,
+        title: "SETTINGS \u{2014} COMPOSITOR WINDOWS",
+        lead: Gap::Section,
+        zones: &COMP_WINDOWS_ZONES,
+    },
+    Page {
+        view: View::CompositorDecoration,
+        title: "SETTINGS \u{2014} COMPOSITOR DECORATION",
+        lead: Gap::Section,
+        zones: &COMP_DECORATION_ZONES,
+    },
+    Page {
+        view: View::CompositorInput,
+        title: "SETTINGS \u{2014} COMPOSITOR INPUT",
+        lead: Gap::Section,
+        zones: &COMP_INPUT_ZONES,
+    },
+    Page {
+        view: View::CompositorRender,
+        title: "SETTINGS \u{2014} COMPOSITOR RENDER",
+        lead: Gap::Section,
+        zones: &COMP_RENDER_ZONES,
+    },
+    Page {
+        view: View::CompositorMonitors,
+        title: "SETTINGS \u{2014} COMPOSITOR MONITORS",
+        lead: Gap::Section,
+        zones: &COMP_MONITORS_ZONES,
     },
 ];
 
@@ -3383,8 +3458,6 @@ struct Metrics {
     section_gap: f32,
     slider_h: f32,
     check_h: f32,
-    seg_h: f32,
-    seg_gap: f32,
     cyc_h: f32,
     /// `panel.title.block_h`: a section header's band plus the gap
     /// under it, i.e. what the body starts after.
@@ -3423,8 +3496,6 @@ impl Metrics {
         static BTN_H: OnceLock<TokenId> = OnceLock::new();
         static ROW_GAP: OnceLock<TokenId> = OnceLock::new();
         static SLIDER_H: OnceLock<TokenId> = OnceLock::new();
-        static SEG_H: OnceLock<TokenId> = OnceLock::new();
-        static SEG_GAP: OnceLock<TokenId> = OnceLock::new();
         static CYC_H: OnceLock<TokenId> = OnceLock::new();
         static BLOCK_H: OnceLock<TokenId> = OnceLock::new();
         static HINT_INSET: OnceLock<TokenId> = OnceLock::new();
@@ -3437,8 +3508,6 @@ impl Metrics {
             section_gap: th.px(tok(&SECTION_GAP, "settings.section_gap")),
             slider_h: th.px(tok(&SLIDER_H, "slider.row_h")),
             check_h: th.px(tok(&CHECK_ROW_H, "checkbox.row_h")),
-            seg_h: th.px(tok(&SEG_H, "segmented.h")),
-            seg_gap: th.px(tok(&SEG_GAP, "segmented.gap")),
             cyc_h: th.px(tok(&CYC_H, "cycler.h")),
             block_h: th.px(tok(&BLOCK_H, "panel.title.block_h")),
             note_h: role_note(ctx).line(),
@@ -4272,11 +4341,6 @@ pub struct Settings {
     /// The boards, fed by the application every frame the window is
     /// open; drawn by the BOARDS view.
     pub boards: Vec<BoardThumb>,
-    /// Whether the COLOR view may be entered at all: true only in a
-    /// native Wayland session where the compositor speaks the Color
-    /// Management protocol. Everywhere else the button is a grey
-    /// inscription and the stored preferences are ignored.
-    pub color_enabled: bool,
     /// Whether this session is running under Hyprland — the one gate on
     /// the COMPOSITOR entry. Read once at construction from the
     /// instance signature Hyprland sets for every client it starts, so
@@ -4286,78 +4350,24 @@ pub struct Settings {
     /// Seeded from the file that IS their storage, so the page opens on
     /// what the compositor is actually doing.
     comp: Vec<u32>,
-    /// The COLOR view changed something; the application applies it.
-    pub color_dirty: bool,
-    /// **What came of the last colour request**, in the compositor's own
-    /// terms, for the page to say out loud.
-    ///
-    /// Written by the application after every `apply` and read by one
-    /// note row. It exists because every failure on this page is
-    /// INVISIBLE otherwise: a space the compositor will not take, a
-    /// description it never answers for, an ICC profile quietly
-    /// outranking the list — each of them leaves the picture exactly as
-    /// it was while the list draws its mark on the new name. The
-    /// program used to say all of it on stderr, and a desktop session
-    /// has nowhere to show a stderr (the same reason ADDONS carries the
-    /// loader's complaints).
-    ///
-    /// Private, like the two numbers under it: the application writes
-    /// them through [`Settings::color_answered`],
-    /// [`Settings::color_asked`] and [`Settings::color_measured`],
-    /// because the wish and the measurement have a rule BETWEEN them
-    /// (asking unmeasures) and a field anyone may assign cannot keep it.
-    color_status: String,
-    /// The depth the swapchain was ASKED for, and the depth it GAVE.
-    ///
-    /// Two numbers because they disagree, and the disagreement is the
-    /// interesting part: a surface offering nothing above eight bits
-    /// answers eight to a page showing sixteen, and a user hunting for
-    /// the difference would find none. The first is the configuration's
-    /// (`ColorConf::depth`), the second is read off the renderer's own
-    /// swapchain format after the frame in which the rebuild happened.
-    color_depth_asked: u32,
-    color_depth_now: u32,
+    /// What the compositor last said its displays were, for the
+    /// MONITORS page to show. Empty until that page is opened, and
+    /// empty for good on any machine where nothing answers — which is
+    /// a state the page has a sentence for and not an error.
+    comp_monitors: Vec<super::hyprsettings::Monitor>,
     /// The BLUR sliders moved; main re-reads blur_settings().
     pub blur_dirty: bool,
-    color_depth: u32,
-    color_space: String,
-    /// Which half of `config::COLOR_SPACE_TABLE` the SPACE list is
-    /// offering, which is also what the HDR switch shows.
+    /// The depth [`Settings::tone_step`] notches the BASIC sliders by.
     ///
-    /// NOT a setting and not written anywhere: the configuration names
-    /// a colour space and nothing else, and `bt2020 pq` in the file IS
-    /// this being on. It is a field only because the file cannot say
-    /// which side "auto" belongs to — "auto" belongs to both — so
-    /// somebody has to remember which half the user is looking at while
-    /// they look at it. Every other name settles it on sight
-    /// ([`Settings::set_space`]).
-    color_hdr: bool,
-    /// The names the SPACE list is offering right now, rebuilt whenever
-    /// the switch turns or the compositor's report arrives. Held as a
-    /// field because [`Settings::names`] answers with a reference into
-    /// the window, the way every other list does.
-    color_spaces: Vec<String>,
-    /// The colour spaces THIS compositor said it can be asked for, or
-    /// None while nobody has said — no colour manager, or a window
-    /// under test. None is not "none of them": a window that has not
-    /// been told has learnt nothing, and offers the whole table, which
-    /// is what it did before it could ask at all.
-    color_supported: Option<Vec<String>>,
-    /// The space last standing on each side of the switch, so a trip
-    /// across and back is not a trip to the default. Window state and
-    /// not configuration: after a restart the file is the only memory
-    /// there is, and it says "auto".
-    last_sdr: Option<String>,
-    last_hdr: Option<String>,
-    /// The depth the HDR switch RAISED, kept so that turning HDR off
-    /// gives back what turning it on took — and nothing else. Cleared
-    /// the moment the user presses a depth themselves, because a depth
-    /// they chose is theirs and must survive the switch.
-    depth_before_hdr: Option<u32>,
-    color_lut: Option<String>,
-    color_icc: Option<String>,
-    color_luts: Vec<String>,
-    color_iccs: Vec<String>,
+    /// A FIXED CONSTANT, not a setting: nacelle-desktop does not manage
+    /// colour any more — no swapchain depth, no colour space, no HDR —
+    /// so there is no runtime wish this could follow. It exists only to
+    /// keep the editor's notch honest about how fine a picker move
+    /// counts as real; [`nacelle::theme::edit::DEFAULT_DEPTH_BITS`] is
+    /// the toolkit's own floor and is TAKEN rather than repeated, so
+    /// there is exactly one eight in the tree, not two that could drift
+    /// apart.
+    tone_depth: u32,
     /// The ADDONS view's report, taken from the toolkit on the way into
     /// the page and not re-asked while it is open. Lines rather than
     /// problems: what a page shows is text, and keeping the shaping
@@ -4627,39 +4637,12 @@ impl Settings {
             edit_requested: false,
             reset_screen: false,
             boards: Vec::new(),
-            color_enabled: false,
             hyprland: super::hyprsettings::running_under_hyprland(),
             comp: super::hyprsettings::read(),
-            color_dirty: false,
-            // Empty and not a cheerful word: nothing has been applied
-            // yet, and the note reads that as "nothing to report".
-            color_status: String::new(),
-            // Zero is "not measured", which is exactly true until the
-            // application has told this window. Neither number is a
-            // legal depth, so neither can be mistaken for one.
-            color_depth_asked: 0,
-            color_depth_now: 0,
             blur_dirty: false,
-            color_depth: 8,
-            color_space: "auto".to_string(),
-            // The standard-range half, matching the "auto" above: a
-            // window that has read nothing is a window nobody has asked
-            // for high range. `set_space` holds the three in step from
-            // here on.
-            color_hdr: false,
-            color_spaces: config::color_spaces(false)
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            color_supported: None,
-            last_sdr: None,
-            last_hdr: None,
-            depth_before_hdr: None,
-            color_lut: None,
-            color_icc: None,
-            color_luts: Vec::new(),
-            color_iccs: Vec::new(),
+            tone_depth: nacelle::theme::edit::DEFAULT_DEPTH_BITS,
             addon_report: Vec::new(),
+            comp_monitors: Vec::new(),
             board_action: None,
             scroll: ScrollView::new(),
             flow: Flow {
@@ -5072,22 +5055,17 @@ impl Settings {
     /// own whole units.
     ///
     /// THE NOTCH IS THE PIPELINE'S, not a look and not a taste. The
-    /// model works it out from the swapchain's bit depth — one output
-    /// code is `q = 1/(2^bits - 1)`, and a notch is the smallest move
-    /// that can change one code — and the depth is a SETTING, chosen on
-    /// SETTINGS -> COLOR (the DEPTH chips) and kept in the desktop's
-    /// config beside the space, the LUT and the ICC profile. libnacelle
-    /// has no config and could not read it; a theme token would let a
-    /// file lie about the hardware. So it crosses the seam as an
-    /// argument, from the copy this window took on the way into the
-    /// editor.
-    ///
-    /// EIGHT BITS WHEN NOBODY HAS SAID, and the config is where that is
-    /// answered: `ColorConf::depth()` falls back to the toolkit's own
-    /// `DEFAULT_DEPTH_BITS`, which is the floor every swapchain
-    /// supports, so what arrives here has already been decided. A notch
-    /// coarser than the pipeline is honest; a notch finer is a slider
-    /// that does nothing for several presses and reads as broken.
+    /// model works it out from a bit depth — one output code is
+    /// `q = 1/(2^bits - 1)`, and a notch is the smallest move that can
+    /// change one code. nacelle-desktop does not manage colour any more
+    /// (the COLOR view, its swapchain depth and its HDR switch left
+    /// 2026-09-03 — HDR is the compositor's own business now, COMPOSITOR
+    /// -> RENDER), so [`Settings::tone_depth`] is a FIXED CONSTANT and
+    /// not a setting: [`nacelle::theme::edit::DEFAULT_DEPTH_BITS`],
+    /// TAKEN and not repeated, so there is exactly one eight in the
+    /// tree. A notch coarser than that floor is honest; a notch finer is
+    /// a slider that does nothing for several presses and reads as
+    /// broken.
     ///
     /// NEVER BELOW ONE, AND PAST TEN BITS THE TRACK IS THE LIMIT — not
     /// the depth. These tracks carry whole numbers: one degree of HUE,
@@ -5111,7 +5089,7 @@ impl Settings {
         // so a notch fine enough to matter has to be fine relative to
         // WHAT IS BEING DIVIDED BY, and that is the bed's own C.
         let seed_chroma = self.tone_seeds.map_or(0.0, |_| self.tone_bed.c);
-        let st = nacelle::theme::edit::tone_step(self.color_depth, seed_chroma);
+        let st = nacelle::theme::edit::tone_step(self.tone_depth, seed_chroma);
         let unit = |x: f32, per_unit: f32| {
             let n = (x / per_unit).round();
             if n.is_finite() { (n as u32).max(1) } else { 1 }
@@ -6570,10 +6548,6 @@ impl Settings {
             Act::ToggleSnap | Act::ToggleTyping | Act::ToggleAmbient => {}
             // The editor's switches speak toggle, like every other switch.
             Act::EditorFlip(_) => {}
-            // And COLOR's, which is a switch whatever it goes on to
-            // write: a press that clicked AND toggled would be the only
-            // one in the window that made two sounds.
-            Act::ColorHdr => {}
             Act::VolumeTrack => {}
             Act::Pick(..) => {}
             // THE PICKER'S TWO GRIDS, for the same reason `Pick` is here:
@@ -6811,18 +6785,6 @@ impl Settings {
                             self.say(Sfx::Theme);
                             return false;
                         }
-                        // Not a theme: it writes its config line at once,
-                        // like the depth chips beside it, and answers
-                        // FALSE because nothing about the THEME changed
-                        // — true is main's word for "re-resolve the
-                        // theme", and a swapchain is not a theme.
-                        ListId::Spaces => {
-                            self.set_space(&name);
-                            config::set_color_space(&self.color_space);
-                            self.color_dirty = true;
-                            self.say(Sfx::Click);
-                            return false;
-                        }
                     }
                     self.refresh_current();
                     self.say(Sfx::Theme);
@@ -6836,20 +6798,16 @@ impl Settings {
                 // content area over instead — which is why it answers
                 // false: nothing about the configuration changed.
                 //
-                // The colour depth is read on the way in, the way the
-                // COLOR page reads its own: BASIC's sliders notch by what
-                // the swapchain can show ([`Settings::tone_step`]), and a
-                // depth chosen in an earlier session would otherwise not
-                // be known here until somebody had opened COLOR.
-                self.color_depth = config::color_prefs().depth;
+                // No colour depth to read on the way in any more:
+                // `tone_depth` is a fixed constant ([`Settings::default`]),
+                // not something a session could have changed since.
                 self.seed_editor_from_theme();
                 self.go(View::ThemeEditor);
             }
             // LOOK AND FEEL's own shortcut into the SAME seeded state,
             // landing on [`View::Wallpaper`] instead of the whole
-            // editor — no `color_depth` read, since this page has no
-            // numeric track to notch. Answers `false` for the same
-            // reason `Act::ThemesEditor` does: a door, not a write.
+            // editor. Answers `false` for the same reason
+            // `Act::ThemesEditor` does: a door, not a write.
             Act::OpenWallpaper => {
                 self.seed_editor_from_theme();
                 self.go(View::Wallpaper);
@@ -6869,6 +6827,32 @@ impl Settings {
                     *v = u32::from(*v == 0);
                 }
                 self.save_comp(i);
+            }
+            // A cycler acts on the press too, and for the same reason a
+            // toggle does: there is no drag to write on the end of.
+            Act::CompCycle(i) => {
+                if let (Some(o), Some(v)) =
+                    (super::hyprsettings::OPTS.get(i), self.comp.get(i).copied())
+                {
+                    self.comp[i] = super::hyprsettings::next_choice(o, v);
+                    self.save_comp(i);
+                }
+            }
+            // The doors under COMPOSITOR. They carry no state of their
+            // own: the values were re-read on the way into the page
+            // these stand on, which is one read per visit rather than
+            // one per door.
+            Act::OpenCompWindows => self.go(View::CompositorWindows),
+            Act::OpenCompDecoration => self.go(View::CompositorDecoration),
+            Act::OpenCompInput => self.go(View::CompositorInput),
+            Act::OpenCompRender => self.go(View::CompositorRender),
+            // …except this one, which reads the COMPOSITOR rather than
+            // the file, and so has its own question to ask on the way
+            // in. It answers with an empty list wherever there is no
+            // compositor to ask, and the page says so.
+            Act::OpenCompMonitors => {
+                self.comp_monitors = super::hyprsettings::monitors();
+                self.go(View::CompositorMonitors);
             }
             // The drag itself moves the value through the slider's own
             // `set`; nothing to do on the press.
@@ -7006,44 +6990,6 @@ impl Settings {
                 config::set_sound_ambient(self.sound_ambient);
                 self.sound_dirty = true;
                 self.say(if self.sound_ambient { Sfx::ToggleOn } else { Sfx::ToggleOff });
-            }
-            Act::OpenColor => {
-                if self.color_enabled {
-                    self.seed_color(config::color_prefs());
-                    self.color_luts = config::color_files("lut", &[".cube"]);
-                    self.color_iccs = config::color_files("icc", &[".icc", ".icm"]);
-                    self.go(View::Color);
-                }
-            }
-            Act::ColorDepth(bits) => {
-                self.set_depth(bits);
-                config::set_color_depth(bits);
-                self.color_dirty = true;
-            }
-            // The switch turns the window's state ([`Settings::flip_hdr`]
-            // holds the whole decision); this writes what came of it. The
-            // depth line is written only when the flip actually moved the
-            // depth — a press that leaves it alone leaves the file alone
-            // too, rather than writing out a number nobody chose.
-            Act::ColorHdr => {
-                let depth_moved = self.flip_hdr();
-                config::set_color_space(&self.color_space);
-                if depth_moved {
-                    config::set_color_depth(self.color_depth);
-                }
-                self.color_dirty = true;
-                self.say(if self.color_hdr { Sfx::ToggleOn } else { Sfx::ToggleOff });
-            }
-            Act::ColorLutNext => {
-                // None -> first -> ... -> last -> None again.
-                self.color_lut = next_of(&self.color_luts, self.color_lut.take());
-                config::set_color_lut(self.color_lut.as_deref());
-                self.color_dirty = true;
-            }
-            Act::ColorIccNext => {
-                self.color_icc = next_of(&self.color_iccs, self.color_icc.take());
-                config::set_color_icc(self.color_icc.as_deref());
-                self.color_dirty = true;
             }
             Act::OpenGrid => {
                 let (snap, cols, rows, pad) = config::grid_prefs();
@@ -8310,8 +8256,8 @@ impl Settings {
     /// enumeration of a control's targets, in the order it registers
     /// them.
     ///
-    /// The rects are the drawing's own — [`track_rect`], [`chip_rects`],
-    /// [`cycle_rect`], [`Settings::button_rect`], [`Settings::bar_plates`]
+    /// The rects are the drawing's own — [`track_rect`], [`cycle_rect`],
+    /// [`Settings::button_rect`], [`Settings::bar_plates`]
     /// — so what this answers and what the frame paints cannot come
     /// apart. The three rows that carry no act (a heading, an aside, a
     /// hint) offer nothing, and neither does the BOARDS cross: what is
@@ -8326,14 +8272,6 @@ impl Settings {
         match ctrl {
             Ctrl::Toggle { act, .. } => vec![(rc.band, *act)],
             Ctrl::Slider { act, .. } => vec![(track_rect(rc), *act)],
-            Ctrl::Chips { values, act, .. } => {
-                let values = values(self);
-                chip_rects(values.len(), rc)
-                    .into_iter()
-                    .zip(values.iter())
-                    .map(|(r, bits)| (r, act(*bits)))
-                    .collect()
-            }
             Ctrl::Cycle { act, .. } => vec![(cycle_rect(rc), *act)],
             Ctrl::Drop { list } => {
                 vec![(Self::button_rect(BtnKind::Wide, rc), Act::ListBtn(*list))]
@@ -8558,7 +8496,6 @@ impl Settings {
         match ctrl {
             Ctrl::Toggle { .. } => m.check_h,
             Ctrl::Slider { .. } => m.slider_h,
-            Ctrl::Chips { .. } => m.seg_h,
             Ctrl::Cycle { .. } => m.cyc_h,
             // A bar is ONE row however many verbs it carries — and so is
             // an expander: what stands UNDER it is rows of its own, laid
@@ -8627,9 +8564,6 @@ impl Settings {
                     v.track,
                 );
                 self.push_hit(track, *act);
-            }
-            Ctrl::Chips { label, values, get, act } => {
-                self.draw_chips(ctx, label, values(self), *get, *act, rc)
             }
             Ctrl::Cycle { label, get, act } => {
                 let value = get(self);
@@ -8883,68 +8817,6 @@ impl Settings {
         }
     }
 
-    /// Fixed segments, one of them on; the segment count is data, not
-    /// theme.
-    fn draw_chips(
-        &mut self,
-        ctx: &mut Ctx,
-        label: &str,
-        values: &[u32],
-        get: fn(&Settings) -> u32,
-        act: fn(u32) -> Act,
-        rc: RowCtx,
-    ) {
-        static SEG_BORDER: OnceLock<TokenId> = OnceLock::new();
-        static SEG_BORDER_ON: OnceLock<TokenId> = OnceLock::new();
-        let th = theme::resolved();
-        self.row_label(ctx, label, rc);
-        // A segment's own text sits in the row's role, which is where
-        // this control has always set it; `segmented.role` is a size
-        // change and so belongs to the stage that moves furniture.
-        let f = role_label(ctx);
-        let cur = get(self);
-        for (bits, r) in values.iter().zip(chip_rects(values.len(), rc)) {
-            let hover = ctx.mouse.over(r);
-            let on = cur == *bits;
-            let st = ladder(
-                th,
-                &CHIP_CLASS,
-                "chip",
-                if on {
-                    State::Selected
-                } else if hover {
-                    State::Hover
-                } else {
-                    State::Idle
-                },
-            );
-            ctx.dl.rect_outline(
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                if on {
-                    th.px(tok(&SEG_BORDER_ON, "segmented.border_active"))
-                } else {
-                    th.px(tok(&SEG_BORDER, "segmented.border"))
-                },
-                col(st.edge),
-            );
-            let ty = center_y(ctx, rc.band, f);
-            ctx.dl.text_center(
-                ctx.fonts,
-                f.face,
-                f.px,
-                r.cx(),
-                ty,
-                &bits.to_string(),
-                col(st.text),
-                f.track,
-            );
-            self.hit(ctx, r, act(*bits));
-        }
-    }
-
     /// The current value in a button-like slot; a click steps to the
     /// next entry, wrapping through NONE where a file may be absent. No
     /// chevrons yet — cycler.chevron_* wait on the affordance being
@@ -9008,247 +8880,6 @@ impl Settings {
         self.hit(ctx, r, act);
     }
 
-    /// What this compositor said it can be asked for, from the
-    /// application — `None` when there is nobody to ask.
-    ///
-    /// The report decides whether the switch is on the page at all
-    /// ([`hdr_possible`]), so learning it is a way of stranding a window
-    /// that is standing on the high range: SPACE HDR over a list holding
-    /// nothing but "auto", and no switch anywhere to turn it back. The
-    /// standing name therefore goes back through [`Settings::set_space`]
-    /// — the ONE writer, which settles the side, applies that rule and
-    /// rebuilds the offer — instead of the offer being rebuilt behind
-    /// the window's back. Told twice, or told what it already knew, it
-    /// lands on exactly the same state.
-    pub fn set_supported_spaces(&mut self, names: Option<Vec<String>>) {
-        self.color_supported = names;
-        let standing = self.color_space.clone();
-        self.set_space(&standing);
-    }
-
-    /// A depth has been ASKED of the swapchain, and with it the last
-    /// measurement stops being about anything.
-    ///
-    /// THE ONE WRITER OF THE WISH, and it exists for the clearing and
-    /// not for the assignment. The renderer moves its format at the
-    /// rebuild, which happens inside the next frame's `render` — so
-    /// between the request and that rebuild the window is holding a NEW
-    /// wish beside an OLD measurement, and [`color_depth_fell_short`]
-    /// reads exactly that pair. Ask for sixteen on a machine that had
-    /// been given ten and the page would say "16 asked, 10 in the
-    /// swapchain — the surface offers no more" about a swapchain that
-    /// had not been asked yet; a page that is not redrawn again would
-    /// leave the sentence standing. Zeroing the measurement says the
-    /// only true thing there is to say in that gap: not measured.
-    ///
-    /// Only when the number actually moves, because a request that
-    /// leaves the depth alone (the SPACE list, the LUT — `apply_color!`
-    /// carries all of them at once) rebuilds nothing, and blinking a
-    /// standing line off and on again would be its own small lie.
-    pub fn color_asked(&mut self, depth: u32) {
-        if self.color_depth_asked != depth {
-            self.color_depth_now = 0;
-        }
-        self.color_depth_asked = depth;
-    }
-
-    /// What the swapchain GAVE, read off the renderer after a frame has
-    /// been drawn — which is when the rebuild has happened and the
-    /// number describes the picture that was just put on the screen.
-    pub fn color_measured(&mut self, bits: u32) {
-        self.color_depth_now = bits;
-    }
-
-    /// What came of the last request, in the compositor's own terms.
-    pub fn color_answered(&mut self, status: String) {
-        self.color_status = status;
-    }
-
-    /// Whether the compositor said it can be asked for this name.
-    fn space_offered(&self, name: &str) -> bool {
-        match &self.color_supported {
-            None => true,
-            Some(list) => list.iter().any(|n| n == name),
-        }
-    }
-
-    /// The ONE writer of the chosen colour space.
-    ///
-    /// It sets the name, settles which half of the table is on offer,
-    /// re-derives the offer itself and remembers the name on its own
-    /// side of the switch. Four things that have to agree, written in
-    /// one place so they cannot come apart: a list whose members no
-    /// longer hold the standing name draws no mark at all
-    /// ([`Settings::current_row`] answers `None`, honestly), and the
-    /// user would be looking at a set with nothing standing in it.
-    fn set_space(&mut self, name: &str) {
-        self.color_space = name.to_string();
-        // "auto" stands in BOTH offers, so it says nothing about which
-        // one is showing and the switch is left exactly where it is —
-        // picking "auto" out of the high-range list must not throw the
-        // page back to the other half under the pointer. Every other
-        // name settles the question by being what it is.
-        let range = config::space_range(&self.color_space);
-        if range != config::SpaceRange::Either {
-            self.color_hdr = range == config::SpaceRange::Hdr;
-        }
-        // And never onto a side there is no way back from. A file
-        // written on other hardware can name `bt2020 pq` to a compositor
-        // that cannot be asked for it; the switch is not on the page
-        // then ([`hdr_possible`]), so a window standing on the high
-        // range would be showing SPACE HDR over a list holding nothing
-        // but "auto", with no control anywhere to turn it back. It
-        // stands on the standard range instead, and the space the file
-        // names stands in no list — which is the truth: this machine is
-        // not showing it.
-        self.color_hdr &= hdr_possible(self);
-        if self.color_hdr {
-            self.last_hdr = Some(self.color_space.clone());
-        } else {
-            self.last_sdr = Some(self.color_space.clone());
-        }
-        self.rebuild_spaces();
-    }
-
-    /// The names the SPACE list offers: the half of the table the switch
-    /// is showing, less whatever this compositor cannot be asked for.
-    ///
-    /// A space the configuration names but the machine has no answer for
-    /// is NOT smuggled back in. That is the same doctrine the theme
-    /// lists follow — a look nobody has installed is a look with no mark
-    /// on it — and the alternative would be a row that says "in force"
-    /// about a picture the screen is not showing.
-    fn rebuild_spaces(&mut self) {
-        self.color_spaces = config::color_spaces(self.color_hdr)
-            .into_iter()
-            .filter(|n| self.space_offered(n))
-            .map(String::from)
-            .collect();
-    }
-
-    /// The chosen depth, and the whole of that state: a depth the user
-    /// pressed is theirs, so it cancels the memo the HDR switch keeps of
-    /// what it raised.
-    fn set_depth(&mut self, bits: u32) {
-        self.color_depth = bits;
-        self.depth_before_hdr = None;
-    }
-
-    /// Turns the HDR switch, and answers whether the colour depth moved
-    /// with it. Everything the window knows about high range is here.
-    ///
-    /// THE SWITCH PERSISTS NOTHING OF ITS OWN. There is no `hdr` field
-    /// in the configuration and there must not be: the file would then
-    /// be able to say `hdr: true` and `space: "srgb"` in one breath, the
-    /// cascade merges the two fields independently, and nothing in
-    /// `ColorConf` could rule on the contradiction. What it writes is a
-    /// colour space — which is also the only thing `wl_color` ever reads
-    /// — and "HDR is on" is read back off that name.
-    ///
-    /// ON: the high-range space this window last stood in, or else the
-    /// first one on offer. The table's order puts `bt2020 pq` first for
-    /// a reason: ST 2084 is the display's own transfer function, HLG is
-    /// a broadcast curve carried for completeness, and scRGB linear is a
-    /// compositing space rather than something to ask a monitor for.
-    ///
-    /// OFF: the standard-range space this window last stood in, or else
-    /// "auto" — truthful for a window that has stood in none, because
-    /// the file never said otherwise.
-    ///
-    /// And the depth. Eight-bit PQ bands visibly, the page has no way to
-    /// warn (it carries no warning control at all), so the eight is
-    /// taken off the offer and the depth comes up to ten with it. What
-    /// was replaced is remembered and given back on the way out — but
-    /// only what THIS took: pressing a depth clears the memo
-    /// ([`Settings::set_depth`]), so a twelve the user chose while HDR
-    /// was on stays twelve when HDR goes off.
-    fn flip_hdr(&mut self) -> bool {
-        // The list is a list of the other half from here on, and an open
-        // one is showing rows that are about to stop existing. Fold it,
-        // and put its scroll back to the head: an offset measured
-        // against the old members means nothing against the new.
-        self.dropdown = None;
-        self.list_scroll.reset();
-
-        let want_hdr = !self.color_hdr;
-        let remembered = if want_hdr { &self.last_hdr } else { &self.last_sdr };
-        let name = remembered
-            .as_deref()
-            .filter(|n| {
-                config::space_range(n).in_offer(want_hdr) && self.space_offered(n)
-            })
-            .map(String::from)
-            .or_else(|| {
-                config::color_spaces(want_hdr)
-                    .into_iter()
-                    .find(|n| self.space_offered(n))
-                    .map(String::from)
-            })
-            // The standard-range half always holds "auto", and the
-            // switch is not on screen at all unless the high-range half
-            // holds something, so this is unreachable — and stated
-            // rather than unwrapped, because "no space at all" has a
-            // right answer and it is the one the file means.
-            .unwrap_or_else(|| config::model::ColorConf::SPACE.to_string());
-
-        self.color_hdr = want_hdr;
-        self.set_space(&name);
-
-        let floor = depth_values(self).first().copied().unwrap_or(self.color_depth);
-        if self.color_hdr {
-            if self.color_depth < floor {
-                self.depth_before_hdr = Some(self.color_depth);
-                self.color_depth = floor;
-                return true;
-            }
-        } else if let Some(bits) = self.depth_before_hdr.take() {
-            self.color_depth = bits;
-            return true;
-        }
-        false
-    }
-
-    /// Seeds the COLOR page from the configuration.
-    ///
-    /// The switch is READ OFF the space and stored nowhere. The one
-    /// thing the file cannot say is which side "auto" belongs to — it
-    /// belongs to both — so a page opened on "auto" opens on the
-    /// standard-range side, which is what the file means: nobody asked
-    /// for high range.
-    ///
-    /// A fresh reading is also a fresh memory. What the window
-    /// remembered about the other side of the switch belonged to the
-    /// visit that made it, and the depth memo belongs to the flip that
-    /// took the depth.
-    ///
-    /// A file naming a space this machine cannot show does not strand
-    /// the page on a side with no switch to leave by: [`Settings::
-    /// set_space`] holds that rule, for every writer at once.
-    fn seed_color(&mut self, prefs: config::ColorPrefs) {
-        self.color_lut = prefs.lut;
-        self.color_icc = prefs.icc;
-        self.last_sdr = None;
-        self.last_hdr = None;
-        self.depth_before_hdr = None;
-        self.color_hdr =
-            config::space_range(&prefs.space) == config::SpaceRange::Hdr;
-        self.set_space(&prefs.space);
-        // THE PAGE OPENS ON A MEMBER OF THE OFFER IT OPENS WITH. The
-        // depth and the space are two lines of a file and one statement
-        // (`ColorConf::depth`), and this is the second reader of that
-        // pair: a page seeded with a depth below the floor of the side
-        // it lands on would draw a DEPTH row with nothing marked in it
-        // and no way to mark anything — the missing number cannot be
-        // pressed, because it is not on the screen to press.
-        //
-        // No memo is left behind. `depth_before_hdr` is what the SWITCH
-        // took and owes back, and no switch was turned here; the raised
-        // depth is what the file's own pair means, so turning HDR off
-        // afterwards has nothing to give back.
-        let floor = depth_values(self).first().copied().unwrap_or(prefs.depth);
-        self.color_depth = prefs.depth.max(floor);
-    }
-
     /// The names of one list, in the order they are offered.
     fn names(&self, list: ListId) -> &[String] {
         match list {
@@ -9261,7 +8892,6 @@ impl Settings {
             ListId::RingStyles => &self.ring_style_kinds,
             ListId::ScrollModes => &self.scroll_mode_kinds,
             ListId::ScrollEdges => &self.scroll_edge_kinds,
-            ListId::Spaces => &self.color_spaces,
         }
     }
 
@@ -9277,12 +8907,6 @@ impl Settings {
             ListId::RingStyles => self.current_ring_style.as_ref(),
             ListId::ScrollModes => self.current_scroll_mode.as_ref(),
             ListId::ScrollEdges => self.current_scroll_edge.as_ref(),
-            // Always a name, never nothing: `ColorConf::space` answers
-            // "auto" for anything it cannot read, so the window has a
-            // space in hand from the moment it opens the page. Whether
-            // that name is on OFFER is a different question, and the
-            // one `current_row` goes on to ask.
-            ListId::Spaces => Some(&self.color_space),
         }
     }
 
@@ -10171,7 +9795,6 @@ mod tests {
             Act::OpenSoundLevels,
             Act::OpenGrid,
             Act::OpenBoards,
-            Act::OpenColor,
             Act::OpenBlur,
             Act::ListBtn(ListId::Looks),
             Act::ListBtn(ListId::Layauts),
@@ -10191,17 +9814,6 @@ mod tests {
             Act::LookFeelResetConfirm,
             Act::BlurRadiusTrack,
             Act::BlurOpacityTrack,
-            Act::ColorDepth(8),
-            Act::ColorDepth(10),
-            // The anchor of the ONE space list, a name inside it and
-            // the switch that turns it: three controls that stand on
-            // the COLOR page together and must not share a chain
-            // position.
-            Act::ListBtn(ListId::Spaces),
-            Act::Pick(ListId::Spaces, 0),
-            Act::ColorHdr,
-            Act::ColorLutNext,
-            Act::ColorIccNext,
             Act::BoardGo((1, 0)),
             Act::BoardGo((-1, 0)),
             Act::BoardGo((0, 1)),
@@ -10360,49 +9972,273 @@ mod tests {
         assert!(parent_view(View::ThemeEditor) == Some(View::LookFeel));
     }
 
-    /// The COMPOSITOR page IS `hyprsettings::OPTS`, and this is what
-    /// keeps it so. `Ctrl` needs a `&'static str` label and a literal
+    /// COMPOSITOR's pages, each with the section it is supposed to hold
+    /// and the door that opens it — the one table this file's own checks
+    /// of the split read, so a sixth page cannot be added without saying
+    /// all three things about it.
+    const COMP_PAGES: [(View, Act, &str, &[Row]); 5] = [
+        (View::CompositorWindows, Act::OpenCompWindows, "general.", &COMP_WINDOWS_ROWS),
+        (
+            View::CompositorDecoration,
+            Act::OpenCompDecoration,
+            "decoration.",
+            &COMP_DECORATION_ROWS,
+        ),
+        (View::CompositorInput, Act::OpenCompInput, "input.", &COMP_INPUT_ROWS),
+        (View::CompositorRender, Act::OpenCompRender, "render.", &COMP_RENDER_ROWS),
+        // The one page with no options of its own: it reads the
+        // compositor rather than writing it, so it answers to no prefix.
+        (View::CompositorMonitors, Act::OpenCompMonitors, "", &COMP_MONITORS_ROWS),
+    ];
+
+    /// Which option a COMPOSITOR row changes, and how it draws it.
+    fn comp_row(row: &Row) -> Option<(usize, &'static str, Option<(u32, u32)>, &'static str)> {
+        match row.ctrl {
+            Ctrl::Slider { label, act: Act::CompTrack(i), range, .. } => {
+                Some((i, label, Some(range), "slider"))
+            }
+            Ctrl::Toggle { label, act: Act::CompFlip(i), .. } => Some((i, label, None, "toggle")),
+            Ctrl::Cycle { label, act: Act::CompCycle(i), .. } => Some((i, label, None, "cycler")),
+            // Headings and notes carry no option.
+            _ => None,
+        }
+    }
+
+    /// COMPOSITOR's pages ARE `hyprsettings::OPTS`, and this is what
+    /// keeps them so. `Ctrl` needs a `&'static str` label and a literal
     /// range, so each row repeats what the table already says — two
     /// statements of one fact, which drift the moment an option's range
     /// is corrected in one place and not the other. Every row is
-    /// checked here against the table: its index, its label, its
-    /// range, and that a flag is a toggle while everything else is a
-    /// slider.
+    /// checked here against the table: its index, its label, its range,
+    /// and that each kind is drawn with the control that suits it.
+    ///
+    /// The sweep is over ALL the pages at once, which is what makes the
+    /// last assertion mean anything after the split: an option is on
+    /// exactly one page, not on none and not on two.
     #[test]
     fn the_compositor_rows_are_the_option_table() {
         use crate::widgets::hyprsettings::{Kind, OPTS};
         let mut seen = vec![false; OPTS.len()];
-        for row in &COMPOSITOR_ROWS {
-            let (i, label, range, is_slider) = match row.ctrl {
-                Ctrl::Slider { label, act: Act::CompTrack(i), range, .. } => {
-                    (i, label, Some(range), true)
+        for (_, _, _, rows) in COMP_PAGES {
+            for row in rows {
+                let Some((i, label, range, drawn)) = comp_row(row) else { continue };
+                let o = OPTS.get(i).unwrap_or_else(|| panic!("row {label} indexes past the table"));
+                assert_eq!(label, o.label, "row {i} and the table disagree on the label");
+                let want = match o.kind {
+                    Kind::Flag => "toggle",
+                    Kind::Choice(_) | Kind::Word(_) => "cycler",
+                    _ => "slider",
+                };
+                assert_eq!(drawn, want, "{} is drawn with the wrong control for its kind", o.key);
+                if let Some((lo, hi)) = range {
+                    assert_eq!((lo, hi), (o.min, o.max), "{}'s range differs from the table", o.key);
                 }
-                Ctrl::Toggle { label, act: Act::CompFlip(i), .. } => (i, label, None, false),
-                // Section headings carry no option.
-                _ => continue,
-            };
-            let o = OPTS.get(i).unwrap_or_else(|| panic!("row {label} indexes past the table"));
-            assert_eq!(label, o.label, "row {i} and the table disagree on the label");
-            assert_eq!(
-                is_slider,
-                o.kind != Kind::Flag,
-                "{} is drawn with the wrong control for its kind",
-                o.key
-            );
-            if let Some((lo, hi)) = range {
-                assert_eq!((lo, hi), (o.min, o.max), "{}'s range differs from the table", o.key);
+                assert!(!seen[i], "{} has two rows", o.key);
+                seen[i] = true;
             }
-            assert!(!seen[i], "{} has two rows", o.key);
-            seen[i] = true;
         }
         for (i, got) in seen.iter().enumerate() {
             assert!(*got, "{} is in the table with no row to change it", OPTS[i].key);
         }
     }
 
+    /// A page named for a section of Hyprland's config holds that
+    /// section and no other.
+    ///
+    /// The split is only worth having if it MEANS something, and what it
+    /// means is this: a person who opens INPUT is looking at `input:`.
+    /// Without this check the pages are five buckets somebody once
+    /// sorted, and the next option added lands wherever there was room.
+    ///
+    /// ONE ROW IS EXEMPT, by name and not by relaxing the rule:
+    /// `animations.enabled` is the whole of Hyprland's `animations`
+    /// section as far as this window is concerned, and one toggle does
+    /// not earn a door of its own — see [`COMP_DECORATION_ROWS`].
+    #[test]
+    fn each_compositor_page_holds_its_own_section_and_no_other() {
+        use crate::widgets::hyprsettings::OPTS;
+        const LODGER: &str = "animations.enabled";
+        for (view, _, prefix, rows) in COMP_PAGES {
+            for row in rows {
+                let Some((i, label, _, _)) = comp_row(row) else { continue };
+                let key = OPTS[i].key;
+                if key == LODGER {
+                    assert_eq!(
+                        prefix, "decoration.",
+                        "{LODGER} moved page without anyone writing down where it went"
+                    );
+                    continue;
+                }
+                assert!(
+                    key.starts_with(prefix),
+                    "{label} ({key}) stands on the page for {prefix}*",
+                    );
+                assert!(
+                    !prefix.is_empty(),
+                    "{key} stands on the page that is supposed to change nothing"
+                );
+                let _ = view;
+            }
+        }
+        // …and the exemption is for exactly one row. A second lodger is
+        // a section that wants a page.
+        let lodgers = COMP_PAGES
+            .iter()
+            .flat_map(|(_, _, prefix, rows)| rows.iter().map(move |r| (*prefix, r)))
+            .filter_map(|(prefix, r)| comp_row(r).map(|(i, ..)| (prefix, OPTS[i].key)))
+            .filter(|(prefix, key)| !key.starts_with(prefix))
+            .count();
+        assert_eq!(lodgers, 1, "an option stands on a page that is not its section's");
+    }
+
+    /// The COMPOSITOR page is a list of DOORS and carries no control.
+    ///
+    /// It was fourteen sliders; the whole point of the split is that it
+    /// is none. One toggle left behind here would be a control people
+    /// have to notice among five buttons, and the next one would join
+    /// it — this is what stops that happening a row at a time.
+    #[test]
+    fn the_compositor_page_is_a_list_of_doors_and_holds_no_control() {
+        for row in &COMPOSITOR_ROWS {
+            assert!(
+                matches!(row.ctrl, Ctrl::Button { .. }),
+                "the COMPOSITOR page grew a control of its own"
+            );
+            assert!(comp_row(row).is_none(), "the COMPOSITOR page still changes an option");
+        }
+        // Every door names a page, and every page has a door: a page
+        // nothing opens is a page nobody reaches.
+        let doors: Vec<Act> = COMPOSITOR_ROWS
+            .iter()
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Button { act, .. } => Some(act),
+                _ => None,
+            })
+            .collect();
+        for (_, act, _, _) in COMP_PAGES {
+            assert!(doors.contains(&act), "{act:?} has a page and no door");
+        }
+        assert_eq!(doors.len(), COMP_PAGES.len(), "a door opens something that is not a page");
+    }
+
+    /// Each door opens its own page, and each page can be left again.
+    ///
+    /// The second half is the one a new page gets wrong: it is the first
+    /// layer in this window that is TWO deep, so BACK has to land on
+    /// COMPOSITOR and not on the rail's own section — which is
+    /// [`parent_view`]'s answer, and [`chrome_of`] reads it.
+    #[test]
+    fn every_compositor_door_opens_the_page_it_names() {
+        for (view, act, _, _) in COMP_PAGES {
+            let mut s = furnished();
+            s.view = View::Compositor;
+            assert!(!s.perform(act, 0.0), "{act:?} reported a configuration change");
+            assert!(s.view == view, "{act:?} opened the wrong page");
+            assert!(parent_view(view) == Some(View::Compositor), "{act:?}'s page cannot be left");
+            assert!(chrome_of(view) == Chrome::Back, "{act:?}'s page wears the wrong corner");
+            assert!(kid_act(view) == Some(Act::OpenCompositor), "{act:?}'s page lights no entry");
+            assert!(
+                PAGES.iter().any(|p| p.view == view),
+                "{act:?} opens a view with no page behind it"
+            );
+        }
+    }
+
+    /// A cycler steps the option it names, one member per press, and
+    /// writes the word the compositor uses for where it stopped.
+    ///
+    /// Pressed all the way round, because the wrap is the half a cycler
+    /// gets wrong: a control that walks to its last member and stays
+    /// there is one a person can get stuck at the wrong end of.
+    #[test]
+    fn a_cycler_steps_its_own_option_and_comes_back_round() {
+        use crate::widgets::hyprsettings::{word_of, OPTS};
+        let cyclers: Vec<(usize, fn(&Settings) -> String)> = COMP_PAGES
+            .iter()
+            .flat_map(|(_, _, _, rows)| rows.iter())
+            .filter_map(|r| match r.ctrl {
+                Ctrl::Cycle { act: Act::CompCycle(i), get, .. } => Some((i, get)),
+                _ => None,
+            })
+            .collect();
+        assert!(!cyclers.is_empty(), "no option is drawn as a cycler any more");
+        for (i, get) in cyclers {
+            let o = &OPTS[i];
+            let members = (o.max - o.min + 1) as usize;
+            let mut s = furnished();
+            s.comp = OPTS.iter().map(|o| o.default).collect();
+            let start = s.comp[i];
+            let mut seen = vec![start];
+            for _ in 0..members {
+                assert_eq!(get(&s), word_of(o, s.comp[i]), "{}'s row shows another value", o.key);
+                s.perform(Act::CompCycle(i), 0.0);
+                seen.push(s.comp[i]);
+            }
+            assert_eq!(s.comp[i], start, "{} did not come back round", o.key);
+            seen.pop();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), members, "{} skipped a member on the way round", o.key);
+        }
+    }
+
+    /// MONITORS says something when there is nothing to say.
+    ///
+    /// The state a settings page must never be is BLANK: on every
+    /// machine that is not running Hyprland this page has no displays to
+    /// list, and that is the ordinary case rather than a fault, so it
+    /// gets a sentence. The listing and the sentence are alternatives —
+    /// both at once would be a page contradicting itself.
+    #[test]
+    fn the_monitors_page_speaks_whether_or_not_the_compositor_answers() {
+        use crate::widgets::hyprsettings::Monitor;
+        let notes = |s: &Settings| -> Vec<String> {
+            COMP_MONITORS_ROWS
+                .iter()
+                .filter(|r| (r.when)(s))
+                .filter_map(|r| match &r.ctrl {
+                    Ctrl::Note { text } => Some(match text {
+                        Text::Fixed(t) => (*t).to_string(),
+                        Text::Of(f) => f(s),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut s = furnished();
+        s.comp_monitors.clear();
+        let empty = notes(&s);
+        assert!(!empty.is_empty(), "a page with no displays says nothing at all");
+        assert!(
+            empty.iter().any(|l| l.contains("NO DISPLAYS")),
+            "the empty page does not say the list is empty: {empty:?}"
+        );
+
+        s.comp_monitors = vec![Monitor {
+            name: "DP-1".into(),
+            description: "A Maker A Model".into(),
+            width: 3840,
+            height: 2160,
+            refresh: 144.0,
+            scale: 1.5,
+            format: "DRM_FORMAT_XRGB2101010".into(),
+            color: "hdr".into(),
+            ten_bit: true,
+        }];
+        let listed = notes(&s);
+        let all = listed.join("\n");
+        assert!(all.contains("DP-1"), "the display is not named: {listed:?}");
+        assert!(all.contains("3840x2160"), "the mode is not shown: {listed:?}");
+        assert!(all.contains("10 BIT"), "a ten-bit display does not say so: {listed:?}");
+        assert!(
+            !listed.iter().any(|l| l.contains("NO DISPLAYS")),
+            "the page lists displays and denies having any: {listed:?}"
+        );
+    }
+
     /// The gate the owner asked for: the entry exists only under
-    /// Hyprland, and it is ABSENT rather than greyed out — the rule
-    /// COLOR SPACE already follows one section above it.
+    /// Hyprland, and it is ABSENT rather than greyed out.
     #[test]
     fn the_compositor_entry_stands_only_under_hyprland() {
         let entry = LOOKFEEL_PAGES
@@ -10754,12 +10590,6 @@ mod tests {
             ListId::RingStyles,
             ListId::ScrollModes,
             ListId::ScrollEdges,
-            // And SPACE, whose members are neither on disk nor built
-            // into this file: they are half of a table in `config`,
-            // filtered by what the compositor said it can show. A third
-            // kind of provenance is a third chance for the mark and the
-            // pick to disagree.
-            ListId::Spaces,
         ] {
             for i in 0..s.names(list).len() {
                 let name = s.names(list)[i].clone();
@@ -10773,7 +10603,6 @@ mod tests {
                     ListId::RingStyles => s.current_ring_style = Some(name),
                     ListId::ScrollModes => s.current_scroll_mode = Some(name),
                     ListId::ScrollEdges => s.current_scroll_edge = Some(name),
-                    ListId::Spaces => s.set_space(&name),
                 }
                 assert_eq!(
                     s.current_row(list),
@@ -10795,11 +10624,6 @@ mod tests {
                 ListId::RingStyles => s.current_ring_style = Some("not installed".into()),
                 ListId::ScrollModes => s.current_scroll_mode = Some("not installed".into()),
                 ListId::ScrollEdges => s.current_scroll_edge = Some("not installed".into()),
-                // Straight into the field and past `set_space` on
-                // purpose: this is the state a configuration file can
-                // put the window in when the compositor cannot show
-                // what it names, and the answer must be no mark.
-                ListId::Spaces => s.color_space = "not installed".into(),
             }
             assert_eq!(
                 s.current_row(list),
@@ -11721,544 +11545,6 @@ mod tests {
         );
     }
 
-    /// The COLOR page, opened on what a configuration that says nothing
-    /// resolves to. `color_supported` is left at None, which is the
-    /// window that has not been told — the whole table on offer, the
-    /// state every machine with a working colour manager is in.
-    fn color_open() -> Settings {
-        let mut s = furnished();
-        s.view = View::Color;
-        s.seed_color(config::ColorPrefs {
-            depth: crate::config::model::ColorConf::DEPTH,
-            space: crate::config::model::ColorConf::SPACE.to_string(),
-            lut: None,
-            icc: None,
-        });
-        s
-    }
-
-    /// A COLOR page seeded from one written space, and nothing else said.
-    fn color_on(space: &str) -> Settings {
-        let mut s = color_open();
-        s.seed_color(config::ColorPrefs {
-            depth: crate::config::model::ColorConf::DEPTH,
-            space: space.to_string(),
-            lut: None,
-            icc: None,
-        });
-        s
-    }
-
-    /// Every drop-down the COLOR page describes right now, by identity.
-    fn color_drops(s: &Settings) -> Vec<ListId> {
-        page_rows(page(View::Color), s)
-            .filter_map(|r| match r.ctrl {
-                Ctrl::Drop { list } => Some(list),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The owner's rule, and the hard half of it: SPACE and SPACE HDR are
-    /// ONE control.
-    ///
-    /// Two rows, one shown per range, would satisfy any test that only
-    /// read the names on offer — and would be exactly the arrangement the
-    /// owner forbade, because a mistake in either condition puts both
-    /// words on the screen at once. So this reads the CONTROL and not its
-    /// contents: the page describes one drop-down either way, it is the
-    /// same `ListId`, it registers the same act at the same focus id, and
-    /// the frame draws its anchor at the same rectangle. Only the word on
-    /// it and what hangs from it move.
-    #[test]
-    fn the_hdr_switch_turns_one_list_and_never_reveals_a_second() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = color_open();
-
-        assert_eq!(
-            color_drops(&s),
-            vec![ListId::Spaces],
-            "COLOR at rest does not describe exactly one list"
-        );
-        let names_off: Vec<String> = s.names(ListId::Spaces).to_vec();
-        assert_eq!(ListId::Spaces.label(&s), "SPACE");
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-        let a = s.rect_of_act(Act::ListBtn(ListId::Spaces)).expect("no SPACE anchor");
-        let anchor_off = (a.x, a.y, a.w, a.h);
-
-        s.flip_hdr();
-
-        assert_eq!(
-            color_drops(&s),
-            vec![ListId::Spaces],
-            "turning HDR on revealed a SECOND list — the two words can now \
-             stand on the screen together"
-        );
-        assert_eq!(
-            ListId::Spaces.label(&s),
-            "SPACE HDR",
-            "the one list did not change its word"
-        );
-        assert_ne!(
-            s.names(ListId::Spaces).to_vec(),
-            names_off,
-            "the one list did not change its contents"
-        );
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-        let a = s.rect_of_act(Act::ListBtn(ListId::Spaces)).expect("no SPACE HDR anchor");
-        assert_eq!(
-            (a.x, a.y, a.w, a.h),
-            anchor_off,
-            "the anchor moved: this is a different control wearing the word, \
-             not the same one"
-        );
-
-        // And on the screen, where the rule was actually written: exactly
-        // one of the two words, whichever side is showing.
-        for want_hdr in [true, false] {
-            if s.color_hdr != want_hdr {
-                s.flip_hdr();
-            }
-            let drawn = page_runs(&mut fonts, &mut s);
-            let said = |w: &str| drawn.iter().filter(|t| t.as_str() == w).count();
-            assert_eq!(
-                (said("SPACE"), said("SPACE HDR")),
-                if want_hdr { (0, 1) } else { (1, 0) },
-                "with HDR {}, the page wrote SPACE {} time(s) and SPACE HDR \
-                 {} time(s)",
-                if want_hdr { "on" } else { "off" },
-                said("SPACE"),
-                said("SPACE HDR")
-            );
-        }
-    }
-
-    /// The list holds one range at a time, and between the two of them it
-    /// holds the whole table.
-    ///
-    /// The second half is what keeps the split honest: a filter that
-    /// merely dropped names would pass the first assertion and quietly
-    /// lose a space. `COLOR_SPACE_TABLE` is the only statement of which
-    /// side a name is on, so the test reads the offers against the table
-    /// rather than against a list of its own.
-    #[test]
-    fn the_space_list_never_holds_both_ranges() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = color_open();
-        let mut seen: Vec<String> = Vec::new();
-        for want_hdr in [false, true] {
-            if s.color_hdr != want_hdr {
-                s.flip_hdr();
-            }
-            for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
-                let offered = s.names(ListId::Spaces).iter().any(|n| n == name);
-                assert_eq!(
-                    offered,
-                    range.in_offer(want_hdr),
-                    "with HDR {}, '{name}' is {} the list",
-                    if want_hdr { "on" } else { "off" },
-                    if offered { "in" } else { "missing from" }
-                );
-            }
-            seen.extend(s.names(ListId::Spaces).iter().cloned());
-
-            // And on the screen, unfolded — the first list this page has
-            // ever carried, so that it draws and answers at all is part
-            // of the statement. Every name it holds is pressable, and no
-            // name of the other range is anywhere on the page.
-            s.dropdown = Some(Dropdown::List(ListId::Spaces));
-            // Fully unfolded: a row still in flight registers nothing,
-            // by the list object's own rule.
-            s.dropdown_since = None;
-            let mut dl = nacelle::draw::DrawList::recording();
-            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-            s.draw(&mut ctx);
-            let acts: Vec<Act> = s.hits.iter().map(|&(_, a)| a).collect();
-            for i in 0..s.names(ListId::Spaces).len() {
-                assert!(
-                    acts.contains(&Act::Pick(ListId::Spaces, i)),
-                    "name {i} of the unfolded space list is not on the screen"
-                );
-            }
-            let drawn = text_runs(&dl);
-            for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
-                if range.in_offer(want_hdr) {
-                    continue;
-                }
-                let word = name.to_uppercase();
-                assert!(
-                    !drawn.iter().any(|t| *t == word),
-                    "'{name}' is drawn with HDR {}, where it does not belong",
-                    if want_hdr { "on" } else { "off" }
-                );
-            }
-            s.dropdown = None;
-        }
-        for name in config::COLOR_SPACES {
-            assert!(
-                seen.iter().any(|n| n == name),
-                "'{name}' is in neither offer: the switch cannot reach it at all"
-            );
-        }
-    }
-
-    /// The choice never points into a list that no longer holds it.
-    ///
-    /// The state of an open list is measured against the names it was
-    /// opened over — a scroll offset, a mark, a row under the pointer —
-    /// and every one of those becomes a statement about a set that no
-    /// longer exists the moment the switch turns. So the switch folds the
-    /// list and puts its scroll back to the head, and whatever it lands
-    /// on is a member of the offer it landed in.
-    #[test]
-    fn a_flip_leaves_the_choice_standing_and_the_open_list_folded() {
-        for start in config::COLOR_SPACES {
-            let mut s = color_on(start);
-            assert!(
-                s.current_row(ListId::Spaces).is_some(),
-                "opened on '{start}' with nothing standing in the list"
-            );
-            // Two flips: over and back, which is where a memory that
-            // remembered the wrong side would show.
-            for step in 0..2 {
-                s.dropdown = Some(Dropdown::List(ListId::Spaces));
-                s.list_scroll.set_offset(120.0);
-                s.flip_hdr();
-                assert!(
-                    s.current_row(ListId::Spaces).is_some(),
-                    "'{start}', flip {step}: the standing space '{}' is not in \
-                     the list that is now on offer",
-                    s.color_space
-                );
-                assert!(
-                    s.dropdown.is_none(),
-                    "'{start}', flip {step}: the list stayed open over names \
-                     that no longer exist"
-                );
-                assert_eq!(
-                    s.list_scroll.offset(),
-                    0.0,
-                    "'{start}', flip {step}: the scroll kept an offset measured \
-                     against the other set"
-                );
-            }
-            // And back where it started, when the machine offers
-            // everything: the trip over and back is not a trip to a
-            // default.
-            assert_eq!(
-                s.color_space, start,
-                "a trip across the switch and back lost '{start}'"
-            );
-        }
-    }
-
-    /// The switch and the configuration say ONE thing, in both
-    /// directions.
-    ///
-    /// Reading: the space written in the file settles the switch, with no
-    /// second field to contradict it — that is the whole reason there is
-    /// no `hdr` in `ColorConf`. Writing: turning the switch produces a
-    /// space of the range it was turned to, so the next reading agrees
-    /// with this one.
-    #[test]
-    fn the_switch_and_the_written_space_agree_both_ways() {
-        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
-            let s = color_on(name);
-            assert_eq!(
-                s.color_hdr,
-                range == config::SpaceRange::Hdr,
-                "'{name}' in the file put the switch in the wrong position"
-            );
-        }
-        // "auto" is the one name the file cannot settle — it stands in
-        // both offers — and a page opened on it opens on the standard
-        // range, because that is what a file naming no high-range space
-        // means. Asked of a window that IS showing the high range, which
-        // is the only way to ask it: a reading that merely left the
-        // switch alone would answer correctly on a window that had never
-        // been turned, and go on showing SPACE HDR over a file that says
-        // "auto" on every window that had.
-        let mut been_high = color_on("bt2020 pq");
-        assert!(been_high.color_hdr, "the fixture did not reach the high range");
-        been_high.seed_color(config::ColorPrefs {
-            depth: crate::config::model::ColorConf::DEPTH,
-            space: "auto".to_string(),
-            lut: None,
-            icc: None,
-        });
-        assert!(
-            !been_high.color_hdr,
-            "a configuration naming 'auto' left the switch where the last \
-             visit had put it"
-        );
-
-        let mut s = color_open();
-        for _ in 0..4 {
-            let was = s.color_hdr;
-            s.flip_hdr();
-            assert_ne!(was, s.color_hdr, "the switch did not turn");
-            let range = config::space_range(&s.color_space);
-            assert!(
-                range.in_offer(s.color_hdr),
-                "the switch turned {} and wrote '{}', which is not of that range",
-                if s.color_hdr { "on" } else { "off" },
-                s.color_space
-            );
-            // And the writing survives a re-reading, which is the whole
-            // of "the state lives in the space". "auto" is the exception
-            // and the reason it is an exception is stated above: it is
-            // the one name that belongs to both offers, so a file that
-            // holds it opens on the standard range whatever the window
-            // was showing when it wrote it.
-            let reread = color_on(&s.color_space).color_hdr;
-            if s.color_space == crate::config::model::ColorConf::SPACE {
-                assert!(!reread, "'auto' read back as a request for HDR");
-            } else {
-                assert_eq!(
-                    reread, s.color_hdr,
-                    "'{}' read back into the other position",
-                    s.color_space
-                );
-            }
-        }
-    }
-
-    /// HDR lifts the depth to ten bits, and gives back only what it took.
-    ///
-    /// Eight-bit PQ bands, and this page has no way to say so — no
-    /// warning control exists on it — so the eight is taken off the offer
-    /// rather than left there to be pressed. The other half is the one
-    /// that is easy to get wrong: a depth the USER pressed is theirs, and
-    /// turning HDR off must not put it back to what it was before they
-    /// touched it.
-    #[test]
-    fn hdr_lifts_the_depth_and_gives_back_only_what_it_took() {
-        let mut s = color_open();
-        s.set_depth(8);
-        assert!(depth_values(&s).contains(&8), "eight is missing from the SDR offer");
-
-        assert!(s.flip_hdr(), "the flip did not report moving the depth");
-        assert!(s.color_depth >= 10, "HDR left the depth at {}", s.color_depth);
-        assert!(
-            !depth_values(&s).contains(&8),
-            "eight bits is still on offer under HDR"
-        );
-        assert!(
-            !described_acts(&s, page(View::Color)).contains(&Act::ColorDepth(8)),
-            "the page still promises an eight-bit press under HDR"
-        );
-
-        assert!(s.flip_hdr(), "the flip back did not report moving the depth");
-        assert_eq!(s.color_depth, 8, "the depth HDR raised was not given back");
-
-        // The user's own press survives the trip. Twelve, chosen while
-        // HDR was on, is still twelve when HDR goes off.
-        s.set_depth(8);
-        s.flip_hdr();
-        s.set_depth(12);
-        assert!(!s.flip_hdr(), "turning HDR off moved a depth it had not taken");
-        assert_eq!(
-            s.color_depth, 12,
-            "turning HDR off took back a depth the user chose"
-        );
-    }
-
-    /// What the machine cannot show is not on the screen — the screen
-    /// decision's rule, applied to the switch itself.
-    ///
-    /// A compositor that can be asked for no high-range space at all is a
-    /// machine with no HDR on it, and the switch is not drawn, not
-    /// registered and not in the Tab round. `row_shown` and not
-    /// `row_when`: a grey ghost is the "just in case" the owner forbade.
-    #[test]
-    fn a_compositor_with_no_high_range_has_no_switch() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut fonts = nacelle::font::FontSystem::new();
-        let mut s = color_open();
-        assert!(
-            described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
-            "the switch is missing where every space is on offer"
-        );
-
-        s.set_supported_spaces(Some(
-            config::COLOR_SPACE_TABLE
-                .iter()
-                .filter(|(_, r)| *r != config::SpaceRange::Hdr)
-                .map(|&(n, _)| n.to_string())
-                .collect(),
-        ));
-        assert!(
-            !described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
-            "the switch stands on a machine that can show no high range"
-        );
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-        assert!(
-            s.rect_of_act(Act::ColorHdr).is_none(),
-            "the switch is unreachable by description and pressable all the same"
-        );
-        // And the list it would have turned still offers the standard
-        // range whole.
-        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
-            assert_eq!(
-                s.names(ListId::Spaces).iter().any(|n| n == name),
-                range != config::SpaceRange::Hdr,
-                "'{name}' is on the wrong side of a standard-range-only \
-                 compositor's offer"
-            );
-        }
-
-        // A configuration written on other hardware names a space this
-        // one cannot show. The page must not open on the side whose
-        // switch is not drawn: there would be no control anywhere to
-        // turn it back, and the list under SPACE HDR would hold "auto"
-        // alone.
-        s.seed_color(config::ColorPrefs {
-            depth: crate::config::model::ColorConf::DEPTH,
-            space: "bt2020 pq".to_string(),
-            lut: None,
-            icc: None,
-        });
-        assert!(
-            !s.color_hdr,
-            "a file naming a space this machine cannot show stranded the page \
-             on the high range, where no switch stands"
-        );
-        assert_eq!(ListId::Spaces.label(&s), "SPACE");
-        // The space it names stands in no list, which is the truth: this
-        // machine is not showing it.
-        assert_eq!(s.current_row(ListId::Spaces), None);
-        assert!(
-            depth_values(&s).contains(&8),
-            "the standard-range depth offer did not come back with the page"
-        );
-    }
-
-    /// The page opens on a depth it can show, whatever pair the file
-    /// holds.
-    ///
-    /// `depth` and `space` are two lines and one statement, and the
-    /// switch is READ OFF the space — so a file saying eight bits and
-    /// `bt2020 pq` opens the page on the high range with a DEPTH row
-    /// that has nothing marked in it and no way to mark anything: the
-    /// eight is not on the screen to be pressed. The rule that takes it
-    /// off the offer used to live on the switch's path alone, where a
-    /// file never goes.
-    #[test]
-    fn a_page_opened_from_the_file_stands_on_a_depth_it_offers() {
-        // Every pair the file can hold, and the two answers each of them
-        // has to satisfy: the depth is a member of the offer the page
-        // opened with, and the page promises a press for it.
-        for &(space, _) in config::COLOR_SPACE_TABLE.iter() {
-            for bits in crate::config::model::COLOR_DEPTHS {
-                let mut s = color_open();
-                s.seed_color(config::ColorPrefs {
-                    depth: bits,
-                    space: space.to_string(),
-                    lut: None,
-                    icc: None,
-                });
-                assert!(
-                    depth_values(&s).contains(&s.color_depth),
-                    "'{space}' at {bits} bits opened the page on {} bits, which \
-                     is not in the offer {:?} it opened with",
-                    s.color_depth,
-                    depth_values(&s)
-                );
-                assert!(
-                    described_acts(&s, page(View::Color))
-                        .contains(&Act::ColorDepth(s.color_depth)),
-                    "'{space}' at {bits} bits: the standing depth {} has no \
-                     press on the page",
-                    s.color_depth
-                );
-                // Raised and never lowered, and never raised where the
-                // pair was not contradictory in the first place.
-                assert!(
-                    s.color_depth >= bits,
-                    "'{space}' at {bits} bits: the page took the depth DOWN to {}",
-                    s.color_depth
-                );
-                if depth_values(&s).contains(&bits) {
-                    assert_eq!(
-                        s.color_depth, bits,
-                        "'{space}': a depth the page can show was changed anyway"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Learning what the machine offers never strands the page on the
-    /// high range.
-    ///
-    /// The report decides whether the switch is on the page at all, so
-    /// it is a writer of the same state `set_space` guards — and a
-    /// second writer that skipped the guard would produce exactly the
-    /// dead end the guard exists for: SPACE HDR over a list holding
-    /// nothing but "auto", with no switch anywhere to turn it back. Told
-    /// from the high range, which is the only position it can strand.
-    #[test]
-    fn learning_the_offer_never_leaves_the_page_on_a_side_it_cannot_leave() {
-        let mut s = color_on("bt2020 pq");
-        assert!(s.color_hdr, "the fixture did not reach the high range");
-
-        s.set_supported_spaces(Some(
-            config::COLOR_SPACE_TABLE
-                .iter()
-                .filter(|(_, r)| *r != config::SpaceRange::Hdr)
-                .map(|&(n, _)| n.to_string())
-                .collect(),
-        ));
-
-        assert!(
-            !s.color_hdr,
-            "a report with no high range in it left the page standing on the \
-             high range"
-        );
-        assert_eq!(ListId::Spaces.label(&s), "SPACE");
-        assert!(
-            !described_acts(&s, page(View::Color)).contains(&Act::ColorHdr),
-            "this test is measuring nothing: the switch is still on the page"
-        );
-        assert!(
-            depth_values(&s).contains(&s.color_depth),
-            "the page kept a depth of {} that the side it came back to does \
-             not offer",
-            s.color_depth
-        );
-        // The list under the word is the standard range whole, and the
-        // space the file named stands in none of it — which is the
-        // truth: this machine is not showing it.
-        for &(name, range) in config::COLOR_SPACE_TABLE.iter() {
-            assert_eq!(
-                s.names(ListId::Spaces).iter().any(|n| n == name),
-                range != config::SpaceRange::Hdr,
-                "'{name}' is on the wrong side of the offer"
-            );
-        }
-
-        // And the report that says nothing new says nothing at all: a
-        // window told twice is in the state it was told once.
-        let mut a = color_on("srgb");
-        let mut b = color_on("srgb");
-        let all: Vec<String> = config::COLOR_SPACES.iter().map(|n| n.to_string()).collect();
-        a.set_supported_spaces(Some(all.clone()));
-        b.set_supported_spaces(Some(all.clone()));
-        b.set_supported_spaces(Some(all));
-        assert_eq!(
-            (a.color_hdr, a.color_space.clone(), a.names(ListId::Spaces).to_vec()),
-            (b.color_hdr, b.color_space.clone(), b.names(ListId::Spaces).to_vec()),
-            "being told the same offer twice moved the page"
-        );
-    }
 
     /// The row that set the 2026-08-18 storm going: SOUND LEVELS closes
     /// with a line naming the set in use, and it used to work that line
@@ -12318,234 +11604,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Every line one set of rows is currently saying, in order —
-    /// `Row::when` obeyed, so a note that is not on screen is not here
-    /// either.
-    fn notes_of(s: &Settings, rows: &'static [Row]) -> Vec<String> {
-        rows.iter()
-            .filter(|r| (r.when)(s))
-            .filter_map(|r| match r.ctrl {
-                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
-                _ => None,
-            })
-            .filter(|line| !line.is_empty())
-            .collect()
-    }
-
-    /// The same for a whole page, band by band. `page_rows` walks the
-    /// description and leaves `Row::when` to its caller — the way
-    /// `row_acts` does — so the filter is here.
-    fn page_notes(s: &Settings, page: &'static Page) -> Vec<String> {
-        page_rows(page, s)
-            .filter(|r| (r.when)(s))
-            .filter_map(|r| match r.ctrl {
-                Ctrl::Note { text } => Some(s.text_of(text).into_owned()),
-                _ => None,
-            })
-            .filter(|line| !line.is_empty())
-            .collect()
-    }
-
-    /// **The page says what came of the request, and says nothing when
-    /// there is nothing to say.**
-    ///
-    /// This is the owner's report ("changing HDR and the colour space
-    /// changes nothing") turned into a rule the window has to keep. A
-    /// space the compositor refuses, one it never answers for, an ICC
-    /// profile outranking the list — each leaves the picture exactly as
-    /// it was while the SPACE list draws its mark on the new name, and
-    /// the program used to say so on stderr alone. Whatever the
-    /// application reports has to reach the page.
-    #[test]
-    fn the_color_page_repeats_what_the_compositor_answered() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut s = color_open();
-        // Nothing applied yet is nothing to report — a window under
-        // test, and a session in its first frame.
-        assert!(
-            page_notes(&s, page(View::Color))
-                .iter()
-                .all(|n| !n.contains("space:")),
-            "a page nobody has told reported on a request nobody made"
-        );
-
-        s.color_answered("the compositor refused bt2020 pq: unsupported".to_string());
-        let said = page_notes(&s, page(View::Color));
-        assert!(
-            said.iter().any(|n| n.contains("the compositor refused bt2020 pq")),
-            "the compositor's refusal never reached the page — the control \
-             keeps its mark and the user is told nothing: {said:?}"
-        );
-    }
-
-    /// **Asked and given, and only where the giving came up SHORT.**
-    ///
-    /// A surface with no format above eight bits answers eight to a page
-    /// showing sixteen, and that is what the line is for. Repeating a
-    /// number the DEPTH chips already carry would be noise, and — the
-    /// trap this test exists to hold shut — calling a swapchain that
-    /// gave MORE than the wish a shortfall would be a lie.
-    ///
-    /// TWELVE IS THE LIE'S ADDRESS. It is one of the four depths the
-    /// page offers (`COLOR_DEPTHS`), it has no swapchain format of its
-    /// own, and by the renderer's own arrangement it rides the sixteen
-    /// bit float one — so on a healthy machine picking twelve makes the
-    /// two numbers differ, upward, every time. A rule written as
-    /// "different" put "the surface offers no more" under a user who had
-    /// just been given more, on the one depth in four where everything
-    /// worked.
-    #[test]
-    fn the_depth_line_stands_only_where_the_swapchain_gave_less() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut s = color_open();
-        let depth_lines = |s: &Settings| -> Vec<String> {
-            page_notes(s, page(View::Color))
-                .into_iter()
-                .filter(|n| n.starts_with("depth:"))
-                .collect()
-        };
-        assert!(depth_lines(&s).is_empty(), "an unmeasured window claimed a depth");
-
-        s.color_asked(16);
-        s.color_measured(16);
-        assert!(
-            depth_lines(&s).is_empty(),
-            "the page repeated a number the DEPTH chips already carry"
-        );
-
-        // Twelve asked, sixteen given: the renderer working as built.
-        s.color_asked(12);
-        s.color_measured(16);
-        let said = depth_lines(&s);
-        assert!(
-            said.is_empty(),
-            "the page told a user who asked for 12 and was given 16 that the \
-             surface offers no more than 16 — a shortfall reported over a \
-             swapchain that overshot the wish: {said:?}"
-        );
-
-        s.color_asked(16);
-        s.color_measured(8);
-        let said = depth_lines(&s);
-        assert_eq!(said.len(), 1, "expected one line about the depth: {said:?}");
-        assert!(
-            said[0].contains("16") && said[0].contains('8'),
-            "the line has to carry BOTH numbers — the wish alone is what the \
-             page was already saying wrongly: {}",
-            said[0]
-        );
-    }
-
-    /// **Asking again unmeasures — the page cannot report on a
-    /// swapchain that has not been asked yet.**
-    ///
-    /// The renderer's format moves at the REBUILD, and the rebuild is
-    /// inside the next frame's `render`. Between the request and that
-    /// frame the window holds a new wish beside the previous
-    /// measurement, and that pair is exactly what the depth line reads:
-    /// ask for sixteen on a machine that had been given ten and the page
-    /// would say "16 asked, 10 in the swapchain — the surface offers no
-    /// more" about a swapchain nobody had asked. One frame if the page
-    /// is redrawn, and until something redraws it if not.
-    ///
-    /// And only when the number MOVES: `apply_color!` carries the space,
-    /// the LUT and the depth together, so a user turning the SPACE list
-    /// re-asks for a depth that never changed, rebuilds nothing, and
-    /// must not blink a standing line off and on again.
-    #[test]
-    fn a_fresh_request_puts_out_the_depth_line_until_it_is_measured_again() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut s = color_open();
-        let depth_lines = |s: &Settings| -> Vec<String> {
-            page_notes(s, page(View::Color))
-                .into_iter()
-                .filter(|n| n.starts_with("depth:"))
-                .collect()
-        };
-
-        // A machine sitting at eight, asked for eight and given eight:
-        // agreement, and nothing to report.
-        s.color_asked(8);
-        s.color_measured(8);
-        assert!(depth_lines(&s).is_empty(), "agreement was reported as a shortfall");
-
-        // The user picks sixteen. The rebuild is armed and has not run;
-        // the only measurement in the window is the EIGHT of the format
-        // on its way out. Read as a pair it says "16 asked, 8 in the
-        // swapchain — the surface offers no more", which is a verdict on
-        // a surface nobody has asked, and may be flatly wrong about a
-        // machine that does offer sixteen.
-        s.color_asked(16);
-        let said = depth_lines(&s);
-        assert!(
-            said.is_empty(),
-            "the page passed sentence on a swapchain that has not been \
-             asked yet, using the depth of the format being replaced: {said:?}"
-        );
-
-        // The frame draws, the rebuild happens, and the surface did have
-        // sixteen after all — so the sentence above would have been a
-        // lie, not merely an early truth.
-        s.color_measured(16);
-        assert!(
-            depth_lines(&s).is_empty(),
-            "sixteen asked and sixteen given is nothing to say"
-        );
-
-        // And a real shortfall still speaks.
-        s.color_asked(12);
-        s.color_measured(8);
-        assert_eq!(depth_lines(&s).len(), 1, "a real shortfall went unsaid");
-
-        // A request that leaves the depth where it was — the SPACE list,
-        // the LUT; `apply_color!` carries all of them in one call —
-        // rebuilds nothing, so it must not disturb a standing
-        // measurement.
-        s.color_asked(12);
-        assert_eq!(
-            depth_lines(&s).len(),
-            1,
-            "re-asking for the depth already standing blinked the line out"
-        );
-    }
-
-    /// **A section painted shut says why.**
-    ///
-    /// R6 greys a section the machine cannot offer and takes it out of
-    /// the focus chain, and that stands. But grey alone reads as "not
-    /// now", and the truth is "not here, and nothing you press will
-    /// change it" — a compositor that does not speak the Color
-    /// Management protocol is not a state the user can leave. The line
-    /// is there on exactly those machines and on no other: a rail
-    /// carrying it where the feature works would be a permanent apology.
-    #[test]
-    fn the_shut_color_section_says_why_it_is_shut() {
-        let _g = crate::widgets::theme_test_lock();
-        let mut s = furnished();
-        assert!(s.color_enabled, "the furnished window has a colour manager");
-        assert!(
-            notes_of(&s, &RAIL_ROWS).is_empty(),
-            "the rail apologised on a machine where COLOR SPACE works"
-        );
-
-        s.color_enabled = false;
-        let said = notes_of(&s, &RAIL_ROWS);
-        assert!(
-            said.iter().any(|n| n.contains("NO COLOR MANAGER")),
-            "COLOR SPACE is painted shut and the rail gives no reason: {said:?}"
-        );
-        assert!(
-            !rail_acts(&s).contains(&Act::OpenColor),
-            "this test is measuring nothing: the section is still a target"
-        );
-    }
-
     /// A window with enough in it to draw every page: three names in
-    /// every list, colour enabled, one board.
+    /// every list, one board.
     fn furnished() -> Settings {
         let mut s = Settings::new();
         s.open = true;
-        s.color_enabled = true;
         let names: Vec<String> =
             ["one", "two", "three"].iter().map(|n| n.to_string()).collect();
         s.themes = names.clone();
@@ -13722,7 +12785,7 @@ mod tests {
         // is coarse enough to round a small error away, so a page that
         // only ever asked at eight bits could be quietly wrong; sixteen
         // bits is one track unit per notch and rounds nothing away.
-        s.color_depth = 16;
+        s.tone_depth = 16;
         s.set_tone_from_picker();
         assert_eq!(
             s.tone, TONE_REST,
@@ -15399,8 +14462,12 @@ mod tests {
         viewport_home();
     }
 
-    /// The BASIC sliders notch by what the PIPELINE can show, and the
-    /// depth that says so comes off SETTINGS -> COLOR.
+    /// The BASIC sliders notch by [`Settings::tone_depth`], a fixed
+    /// constant now that nacelle-desktop no longer manages colour —
+    /// HDR and the swapchain's real depth are the compositor's own
+    /// business (COMPOSITOR -> RENDER), and the editor's notch was
+    /// never a statement about the screen's own precision, only about
+    /// how fine a move the picker should treat as real.
     ///
     /// AND PAST TWELVE BITS THE TRACK IS THE LIMIT, WHICH IS NOT A DEFECT.
     /// On the master's seed the notches divide by the BACKGROUND's chroma
@@ -15427,7 +14494,7 @@ mod tests {
     /// this exact trade ("a notch coarser than the pipeline is honest").
     /// So the numbers above are pinned rather than left to drift.
     #[test]
-    fn the_basic_notch_comes_from_the_colour_depth() {
+    fn the_basic_notch_comes_from_the_tone_depth() {
         let _g = crate::widgets::theme_test_lock();
         let mut s = editor_open();
         s.perform(Act::EditorMode, 0.0);
@@ -15448,7 +14515,7 @@ mod tests {
                 .iter()
                 .enumerate()
         {
-            s.color_depth = *bits;
+            s.tone_depth = *bits;
             let step = s.tone_step();
             assert_eq!(step, *want, "the notch at {bits} bits moved");
             for k in 0..3 {
@@ -15465,23 +14532,19 @@ mod tests {
         }
         // The two ends really are different: eight bits is coarser than
         // sixteen somewhere, or the depth is not reaching the sliders.
-        s.color_depth = 8;
+        s.tone_depth = 8;
         let coarse = s.tone_step();
-        s.color_depth = 16;
+        s.tone_depth = 16;
         let fine = s.tone_step();
         assert!(
             (0..3).any(|k| coarse[k] > fine[k]),
             "the notch is the same at 8 bits as at 16 — the depth is not wired in"
         );
-        // Nobody has said: the config answers with the toolkit's own
-        // number, which it TAKES rather than repeats — so this is a
-        // statement about where the answer lives, not two constants
-        // being compared and hoped about.
-        assert_eq!(
-            crate::config::model::ColorConf::DEPTH,
-            nacelle::theme::edit::DEFAULT_DEPTH_BITS
-        );
-        s.color_depth = crate::config::model::ColorConf::DEPTH;
+        // Nobody has said: `Settings::default` takes the toolkit's own
+        // number directly, which is what this is checking — a statement
+        // about where the default lives, not two constants being
+        // compared and hoped about.
+        s.tone_depth = nacelle::theme::edit::DEFAULT_DEPTH_BITS;
         assert_eq!(s.tone_step(), coarse, "the depth nobody set is not the coarse one");
         // The preview these presses pushed is this test's, and it does
         // not leave the room in it: another test reading the theme
@@ -16354,9 +15417,9 @@ mod tests {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
         // What the walk actually reached, by kind. A page that stopped
-        // offering one of the three would leave this test passing and
+        // offering one of the two would leave this test passing and
         // saying nothing about it.
-        let (mut tracks, mut segments, mut cyclers) = (0u32, 0u32, 0u32);
+        let (mut tracks, mut cyclers) = (0u32, 0u32);
         // And how many tracks the digit substitution EARNS ITS KEEP on:
         // rows whose widest reachable number is wider than the number at
         // the top of their range. None of them and the reserve is not
@@ -16410,13 +15473,6 @@ mod tests {
                                         tracks += 1;
                                         Some((label, track_rect(rc).x))
                                     }
-                                    Ctrl::Chips { label, values, .. } => {
-                                        segments += 1;
-                                        let first = chip_rects(values(&s).len(), rc);
-                                        let first =
-                                            first.first().expect("a row of no segments");
-                                        Some((label, first.x))
-                                    }
                                     Ctrl::Cycle { label, .. } => {
                                         cyclers += 1;
                                         Some((label, cycle_rect(rc).x))
@@ -16452,16 +15508,9 @@ mod tests {
                                     );
                                     // And the column is THIS row's own,
                                     // not the one its neighbour paid
-                                    // for. The whole program has ONE
-                                    // segmented row, COLOR's DEPTH, and
-                                    // it stands beside SPACE: drop the
-                                    // segments from
-                                    // [`Ctrl::column_label`] and DEPTH
-                                    // would keep standing in a column
-                                    // SPACE had bought, with nothing
-                                    // above this line able to tell. A
-                                    // band of exactly this row asks for
-                                    // exactly what this row is owed.
+                                    // for. A band of exactly this row
+                                    // asks for exactly what this row is
+                                    // owed.
                                     let alone = [*row];
                                     let (own, _) = s.columns(&mut ctx, &alone, region.w);
                                     assert!(
@@ -16529,9 +15578,9 @@ mod tests {
             }
         }
         assert!(
-            tracks > 0 && segments > 0 && cyclers > 0,
-            "the walk reached {tracks} tracks, {segments} segmented rows and {cyclers} \
-             cyclers — a kind it never reaches is a kind it never checks"
+            tracks > 0 && cyclers > 0,
+            "the walk reached {tracks} tracks and {cyclers} cyclers — a kind it never \
+             reaches is a kind it never checks"
         );
         assert!(
             earned > 0,
@@ -16900,17 +15949,6 @@ mod tests {
             "no page in the window stands inside an unfolded section, so the \
              double mark was never measured"
         );
-        // A section the machine cannot offer registers nothing at all
-        // (R6): grey, and not a target.
-        let mut s = furnished();
-        s.color_enabled = false;
-        let mut dl = nacelle::draw::DrawList::new();
-        let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
-        s.draw(&mut ctx);
-        assert!(
-            !s.hits.iter().any(|&(_, a)| a == Act::OpenColor),
-            "COLOR SPACE answers the pointer with no colour compositor"
-        );
         viewport_home();
     }
 
@@ -16930,7 +15968,6 @@ mod tests {
             (Act::OpenBlur, View::Blur),
             (Act::OpenGrid, View::Grid),
             (Act::OpenBoards, View::Boards),
-            (Act::OpenColor, View::Color),
             (Act::OpenAddons, View::Addons),
             (Act::OpenFont, View::Font),
             (Act::OpenSoundLevels, View::SoundLevels),
@@ -17582,15 +16619,13 @@ mod tests {
     /// the broken drawing produced — so if the master ever stops asking
     /// for a visible corner here, this test says so instead of passing
     /// on a shape nobody can see.
-    // Re-home needed: this measured the BASIC/ADVANCED MODE cycler, which
+    // Re-homed: this once measured the BASIC/ADVANCED MODE cycler, which
     // sat at row 0 (always on screen). That switch is now the ADVANCED
     // COLOUR button (a plain Button, RingFill not Ring), and the only
-    // `draw_cycle` plate left in the editor — CORNER SIZE — sits below the
-    // tall picker and is off-screen in this 1080px probe, so `at()` finds
-    // no plate to read. Ignored until it is pointed at a cycler that is
-    // reliably drawn (e.g. COLOR's SPACE on its own page). See
-    // .gap-program/projekt-edytor-advanced-color.md.
-    #[ignore = "MODE cycler removed; needs re-homing onto an on-screen draw_cycle plate"]
+    // `draw_cycle` plate left in the editor is CORNER SIZE, read below
+    // through `Act::EditorCornerStep`. It draws inside this 1080px probe
+    // after all, so the claim is proven on the plate that is actually
+    // left rather than on the one that is gone.
     #[test]
     fn a_cycle_plate_is_cut_like_every_other_plate_on_the_page() {
         let _g = crate::widgets::theme_test_lock();
@@ -19261,15 +18296,6 @@ mod tests {
     /// hard as this rail can make it: the longest rail the description
     /// can produce is reachable end to end. A sweep that unfolded one
     /// section would leave the case decision (a) allows untested.
-    ///
-    /// BOTH MACHINES, and the second is the taller one. `furnished()`
-    /// has a colour manager, and a rail measured only there never
-    /// carries the NO COLOR MANAGER note at all — while the machine that
-    /// DOES carry it keeps the greyed COLOR SPACE entry too (R6 paints
-    /// an unofferable section shut, it does not remove it), so the shut
-    /// rail is strictly the longer of the two. Measuring the short one
-    /// and calling the property proved is how a fail-closed test comes
-    /// to guard everything except the case that grew.
     #[test]
     fn every_section_the_rail_holds_can_be_reached_at_every_window() {
         let _g = crate::widgets::theme_test_lock();
@@ -19286,26 +18312,17 @@ mod tests {
                 })
                 .collect()
         }
-        /// One window, on one page, on one of the two machines, with
-        /// the sections in `open` unfolded.
-        fn rail_of(view: View, colour_manager: bool, open: &[Act]) -> Settings {
-            let mut s = railed_at(view, open);
-            s.color_enabled = colour_manager;
-            s
+        /// One window, on one page, with the sections in `open` unfolded.
+        fn rail_of(view: View, open: &[Act]) -> Settings {
+            railed_at(view, open)
         }
-        assert!(
-            furnished().color_enabled,
-            "the fixture lost its colour manager, so the two machines are one"
-        );
         let mut fonts = nacelle::font::FontSystem::new();
         let mut measured = 0;
         let mut unfolded = 0;
         let mut overflowed = 0;
-        // The ladder, plus the two heights the fold regression was
-        // measured at: 768 is a 1366x768 laptop and 800 is where the
-        // machine with no colour manager crossed over.
-        let ladder: Vec<f32> =
-            HEIGHTS.iter().copied().chain([768.0, 800.0]).collect();
+        // The ladder, plus 768 — a 1366x768 laptop the fold regression
+        // was measured at.
+        let ladder: Vec<f32> = HEIGHTS.iter().copied().chain([768.0]).collect();
         for h in ladder {
             theme::resolved();
             theme::set_viewport(h, 1.0);
@@ -19315,68 +18332,52 @@ mod tests {
             let m = Metrics::of(&ctx, content);
             for p in PAGES.iter() {
                 let all = expander_acts();
-                let (open, shut) =
-                    (rail_of(p.view, true, &all), rail_of(p.view, false, &all));
+                let s = rail_of(p.view, &all);
                 let nav = Panes::of(m, content);
-                // The point of the second state, stated so it cannot
-                // quietly stop being true: a machine with no colour
-                // manager keeps the greyed entry AND gains the note, so
-                // its rail is the longer one. If the two ever measure
-                // the same, this loop is running twice over one rail.
-                if let Some(rail) = nav.rail.map(|c| c.rows) {
-                    assert!(
-                        shut.rows_h(&RAIL_ROWS, m.rail(), rail)
-                            > open.rows_h(&RAIL_ROWS, m.rail(), rail),
-                        "at {h}px the shut rail is no taller than the open one — \
-                         the case this test was widened for is not being measured"
+                // THE REGRESSION GUARD. The master keeps its columns
+                // at every height this program is built for; a fold
+                // here means the window has gone back to trading its
+                // whole shape for a rail that would not fit.
+                let Some(rail) = nav.rail.map(|c| c.rows) else {
+                    panic!(
+                        "at {h}px, {} folded the whole window — the \
+                         master keeps two panels at every height the program \
+                         is built for",
+                        p.title
                     );
+                };
+                measured += 1;
+                let want = s.rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
+                if want > rail.h + 0.01 {
+                    overflowed += 1;
                 }
-                for (which, s) in [("with a colour manager", &open), ("without one", &shut)] {
-                    // THE REGRESSION GUARD. The master keeps its columns
-                    // at every height this program is built for; a fold
-                    // here means the window has gone back to trading its
-                    // whole shape for a rail that would not fit.
-                    let Some(rail) = nav.rail.map(|c| c.rows) else {
-                        panic!(
-                            "at {h}px, {which}, {} folded the whole window — the \
-                             master keeps two panels at every height the program \
-                             is built for",
-                            p.title
-                        );
-                    };
-                    measured += 1;
-                    let want = s.rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
-                    if want > rail.h + 0.01 {
-                        overflowed += 1;
-                    }
-                    // The pages the open sections unfold are IN that
-                    // number: `rows_h` recurses into every section the
-                    // window has open ([`Settings::rows_span`]).
-                    // Measured against the SAME rail on the SAME page
-                    // with nothing unfolded, so the difference is
-                    // exactly what the unfolds cost. The reference used
-                    // to be another PAGE — a section that had no pages
-                    // to unfold — which stopped being a difference in
-                    // the fold the day the fold stopped following the
-                    // page ([`Settings::rail_open`]).
-                    let plain = rail_of(p.view, s.color_enabled, &[])
-                        .rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
-                    if all.is_empty() {
-                        assert!(
-                            (want - plain).abs() < 0.01,
-                            "at {h}px, {which}, {} unfolds nothing and still costs \
-                             {want} px against the plain rail's {plain}",
-                            p.title
-                        );
-                    } else {
-                        unfolded += 1;
-                        assert!(
-                            want > plain + 0.01,
-                            "at {h}px, {which}, {} unfolds pages and the rail did not \
-                             grow for them: {want} against {plain}",
-                            p.title
-                        );
-                    }
+                // The pages the open sections unfold are IN that
+                // number: `rows_h` recurses into every section the
+                // window has open ([`Settings::rows_span`]).
+                // Measured against the SAME rail on the SAME page
+                // with nothing unfolded, so the difference is
+                // exactly what the unfolds cost. The reference used
+                // to be another PAGE — a section that had no pages
+                // to unfold — which stopped being a difference in
+                // the fold the day the fold stopped following the
+                // page ([`Settings::rail_open`]).
+                let plain =
+                    rail_of(p.view, &[]).rows_h(&RAIL_ROWS, m.rail(), rows_box(rail));
+                if all.is_empty() {
+                    assert!(
+                        (want - plain).abs() < 0.01,
+                        "at {h}px, {} unfolds nothing and still costs \
+                         {want} px against the plain rail's {plain}",
+                        p.title
+                    );
+                } else {
+                    unfolded += 1;
+                    assert!(
+                        want > plain + 0.01,
+                        "at {h}px, {} unfolds pages and the rail did not \
+                         grow for them: {want} against {plain}",
+                        p.title
+                    );
                 }
             }
         }
@@ -19384,7 +18385,7 @@ mod tests {
         assert!(
             unfolded > 0,
             "no page in the sweep unfolded a section, so the height this test was \
-             widened for was never measured"
+            widened for was never measured"
         );
         assert!(
             overflowed > 0,
@@ -19399,47 +18400,45 @@ mod tests {
         theme::resolved();
         theme::set_viewport(HEIGHTS[0], 1.0);
         for p in PAGES.iter() {
-            for colour_manager in [true, false] {
-                let all = expander_acts();
-                let reference = rail_of(p.view, colour_manager, &all);
-                // The unfolded sections' pages are already IN this:
-                // `row_acts` recurses into every section the window has
-                // open. It used to need `kid_acts` welded on beside it,
-                // because the description's walk and the window's fold
-                // could disagree about which section that was.
-                let want: Vec<Act> = nav_row_acts(&reference, &RAIL_ROWS);
-                assert!(!want.is_empty(), "the rail describes nothing to reach");
-                let stops: Vec<f32> = {
-                    let mut dl = nacelle::draw::DrawList::new();
-                    let ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
-                    let content = content_rect(modal_rect(ctx.w, ctx.h));
-                    let m = Metrics::of(&ctx, content);
-                    let mut out = vec![0.0];
-                    out.extend(rail_stops(&reference, m, content));
-                    out
-                };
-                let mut seen: Vec<Act> = Vec::new();
-                for stop in stops {
-                    let mut s = rail_of(p.view, colour_manager, &all);
-                    s.rail_scroll.set_offset(stop);
-                    let mut dl = nacelle::draw::DrawList::new();
-                    let mut ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
-                    s.draw(&mut ctx);
-                    for &(_, act) in s.hits.iter() {
-                        if !seen.contains(&act) {
-                            seen.push(act);
-                        }
+            let all = expander_acts();
+            let reference = rail_of(p.view, &all);
+            // The unfolded sections' pages are already IN this:
+            // `row_acts` recurses into every section the window has
+            // open. It used to need `kid_acts` welded on beside it,
+            // because the description's walk and the window's fold
+            // could disagree about which section that was.
+            let want: Vec<Act> = nav_row_acts(&reference, &RAIL_ROWS);
+            assert!(!want.is_empty(), "the rail describes nothing to reach");
+            let stops: Vec<f32> = {
+                let mut dl = nacelle::draw::DrawList::new();
+                let ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
+                let content = content_rect(modal_rect(ctx.w, ctx.h));
+                let m = Metrics::of(&ctx, content);
+                let mut out = vec![0.0];
+                out.extend(rail_stops(&reference, m, content));
+                out
+            };
+            let mut seen: Vec<Act> = Vec::new();
+            for stop in stops {
+                let mut s = rail_of(p.view, &all);
+                s.rail_scroll.set_offset(stop);
+                let mut dl = nacelle::draw::DrawList::new();
+                let mut ctx = probe(&mut dl, &mut fonts, HEIGHTS[0], 1.0);
+                s.draw(&mut ctx);
+                for &(_, act) in s.hits.iter() {
+                    if !seen.contains(&act) {
+                        seen.push(act);
                     }
                 }
-                if let Some(missing) = want.iter().position(|a| !seen.contains(a)) {
-                    panic!(
-                        "{} at {}px: entry #{missing} of the {} the rail holds is \
-                         reachable at no offset the wheel can take it to",
-                        p.title,
-                        HEIGHTS[0],
-                        want.len()
-                    );
-                }
+            }
+            if let Some(missing) = want.iter().position(|a| !seen.contains(a)) {
+                panic!(
+                    "{} at {}px: entry #{missing} of the {} the rail holds is \
+                     reachable at no offset the wheel can take it to",
+                    p.title,
+                    HEIGHTS[0],
+                    want.len()
+                );
             }
         }
         viewport_home();
@@ -19682,9 +18681,9 @@ mod tests {
                 "the window at {h}px is not the shape this test is about"
             );
             assert_eq!(
-                zone_folded(&COLOR_ZONES[0], rows_box(nav.page)),
+                zone_folded(&FONT_ZONES[0], rows_box(nav.page)),
                 band_folded,
-                "the COLOR page's band at {h}px is not the shape this test is about"
+                "the FONT page's band at {h}px is not the shape this test is about"
             );
         };
         // On the master: the WINDOW keeps its columns at both ends of
@@ -19985,10 +18984,10 @@ mod tests {
     /// column registers them — a section's own pages included, WHERE
     /// THE SECTION IS THE ONE OPEN, and at the place they stand.
     ///
-    /// A disabled entry (COLOR SPACE with no colour compositor) is
-    /// deliberately not one: R6 says it registers nothing at all. Nor is
-    /// a shut section's page, which is the same sentence one level up
-    /// and the one [`row_acts`] answers with.
+    /// A disabled entry (`Row::enabled` false) is deliberately not one:
+    /// R6 says it registers nothing at all. Nor is a shut section's
+    /// page, which is the same sentence one level up and the one
+    /// [`row_acts`] answers with.
 
     fn nav_row_acts(s: &Settings, rows: &'static [Row]) -> Vec<Act> {
         rows.iter().flat_map(|r| row_acts(s, r)).collect()
@@ -20094,9 +19093,6 @@ mod tests {
                 }
                 out
             }
-            Ctrl::Chips { values, act, .. } => {
-                values(s).iter().map(|v| act(*v)).collect()
-            }
             // Every verb of an action bar, left to right.
             Ctrl::Bar { items } => items.iter().map(|&(_, a)| a).collect(),
             // The anchor alone: what the list holds is only on screen
@@ -20122,21 +19118,6 @@ mod tests {
             | Ctrl::Hint { .. }
             | Ctrl::Custom { .. } => Vec::new(),
         }
-    }
-
-}
-
-/// Steps a picker through None -> first -> ... -> last -> None.
-fn next_of(list: &[String], current: Option<String>) -> Option<String> {
-    if list.is_empty() {
-        return None;
-    }
-    match current {
-        None => Some(list[0].clone()),
-        Some(cur) => match list.iter().position(|v| *v == cur) {
-            Some(i) if i + 1 < list.len() => Some(list[i + 1].clone()),
-            _ => None,
-        },
     }
 
 }

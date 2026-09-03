@@ -174,10 +174,7 @@ use std::path::{Path, PathBuf};
 // where a constant is declared is not their business. The gutter's own
 // bound is not among them: it is applied where the field is read and
 // nothing outside asks for it.
-pub use model::{
-    color_depths, color_spaces, space_range, SpaceRange, COLOR_SPACES,
-    COLOR_SPACE_TABLE, GRID_MAX, GRID_MIN,
-};
+pub use model::{GRID_MAX, GRID_MIN};
 
 
 
@@ -1950,80 +1947,6 @@ pub fn set_layaut_option(name: &str) {
 pub fn sound_prefs() -> (u32, bool, bool) {
     let s = conf().sound;
     (s.volume(), s.typing(), s.ambient())
-}
-
-/// The colour pipeline preferences: bit depth of the swapchain, the
-/// colour space the program asks the compositor to show it in, and an
-/// optional grading LUT (.cube) and ICC profile. All of it is a
-/// Wayland-session matter — read, shown and applied only there; every
-/// other session ignores the whole group.
-pub struct ColorPrefs {
-    /// 8, 10, 12 or 16. Twelve rides in sixteen-bit float buffers —
-    /// Vulkan has no twelve-bit swapchain format — and what the wire
-    /// carries is between the compositor and the display.
-    pub depth: u32,
-    /// A name from [`COLOR_SPACES`]; "auto" leaves the compositor's
-    /// default in place.
-    pub space: String,
-    /// File name (with extension) under an assets `lut/` directory.
-    pub lut: Option<String>,
-    /// File name under an assets `icc/` directory.
-    pub icc: Option<String>,
-}
-
-pub fn color_prefs() -> ColorPrefs {
-    let c = conf().color;
-    let file = |ch: &Choice| ch.name().and_then(safe_component);
-    ColorPrefs {
-        depth: c.depth(),
-        space: c.space(),
-        lut: file(&c.lut),
-        icc: file(&c.icc),
-    }
-}
-
-pub fn set_color_depth(bits: u32) {
-    update_conf(|c| c.color.depth = Some(bits));
-}
-
-pub fn set_color_space(space: &str) {
-    update_conf(|c| c.color.space = Choice::named(space));
-}
-
-/// Nothing chosen is an explicit OFF here, not a question passed on:
-/// a grading LUT switched off in the settings window may not come back
-/// because a system file names one.
-pub fn set_color_lut(name: Option<&str>) {
-    update_conf(|c| c.color.lut = Choice::or_off(name));
-}
-
-pub fn set_color_icc(name: Option<&str>) {
-    update_conf(|c| c.color.icc = Choice::or_off(name));
-}
-
-/// File names (sorted) with one of the extensions, across every assets
-/// directory of `sub` — the LUT and ICC pickers list these.
-pub fn color_files(sub: &str, exts: &[&str]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for dir in asset_dirs(sub) {
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let lower = name.to_lowercase();
-                if exts.iter().any(|x| lower.ends_with(x)) && !out.contains(&name) {
-                    out.push(name);
-                }
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Absolute path of a named LUT/ICC file, first assets directory wins.
-pub fn color_file_path(sub: &str, name: &str) -> Option<std::path::PathBuf> {
-    safe_component(name)?;
-    find_asset(sub, name)
 }
 
 /// Frosted-glass preferences: (blur radius, glass opacity), both in
@@ -4291,12 +4214,13 @@ mod tests {
         std::fs::write(
             system.join(CONF_RON),
             "// the distribution's defaults\n(\n    theme: Named(\"azure\"),\n    \
-             layaut: Named(\"console\"),\n    color: (lut: Named(\"studio\")),\n)\n",
+             layaut: Named(\"console\"),\n    \
+             term_font: (family: Named(\"mono\"), weight: Named(\"bold\")),\n)\n",
         )
         .unwrap();
         std::fs::write(
             user.join(CONF_RON),
-            "(theme: Named(\"crimson\"), color: (lut: Off))\n",
+            "(theme: Named(\"crimson\"), term_font: (family: Off))\n",
         )
         .unwrap();
 
@@ -4309,18 +4233,18 @@ mod tests {
             "a field the user never set comes from the system file"
         );
         assert_eq!(
-            c.color.lut,
+            c.term_font.family,
             Choice::Off,
             "an explicit off is not an absence: it must beat the system file"
         );
-        assert_eq!(c.color.lut.name(), None, "and no LUT is loaded");
+        assert_eq!(c.term_font.family.name(), None, "and no family is chosen");
         // A group the user's file mentions AT ALL must not swallow the
         // system file's other fields in that group: the merge is per
         // leaf, not per section.
         assert_eq!(
-            c.color.depth(),
-            model::ColorConf::DEPTH,
-            "nobody set a depth, so the model's own default stands"
+            c.term_font.weight.name(),
+            Some("bold"),
+            "a leaf the user never set comes from the system file"
         );
 
         // A user who has never changed a setting has no file at all,
@@ -4328,7 +4252,7 @@ mod tests {
         std::fs::remove_file(user.join(CONF_RON)).unwrap();
         let c = cascade_conf(&dirs);
         assert_eq!(c.theme.name(), Some("azure"));
-        assert_eq!(c.color.lut.name(), Some("studio"));
+        assert_eq!(c.term_font.family.name(), Some("mono"));
 
         // And with nothing installed anywhere the program is left with
         // what is built into it, rather than with an error.
@@ -4359,9 +4283,6 @@ mod tests {
              GridSnap=true\n\
              GridCols=32\n\
              GridPadding=9\n\
-             ColorDepth=10\n\
-             ColorSpace=bt2020 pq\n\
-             ColorLut=\n\
              BlurRadius=60\n",
         )
         .unwrap();
@@ -4380,13 +4301,6 @@ mod tests {
         assert!(c.grid.snap());
         assert_eq!(c.grid.cols(), 32);
         assert_eq!(c.grid.padding(), Some(9));
-        assert_eq!(c.color.depth(), 10);
-        assert_eq!(c.color.space(), "bt2020 pq");
-        assert_eq!(
-            c.color.lut,
-            Choice::Off,
-            "an empty value outranked the system file in that format too"
-        );
         assert_eq!(c.blur.radius(), 60);
         assert_eq!(c.blur.opacity(), model::BlurConf::FULL, "and the rest is default");
 
@@ -4400,66 +4314,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The depth and the space are TWO LINES OF ONE STATEMENT, and the
-    /// reading rules on the pair.
-    ///
-    /// Either field alone passes: eight is a depth this program can ask
-    /// for, `bt2020 pq` is a space it knows. Together they ask for a
-    /// picture that bands, and nothing used to look at them together —
-    /// so a file could say what the settings window forbids, and the
-    /// swapchain, which reads this and never asks the window anything,
-    /// was handed it. This is the one place both fields are in reach.
-    ///
-    /// The floor is read off the space here exactly as the COLOR page
-    /// reads it off its switch (`color_depths`), which is what keeps
-    /// the page and the swapchain from being told different numbers.
-    #[test]
-    fn a_depth_the_named_space_cannot_show_is_raised_by_the_reading() {
-        let high = |bits: Option<u32>| model::ColorConf {
-            depth: bits,
-            space: Choice::named("bt2020 pq"),
-            ..Default::default()
-        };
-        let offered = color_depths(true);
-        assert!(
-            !offered.contains(&8),
-            "the high-range offer holds eight bits: this test is measuring \
-             nothing"
-        );
-        assert!(
-            offered.contains(&high(Some(8)).depth()),
-            "a file saying depth 8 and space 'bt2020 pq' resolved to {} bits, \
-             which the high range is not shown in",
-            high(Some(8)).depth()
-        );
-        // A file that names the space and no depth is the same pair with
-        // the model's own default written in it, and the default is the
-        // eight this cannot use.
-        assert_eq!(model::ColorConf::DEPTH, 8, "the default depth moved");
-        assert!(
-            offered.contains(&high(None).depth()),
-            "a high-range space with no depth beside it resolved to {} bits",
-            high(None).depth()
-        );
-        // It raises and never lowers: what the user wrote above the
-        // floor is theirs.
-        assert_eq!(high(Some(16)).depth(), 16, "the reading took a depth away");
-
-        // And it touches nothing else. A standard-range space keeps the
-        // eight — the pair is only contradictory in one direction.
-        for name in ["auto", "srgb", "display p3", "adobe rgb"] {
-            let c = model::ColorConf {
-                depth: Some(8),
-                space: Choice::named(name),
-                ..Default::default()
-            };
-            assert_eq!(
-                c.depth(),
-                8,
-                "'{name}' is a standard-range space and eight bits shows it"
-            );
-        }
-    }
 
     /// A file with a syntax error costs the WHOLE file — that is what
     /// this format is — so the one thing that may not happen is a quiet
@@ -4522,10 +4376,6 @@ mod tests {
             .collect(),
             term_font: model::FontConf { size: Some(112.5), ..Default::default() },
             grid: model::GridConf { cols: Some(32), ..Default::default() },
-            color: model::ColorConf {
-                space: Choice::Named("bt2020 pq".into()),
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -4546,9 +4396,23 @@ mod tests {
 
         // Half a document, a field from the future, and a number
         // written the way a person writes one.
+        //
+        // `color` is not invented for this test — it is the field the
+        // COLOR view used to write (`ColorConf`, removed with the view
+        // 2026-09-03), so a real machine's file can hold exactly this
+        // group with exactly these leaves. A build that once knew this
+        // group and now does not is the one case this file has to
+        // survive without help: nothing prompts an upgrade to rewrite
+        // it, and a `deny_unknown_fields` anywhere on the way would turn
+        // an old machine's settings file into one this binary refuses
+        // to open at all.
         let hand = "// mine\n(\n    theme: Named(\"azure\"),\n    \
-                    warp_drive: Enabled,\n    sound: (volume: 40),\n)\n";
-        let c = ron_options().from_str::<DesktopConf>(hand).expect("must parse");
+                    warp_drive: Enabled,\n    sound: (volume: 40),\n    \
+                    color: (depth: 10, space: \"bt2020 pq\"),\n)\n";
+        let c = ron_options().from_str::<DesktopConf>(hand).expect(
+            "a field this build no longer has must not cost the whole file — see \
+             ColorConf's removal",
+        );
         assert_eq!(c.theme.name(), Some("azure"));
         assert_eq!(c.sound.volume(), 40, "`40` and `Some(40)` are the same number");
         assert_eq!(c.layaut, Choice::Inherit, "everything absent is simply absent");
@@ -6094,21 +5958,19 @@ mod tests {
                 .into_iter()
                 .collect(),
             term_font: model::FontConf { size: Some(112.5), ..Default::default() },
-            color: model::ColorConf {
-                space: Choice::Named("bt2020 pq".into()),
-                ..Default::default()
-            },
             ..Default::default()
         };
         assert_eq!(
             fingerprint(&conf_body(&doc).unwrap()),
-            0x9b8c_4760_84d8_3f4a,
+            0xb33c_7753_2db1_2825,
             "the serialised shape changed — ron_pretty, a renamed field, a new \
              one with a default. Files already on disk carry the old shape and \
              no longer round-trip, so they read as strangers' and their saves \
              spend the .bak. If the change is deliberate, this number is the \
              thing to update, and CONF_HEADERS cannot help: only a reader of \
-             the old shape could."
+             the old shape could.\n\
+             Pinned again 2026-09-03 for the COLOR view's removal: `color` \
+             left `DesktopConf`, which moved the serialised shape on purpose."
         );
         // And the list is a list of DISTINCT headers, the current one at
         // its head — an entry equal to another buys nothing and an

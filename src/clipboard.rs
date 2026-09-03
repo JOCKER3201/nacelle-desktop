@@ -20,11 +20,13 @@ pub fn install(display: Option<RawDisplayHandle>) {
     match display {
         Some(RawDisplayHandle::Wayland(d)) => {
             // SAFETY: smithay-clipboard must be handed WINIT'S OWN
-            // `wl_display` (never wl_color.rs's second connection — on
-            // that one its serial tracking sees no keyboard and every
-            // store is refused). The pointer must outlive the clipboard:
-            // it does, because the window — and with it the display
-            // connection — lives for the whole process.
+            // `wl_display` (never a second connection of the kind
+            // `fullscreen/wayland.rs` opens for the window-management
+            // protocols — on one of those its serial tracking sees no
+            // keyboard and every store is refused). The pointer must
+            // outlive the clipboard: it does, because the window — and
+            // with it the display connection — lives for the whole
+            // process.
             let cb = unsafe { smithay_clipboard::Clipboard::new(d.display.as_ptr()) };
             nacelle::clipboard::install(Box::new(WaylandClipboard(cb)));
         }

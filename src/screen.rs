@@ -865,26 +865,12 @@ impl Screen {
     }
 
     // ---- what the renderer is told, screen by screen ----------------
-    // The colour pipeline, the frost radius and the lens are the user's
-    // choices about the picture, so every screen showing the picture is
-    // told them; they used to reach the one renderer there was.
-
-    pub fn set_color_depth(&mut self, bits: u32) {
-        self.gfx.set_color_depth(bits);
-    }
-
-    /// The bit depth this screen's swapchain really carries — which is
-    /// not always the one just asked for, because a surface answers with
-    /// the formats it has. The COLOR page shows both numbers; a page
-    /// that showed only the wish would say "16" over a picture nothing
-    /// in the machine can render.
-    pub fn color_depth(&self) -> u32 {
-        self.gfx.color_depth()
-    }
-
-    pub fn set_lut(&mut self, lut: Option<(u32, Vec<f32>)>) {
-        self.gfx.set_lut(lut);
-    }
+    // The frost radius and the lens are the user's choices about the
+    // picture, so every screen showing the picture is told them; they
+    // used to reach the one renderer there was. The colour pipeline —
+    // swapchain depth, grading LUT — used to be told here too; it left
+    // with the COLOR view (nacelle-desktop no longer manages colour at
+    // all, and HDR is the compositor's own COMPOSITOR → RENDER page now).
 
     pub fn set_blur_radius(&mut self, percent: u32) {
         self.gfx.set_blur_radius(percent);

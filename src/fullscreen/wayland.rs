@@ -11,7 +11,6 @@
 //!
 //! # The second connection
 //!
-//! The same arrangement `wl_color` uses and for the same reason:
 //! libwayland is built for one socket with many queues, so this opens a
 //! second [`Connection`] onto winit's own display and gives it a queue
 //! of its own. Only toplevel news travels here, so the two event loops
@@ -558,11 +557,10 @@ mod tests {
     /// that stopped calling `hear` is a failure and not a silent list
     /// that never fills.
     ///
-    /// The socket pair and the null id are the same trick `wl_color`'s
-    /// tests use: `Connection::from_socket` performs no handshake, so
-    /// the far end is never spoken to, and `Proxy::from_id` accepts the
-    /// null id by design — which is what makes a proxy with no server
-    /// possible at all.
+    /// The socket pair and the null id: `Connection::from_socket`
+    /// performs no handshake, so the far end is never spoken to, and
+    /// `Proxy::from_id` accepts the null id by design — which is what
+    /// makes a proxy with no server possible at all.
     ///
     /// What this CANNOT prove, said plainly because a reader would
     /// otherwise assume it: the null proxy's protocol id is zero, so a

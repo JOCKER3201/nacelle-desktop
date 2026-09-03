@@ -58,10 +58,14 @@ zbus = "4"
 # already builds on, so this adds no new code to the tree.
 x11rb = { version = "0.13", features = ["randr"] }
 
-# The Wayland side of the colour pipeline (src/wl_color.rs): a second
-# connection to the display winit already holds, speaking the Color
-# Management protocol. The system backend is the same dlopen one winit
-# uses — no headers, no pkg-config.
+# The window-management connector (src/fullscreen/wayland.rs): a second
+# connection to the display winit already holds, speaking the foreign
+# toplevel list protocol to see what the compositor is willing to name.
+# The system backend is the same dlopen one winit uses — no headers, no
+# pkg-config. Used to carry the colour pipeline as well (src/wl_color.rs,
+# removed with the COLOR view); the window connector is what still needs
+# it, and losing these deps would silently take the foreign-window
+# connector down with whatever removed the other reader.
 wayland-client = { version = "0.31", features = ["dlopen"] }
 wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

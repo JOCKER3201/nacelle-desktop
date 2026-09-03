@@ -149,8 +149,8 @@ pub use x11::Fullscreen;
 /// something the vocabulary needs to name a verb.
 #[derive(Clone, Copy, Debug)]
 pub struct Host {
-    /// winit's own Wayland display pointer — the same one `wl_color` is
-    /// handed. None on an X11 session.
+    /// winit's own Wayland display pointer — the same one
+    /// [`wayland::Toplevels::start`] is handed. None on an X11 session.
     pub wayland_display: Option<*mut std::ffi::c_void>,
     /// nacelle's own X11 window, under XWayland or on an X11 session.
     /// None where the window is not an X11 one.
