@@ -16,7 +16,6 @@ mod threads;
 mod fullscreen;
 mod hashframe;
 mod vector;
-mod wallpaper_video;
 mod widgets;
 mod wl_color;
 
