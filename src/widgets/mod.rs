@@ -8,6 +8,7 @@
 //! widget's own business too: the application asks it (`Widget::
 //! pointer`) rather than keeping a copy of its geometry.
 pub mod boot;
+pub mod hyprsettings;
 pub mod editor;
 pub mod popup;
 pub mod settings;

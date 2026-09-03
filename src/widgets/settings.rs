@@ -154,6 +154,12 @@ enum View {
     /// files the user writes by hand, and every one the program could
     /// not use.
     Addons,
+    /// The compositor's own settings — gaps, rounding, blur, key
+    /// repeat. Shown ONLY while the session is actually running under
+    /// Hyprland ([`hyprsettings::running_under_hyprland`]), because
+    /// every row on it writes Hyprland's own config and means nothing
+    /// under any other compositor.
+    Compositor,
     /// A shortcut into the theme editor's own WALLPAPER row (BASIC),
     /// for a person who wants only that and not the other forty
     /// controls beside it. The same session state either door opens on
@@ -184,7 +190,9 @@ fn parent_view(v: View) -> Option<View> {
     match v {
         // A destructive control the user changed their mind about must
         // be left the same way as anything else, by BACK or by Escape.
-        View::ThemeEditor | View::LookFeelReset | View::Wallpaper => Some(View::LookFeel),
+        View::ThemeEditor | View::LookFeelReset | View::Wallpaper | View::Compositor => {
+            Some(View::LookFeel)
+        }
         _ => None,
     }
 }
@@ -371,6 +379,17 @@ enum Act {
     /// row — [`View::Wallpaper`]'s own door, seeded from the theme
     /// exactly as [`Act::ThemesEditor`] seeds BASIC.
     OpenWallpaper,
+    /// The door to [`View::Compositor`], which only exists under
+    /// Hyprland.
+    OpenCompositor,
+    /// One COMPOSITOR slider, by its index in [`hyprsettings::OPTS`].
+    /// Indexed rather than named because the rows ARE that table —
+    /// naming each one here would be a second list to keep in step,
+    /// and `the_compositor_rows_are_the_option_table` is what proves
+    /// the one list is enough.
+    CompTrack(usize),
+    /// One COMPOSITOR toggle, by the same index.
+    CompFlip(usize),
     OpenBoards,
     OpenColor,
     OpenBlur,
@@ -549,6 +568,9 @@ fn focus_id(act: Act) -> FocusId {
         OpenFont => FocusId::of("settings.lookfeel.fonts"),
         OpenSoundLevels => FocusId::of("settings.lookfeel.sound_levels"),
         OpenWallpaper => FocusId::of("settings.lookfeel.wallpaper"),
+        OpenCompositor => FocusId::of("settings.lookfeel.compositor"),
+        CompTrack(i) => FocusId::of("settings.compositor.track").item(i),
+        CompFlip(i) => FocusId::of("settings.compositor.flip").item(i),
         EditorSave => FocusId::of("settings.editor.save"),
         EditorSaveAs => FocusId::of("settings.editor.saveas"),
         EditorCancel => FocusId::of("settings.editor.cancel"),
@@ -1751,6 +1773,46 @@ const fn row_when(ctrl: Ctrl, enabled: fn(&Settings) -> bool) -> Row {
     Row { ctrl, after: Gap::Row, enabled, when: always }
 }
 
+/// One COMPOSITOR row. A MACRO and not a `const fn`, and the reason is
+/// the one thing `Ctrl` insists on: `get` and `set` are `fn` pointers,
+/// so they can capture nothing — a `const fn` taking `i` could not put
+/// it inside them. Substituting the index as a literal leaves the
+/// closures capturing nothing at all, which is exactly what a `fn`
+/// pointer will accept.
+///
+/// `$i` indexes [`hyprsettings::OPTS`], which stays the one statement
+/// of what each setting is called and ranges over.
+/// The label and the range are NOT repeated here. They live once, in
+/// hyprsettings::OPTS, beside the key they belong to and the clamp the
+/// parser applies — a row whose slider stopped at 20 while the parser
+/// accepted 100 would be a difference nothing in the program could see.
+macro_rules! comp_slider {
+    ($i:expr) => {
+        Ctrl::Slider {
+            label: super::hyprsettings::OPTS[$i].label,
+            act: Act::CompTrack($i),
+            unit: Unit::None,
+            range: (super::hyprsettings::OPTS[$i].min, super::hyprsettings::OPTS[$i].max),
+            step: step_1,
+            get: |s| s.comp[$i],
+            set: |s, v| s.comp[$i] = v,
+            // On release, like every other slider on a page with no
+            // SAVE button — the file is the storage.
+            save: |s| s.save_comp($i),
+        }
+    };
+}
+
+macro_rules! comp_toggle {
+    ($i:expr) => {
+        Ctrl::Toggle {
+            label: super::hyprsettings::OPTS[$i].label,
+            get: |s| s.comp[$i] != 0,
+            act: Act::CompFlip($i),
+        }
+    };
+}
+
 fn bg_chosen(s: &Settings) -> bool {
     s.current_background.is_some()
 }
@@ -2189,7 +2251,7 @@ static RAIL_ROWS: [Row; 10] = [
 /// of its own, seeded and saved exactly as that row is — see
 /// [`View::Wallpaper`]'s own doc for why a whole theme's worth of other
 /// controls should not stand between a person and this one file.
-static LOOKFEEL_PAGES: [Row; 4] = [
+static LOOKFEEL_PAGES: [Row; 5] = [
     row(Ctrl::Button {
         label: Text::Fixed("SETS"),
         kind: BtnKind::Wide,
@@ -2213,6 +2275,18 @@ static LOOKFEEL_PAGES: [Row; 4] = [
         kind: BtnKind::Wide,
         act: Act::OpenWallpaper,
     }),
+    // Only under Hyprland: every row of that page writes Hyprland's
+    // own config, so under any other compositor it is not a greyed-out
+    // entry but an absent one — the same "what the machine cannot do is
+    // not on the screen" rule COLOR SPACE follows on the rail above.
+    row_shown(
+        Ctrl::Button {
+            label: Text::Fixed("COMPOSITOR"),
+            kind: BtnKind::Wide,
+            act: Act::OpenCompositor,
+        },
+        |s| s.hyprland,
+    ),
 ];
 
 /// The navigation as a BAND, for the folded window: the same table,
@@ -2235,7 +2309,8 @@ fn rail_act(view: View) -> Act {
         | View::SoundLevels
         | View::ThemeEditor
         | View::LookFeelReset
-        | View::Wallpaper => Act::OpenLookFeel,
+        | View::Wallpaper
+        | View::Compositor => Act::OpenLookFeel,
         View::Grid => Act::OpenGrid,
         View::Boards => Act::OpenBoards,
         View::Color => Act::OpenColor,
@@ -2255,6 +2330,7 @@ fn kid_act(view: View) -> Option<Act> {
         View::Font => Some(Act::OpenFont),
         View::SoundLevels => Some(Act::OpenSoundLevels),
         View::Wallpaper => Some(Act::OpenWallpaper),
+        View::Compositor => Some(Act::OpenCompositor),
         _ => None,
     }
 }
@@ -2643,6 +2719,45 @@ static WALLPAPER_ZONES: [Zone; 2] = [
     Zone::Flow { when: always, rows: &WALLPAPER_ROWS },
     Zone::Pinned { rows: &EDITOR_BAR },
 ];
+
+/// [`View::Compositor`] — Hyprland's own look and feel.
+///
+/// Each row names an INDEX into [`hyprsettings::OPTS`], which is the
+/// one statement of what a setting is called, what it ranges over and
+/// what it defaults to. The label is repeated here because `Ctrl` wants
+/// a `&'static str` it can lay out without reaching for the table, and
+/// `the_compositor_rows_are_the_option_table` is what keeps the two
+/// from drifting: it checks every index, label, range and control kind
+/// against `OPTS` itself.
+///
+/// There is no SAVE button. Every row writes on release, the way the
+/// GRID sliders do — the file IS the storage
+/// ([`hyprsettings`]'s own note), and a settings page whose values
+/// were only real after a second press would be lying about what the
+/// compositor is currently doing.
+static COMPOSITOR_ROWS: [Row; 18] = [
+    row_after(Ctrl::Section { title: "WINDOWS" }, Gap::None),
+    row(comp_slider!(0)),
+    row(comp_slider!(1)),
+    row(comp_slider!(2)),
+    row_after(comp_slider!(3), Gap::Section),
+    row_after(Ctrl::Section { title: "TRANSPARENCY" }, Gap::None),
+    row(comp_slider!(4)),
+    row_after(comp_slider!(5), Gap::Section),
+    row_after(Ctrl::Section { title: "EFFECTS" }, Gap::None),
+    row(comp_toggle!(6)),
+    row(comp_slider!(7)),
+    row(comp_slider!(8)),
+    row(comp_toggle!(9)),
+    row_after(comp_toggle!(10), Gap::Section),
+    row_after(Ctrl::Section { title: "INPUT" }, Gap::None),
+    row(comp_slider!(11)),
+    row(comp_slider!(12)),
+    row(comp_toggle!(13)),
+];
+
+static COMPOSITOR_ZONES: [Zone; 1] =
+    [Zone::Flow { when: always, rows: &COMPOSITOR_ROWS }];
 
 /// The FONT view's two sections, one per column (§3). They are the same
 /// three questions asked twice, so they are the case columns were made
@@ -3108,7 +3223,7 @@ static ADDONS_ZONES: [Zone; 1] = [Zone::Flow { when: always, rows: &ADDONS_ROWS 
 /// wears CLOSE, because there is nowhere to go back to that the rail is
 /// not already showing, and the two pages the navigation does not list
 /// wear BACK.
-static PAGES: [Page; 11] = [
+static PAGES: [Page; 12] = [
     Page {
         view: View::LookFeel,
         title: "SETTINGS \u{2014} LOOK AND FEEL",
@@ -3171,6 +3286,12 @@ static PAGES: [Page; 11] = [
         title: "SETTINGS \u{2014} ADDONS",
         lead: Gap::Row,
         zones: &ADDONS_ZONES,
+    },
+    Page {
+        view: View::Compositor,
+        title: "SETTINGS \u{2014} COMPOSITOR",
+        lead: Gap::Section,
+        zones: &COMPOSITOR_ZONES,
     },
     Page {
         view: View::Wallpaper,
@@ -4156,6 +4277,15 @@ pub struct Settings {
     /// Management protocol. Everywhere else the button is a grey
     /// inscription and the stored preferences are ignored.
     pub color_enabled: bool,
+    /// Whether this session is running under Hyprland — the one gate on
+    /// the COMPOSITOR entry. Read once at construction from the
+    /// instance signature Hyprland sets for every client it starts, so
+    /// it is the compositor saying so rather than a guess.
+    hyprland: bool,
+    /// The COMPOSITOR page's values, in `hyprsettings::OPTS` order.
+    /// Seeded from the file that IS their storage, so the page opens on
+    /// what the compositor is actually doing.
+    comp: Vec<u32>,
     /// The COLOR view changed something; the application applies it.
     pub color_dirty: bool,
     /// **What came of the last colour request**, in the compositor's own
@@ -4498,6 +4628,8 @@ impl Settings {
             reset_screen: false,
             boards: Vec::new(),
             color_enabled: false,
+            hyprland: super::hyprsettings::running_under_hyprland(),
+            comp: super::hyprsettings::read(),
             color_dirty: false,
             // Empty and not a cheerful word: nothing has been applied
             // yet, and the note reads that as "nothing to report".
@@ -4583,6 +4715,26 @@ impl Settings {
         // say) must not leave one armed to hijack whatever the next page
         // draws in the same spot (2026-08-28's fix).
         self.dragging = None;
+    }
+
+    /// Writes the COMPOSITOR page's values and nudges the running
+    /// compositor so row `i`'s change shows at once.
+    ///
+    /// Both, and in that order. The file is what survives a restart —
+    /// Hyprland reloads it by itself, autoreload being on by default —
+    /// and the nudge is what makes the change visible before that
+    /// reload lands. A failed write is reported through the same
+    /// diagnostics channel the rest of this window uses; a failed nudge
+    /// is not reported at all, because the file already carried the
+    /// change and the only cost is a moment's wait.
+    fn save_comp(&self, i: usize) {
+        if let Err(e) = super::hyprsettings::write(&self.comp) {
+            eprintln!("nacelle-desktop: cannot save the compositor settings: {e}");
+            return;
+        }
+        if let (Some(o), Some(v)) = (super::hyprsettings::OPTS.get(i), self.comp.get(i)) {
+            super::hyprsettings::apply_live(o, *v);
+        }
     }
 
     fn sect_idx(sect: Sect) -> usize {
@@ -6702,6 +6854,25 @@ impl Settings {
                 self.seed_editor_from_theme();
                 self.go(View::Wallpaper);
             }
+            // Re-read on the way in, the way SOUND LEVELS and BLUR read
+            // their own state: the file is the storage, and a compositor
+            // reloaded from a hand edit while this window was shut would
+            // otherwise be shown values it is no longer using.
+            Act::OpenCompositor => {
+                self.comp = super::hyprsettings::read();
+                self.go(View::Compositor);
+            }
+            // A toggle acts on the press, so it writes here; the
+            // sliders write from their own `save` on release.
+            Act::CompFlip(i) => {
+                if let Some(v) = self.comp.get_mut(i) {
+                    *v = u32::from(*v == 0);
+                }
+                self.save_comp(i);
+            }
+            // The drag itself moves the value through the slider's own
+            // `set`; nothing to do on the press.
+            Act::CompTrack(_) => {}
             Act::OpenSoundLevels => {
                 let (vol, typing, ambient) = config::sound_prefs();
                 self.sound_volume = vol;
@@ -10187,6 +10358,68 @@ mod tests {
         assert!(s.dropdown.is_none(), "the list stayed open behind the editor");
         // And the way back out is the page it was opened from.
         assert!(parent_view(View::ThemeEditor) == Some(View::LookFeel));
+    }
+
+    /// The COMPOSITOR page IS `hyprsettings::OPTS`, and this is what
+    /// keeps it so. `Ctrl` needs a `&'static str` label and a literal
+    /// range, so each row repeats what the table already says — two
+    /// statements of one fact, which drift the moment an option's range
+    /// is corrected in one place and not the other. Every row is
+    /// checked here against the table: its index, its label, its
+    /// range, and that a flag is a toggle while everything else is a
+    /// slider.
+    #[test]
+    fn the_compositor_rows_are_the_option_table() {
+        use crate::widgets::hyprsettings::{Kind, OPTS};
+        let mut seen = vec![false; OPTS.len()];
+        for row in &COMPOSITOR_ROWS {
+            let (i, label, range, is_slider) = match row.ctrl {
+                Ctrl::Slider { label, act: Act::CompTrack(i), range, .. } => {
+                    (i, label, Some(range), true)
+                }
+                Ctrl::Toggle { label, act: Act::CompFlip(i), .. } => (i, label, None, false),
+                // Section headings carry no option.
+                _ => continue,
+            };
+            let o = OPTS.get(i).unwrap_or_else(|| panic!("row {label} indexes past the table"));
+            assert_eq!(label, o.label, "row {i} and the table disagree on the label");
+            assert_eq!(
+                is_slider,
+                o.kind != Kind::Flag,
+                "{} is drawn with the wrong control for its kind",
+                o.key
+            );
+            if let Some((lo, hi)) = range {
+                assert_eq!((lo, hi), (o.min, o.max), "{}'s range differs from the table", o.key);
+            }
+            assert!(!seen[i], "{} has two rows", o.key);
+            seen[i] = true;
+        }
+        for (i, got) in seen.iter().enumerate() {
+            assert!(*got, "{} is in the table with no row to change it", OPTS[i].key);
+        }
+    }
+
+    /// The gate the owner asked for: the entry exists only under
+    /// Hyprland, and it is ABSENT rather than greyed out — the rule
+    /// COLOR SPACE already follows one section above it.
+    #[test]
+    fn the_compositor_entry_stands_only_under_hyprland() {
+        let entry = LOOKFEEL_PAGES
+            .iter()
+            .find(|r| matches!(r.ctrl, Ctrl::Button { act: Act::OpenCompositor, .. }))
+            .expect("LOOK AND FEEL has no COMPOSITOR entry");
+        let mut s = furnished();
+        s.hyprland = false;
+        assert!(!(entry.when)(&s), "the entry stands with no Hyprland running");
+        s.hyprland = true;
+        assert!((entry.when)(&s), "the entry is missing under Hyprland");
+        assert!(
+            (entry.enabled)(&s),
+            "the entry must be ABSENT without Hyprland, never greyed out"
+        );
+        assert!(parent_view(View::Compositor) == Some(View::LookFeel));
+        assert!(kid_act(View::Compositor) == Some(Act::OpenCompositor));
     }
 
     /// LOOK AND FEEL's WALLPAPER entry: a door onto the SAME seeded
@@ -16587,7 +16820,15 @@ mod tests {
     fn the_rail_stands_on_every_page_and_says_which_page_it_is() {
         let _g = crate::widgets::theme_test_lock();
         theme::resolved();
-        theme::set_viewport(1080.0, 1.0);
+        // TALLER THAN THE USUAL FIXTURE, and the reason is the rail's
+        // own scrolling. This test hit-tests every rail entry in ONE
+        // frame, which only works while every entry is on screen at
+        // once; the rail scrolls when they are not
+        // ([`Settings::rail_scroll`]), and with LOOK AND FEEL unfolded
+        // to five pages the last section falls below the fold at
+        // 1080 px. That is the rail behaving correctly, so the fixture
+        // gives it the room rather than the window losing an entry.
+        theme::set_viewport(1440.0, 1.0);
         let mut fonts = nacelle::font::FontSystem::new();
         let mut both_levels = 0;
         for p in PAGES.iter() {
@@ -16597,8 +16838,13 @@ mod tests {
             // wears it is, and since 2026-08-18 nothing about the view
             // opens a section.
             let mut s = railed_at(p.view, &[rail_act(p.view)]);
+            // COMPOSITOR's own entry is ABSENT off Hyprland, so on a
+            // fixture that is not running one the page could not be
+            // reached and its rung could not be worn. Standing on the
+            // page means the compositor is there; the fixture says so.
+            s.hyprland = true;
             let mut dl = nacelle::draw::DrawList::new();
-            let mut ctx = probe(&mut dl, &mut fonts, 1080.0, 1.0);
+            let mut ctx = probe(&mut dl, &mut fonts, 1440.0, 1.0);
             s.draw(&mut ctx);
             let at = |act: Act| {
                 s.hits.iter().find(|&&(_, a)| a == act).map(|&(r, _)| r)
@@ -16608,9 +16854,15 @@ mod tests {
             // the view names wear the rung, and nothing else does.
             let mut marked: Vec<Act> = Vec::new();
             for act in rail_acts(&s) {
-                let r = at(act).unwrap_or_else(|| {
-                    panic!("{}: the rail lost an entry", p.title)
-                });
+                // An entry BELOW THE FOLD is not on this frame, and
+                // cannot be: the rail scrolls when its entries outrun
+                // the column ([`Settings::rail_scroll`]), and with a
+                // section unfolded to five pages the last section is
+                // reached by scrolling rather than by drawing. What
+                // this test claims is that the rail marks the RIGHT
+                // entry, not that every entry fits at once, so an
+                // off-screen one is passed over instead of failing.
+                let Some(r) = at(act) else { continue };
                 let want = act == rail_act(p.view) || kid_act(p.view) == Some(act);
                 let got = rung(s.button_state(&ctx, r, act)) == State::Selected;
                 assert_eq!(got, want, "{}: the rail marks the wrong entry", p.title);
